@@ -1,0 +1,17 @@
+[nostr]
+relays = ["wss://relay.mostro.network"]
+subscription_id = "mostro-push-listener"
+event_kinds = [1059]
+
+[push]
+fcm_enabled = true
+unifiedpush_enabled = true
+batch_delay_ms = 5000
+cooldown_ms = 60000
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rate_limit]
+max_per_minute = 60
