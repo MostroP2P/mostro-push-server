@@ -29,6 +29,11 @@ async fn main() -> std::io::Result<()> {
     // Keep UnifiedPush service separate for endpoint management
     let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone()));
 
+    // Load existing endpoints from disk
+    if let Err(e) = unifiedpush_service.load_endpoints().await {
+        log::error!("Failed to load UnifiedPush endpoints: {}", e);
+    }
+
     if config.push.fcm_enabled {
         info!("Initializing FCM push service");
         push_services.push(Box::new(FcmPush::new(config.clone())));

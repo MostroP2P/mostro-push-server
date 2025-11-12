@@ -29,3 +29,6 @@ firebase-service-account.json
 
 # Logs
 *.log
+
+# Runtime data directory
+/data/
