@@ -40,5 +40,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # Rate limiting
 governor = "0.6"
 
+# Hex encoding/decoding
+hex = "0.4"
+
 [dev-dependencies]
 mockito = "1.2"

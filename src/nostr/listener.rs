@@ -61,15 +61,24 @@ impl NostrListener {
         // Connect to all relays
         client.connect().await;
 
-        // Create filter for kind 1059 events (last 5 minutes)
+        // Create filter for kind 1059 events from Mostro instance
+        // Filter by author (Mostro pubkey) to only get events FROM this Mostro instance
+        // This implements Option B: Silent Push Global approach
         let since = Timestamp::now() - Duration::from_secs(300);
+        let pubkey_bytes = ::hex::decode(&self.config.nostr.mostro_pubkey)?;
+        let mostro_pubkey = XOnlyPublicKey::from_slice(&pubkey_bytes)?;
+
         let filter = Filter::new()
             .kinds(vec![Kind::Custom(1059)])
+            .author(mostro_pubkey)
             .since(since);
 
         // Subscribe to events
         client.subscribe(vec![filter]).await;
-        info!("Subscribed to kind 1059 events");
+        info!(
+            "Subscribed to kind 1059 events from Mostro instance: {}",
+            &self.config.nostr.mostro_pubkey[..16]
+        );
 
         // Handle incoming events
         let batching_manager = self.batching_manager.clone();

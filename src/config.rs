@@ -14,6 +14,7 @@ pub struct NostrConfig {
     pub relays: Vec<String>,
     pub subscription_id: String,
     pub event_kinds: Vec<u64>,
+    pub mostro_pubkey: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,11 +43,19 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect();
 
+        // Read Mostro instance public key from environment
+        let mostro_pubkey = env::var("MOSTRO_PUBKEY")
+            .unwrap_or_else(|_| {
+                // Default to the main Mostro instance pubkey
+                "82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390".to_string()
+            });
+
         Ok(Config {
             nostr: NostrConfig {
                 relays,
                 subscription_id: "mostro-push-listener".to_string(),
                 event_kinds: vec![1059],
+                mostro_pubkey,
             },
             push: PushConfig {
                 fcm_enabled: env::var("FCM_ENABLED")
