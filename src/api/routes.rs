@@ -1,6 +1,10 @@
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
-use log::info;
+use log::{info, error};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use crate::push::{PushService, UnifiedPushService};
 
 #[derive(Deserialize)]
 pub struct RegisterEndpointRequest {
@@ -38,31 +42,85 @@ async fn status() -> impl Responder {
 
 async fn register_endpoint(
     req: web::Json<RegisterEndpointRequest>,
+    unifiedpush: web::Data<Arc<UnifiedPushService>>,
 ) -> impl Responder {
     info!("Registering endpoint for device: {}", req.device_id);
-    // TODO: Store endpoint in push service
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "message": "Endpoint registered"
-    }))
+
+    match unifiedpush.register_endpoint(
+        req.device_id.clone(),
+        req.endpoint_url.clone(),
+    ).await {
+        Ok(_) => {
+            info!("Successfully registered endpoint for device: {}", req.device_id);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "Endpoint registered successfully"
+            }))
+        }
+        Err(e) => {
+            error!("Failed to register endpoint: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to register endpoint: {}", e)
+            }))
+        }
+    }
 }
 
 async fn unregister_endpoint(
     req: web::Json<RegisterEndpointRequest>,
+    unifiedpush: web::Data<Arc<UnifiedPushService>>,
 ) -> impl Responder {
     info!("Unregistering endpoint for device: {}", req.device_id);
-    // TODO: Remove endpoint from push service
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "message": "Endpoint unregistered"
-    }))
+
+    match unifiedpush.unregister_endpoint(&req.device_id).await {
+        Ok(_) => {
+            info!("Successfully unregistered endpoint for device: {}", req.device_id);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "Endpoint unregistered successfully"
+            }))
+        }
+        Err(e) => {
+            error!("Failed to unregister endpoint: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to unregister endpoint: {}", e)
+            }))
+        }
+    }
 }
 
-async fn send_test_notification() -> impl Responder {
-    info!("Sending test notification");
-    // TODO: Trigger test notification
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "message": "Test notification sent"
-    }))
+async fn send_test_notification(
+    push_services: web::Data<Arc<Mutex<Vec<Box<dyn PushService>>>>>,
+) -> impl Responder {
+    info!("Sending test notification through all push services");
+
+    let services = push_services.lock().await;
+    let mut success_count = 0;
+    let mut error_count = 0;
+
+    for service in services.iter() {
+        match service.send_silent_push().await {
+            Ok(_) => {
+                success_count += 1;
+            }
+            Err(e) => {
+                error!("Failed to send test notification: {}", e);
+                error_count += 1;
+            }
+        }
+    }
+
+    if error_count == 0 {
+        HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "message": format!("Test notification sent through {} service(s)", success_count)
+        }))
+    } else {
+        HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": format!("{} succeeded, {} failed", success_count, error_count)
+        }))
+    }
 }

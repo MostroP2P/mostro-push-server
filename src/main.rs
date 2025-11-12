@@ -26,6 +26,9 @@ async fn main() -> std::io::Result<()> {
     // Initialize push services
     let mut push_services: Vec<Box<dyn PushService>> = Vec::new();
 
+    // Keep UnifiedPush service separate for endpoint management
+    let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone()));
+
     if config.push.fcm_enabled {
         info!("Initializing FCM push service");
         push_services.push(Box::new(FcmPush::new(config.clone())));
@@ -33,7 +36,7 @@ async fn main() -> std::io::Result<()> {
 
     if config.push.unifiedpush_enabled {
         info!("Initializing UnifiedPush service");
-        push_services.push(Box::new(UnifiedPushService::new(config.clone())));
+        push_services.push(Box::new(Arc::clone(&unifiedpush_service)));
     }
 
     let push_services = Arc::new(Mutex::new(push_services));
@@ -51,6 +54,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(push_services.clone()))
+            .app_data(web::Data::new(unifiedpush_service.clone()))
             .configure(api::routes::configure)
     })
     .bind(server_addr)?
