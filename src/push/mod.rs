@@ -19,3 +19,11 @@ impl PushService for Arc<UnifiedPushService> {
         (**self).send_silent_push().await
     }
 }
+
+// Implement PushService for Arc<FcmPush> to allow shared ownership
+#[async_trait]
+impl PushService for Arc<FcmPush> {
+    async fn send_silent_push(&self) -> Result<(), Box<dyn std::error::Error>> {
+        (**self).send_silent_push().await
+    }
+}

@@ -43,5 +43,9 @@ governor = "0.6"
 # Hex encoding/decoding
 hex = "0.4"
 
+# JWT for Google OAuth
+jsonwebtoken = "9.2"
+base64 = "0.22"
+
 [dev-dependencies]
 mockito = "1.2"

@@ -34,9 +34,22 @@ async fn main() -> std::io::Result<()> {
         log::error!("Failed to load UnifiedPush endpoints: {}", e);
     }
 
+    // Initialize FCM service if enabled
     if config.push.fcm_enabled {
         info!("Initializing FCM push service");
-        push_services.push(Box::new(FcmPush::new(config.clone())));
+        let fcm_service = Arc::new(FcmPush::new(config.clone()));
+
+        // Try to initialize FCM authentication (optional - may fail if no credentials)
+        match fcm_service.init().await {
+            Ok(_) => {
+                info!("FCM service initialized successfully");
+                push_services.push(Box::new(Arc::clone(&fcm_service)));
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize FCM service: {}", e);
+                log::warn!("FCM notifications will be disabled. Set FIREBASE_SERVICE_ACCOUNT_PATH to enable.");
+            }
+        }
     }
 
     if config.push.unifiedpush_enabled {
