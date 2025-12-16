@@ -7,6 +7,8 @@ pub struct Config {
     pub push: PushConfig,
     pub server: ServerConfig,
     pub rate_limit: RateLimitConfig,
+    pub crypto: CryptoConfig,
+    pub store: StoreConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,17 @@ pub struct RateLimitConfig {
     pub max_per_minute: u32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CryptoConfig {
+    pub server_private_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StoreConfig {
+    pub token_ttl_hours: u64,
+    pub cleanup_interval_hours: u64,
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let relays = env::var("NOSTR_RELAYS")?
@@ -55,7 +68,8 @@ impl Config {
                 relays,
                 subscription_id: "mostro-push-listener".to_string(),
                 event_kinds: vec![1059],
-                mostro_pubkey,
+                mostro_pubkey: env::var("MOSTRO_PUBKEY")
+                    .unwrap_or_else(|_| "dbe0b1be7aafd3cfba92d7463571bf438f09d24f4e021d9fe208ed0ab5823711".to_string()),
             },
             push: PushConfig {
                 fcm_enabled: env::var("FCM_ENABLED")
@@ -81,6 +95,18 @@ impl Config {
             rate_limit: RateLimitConfig {
                 max_per_minute: env::var("RATE_LIMIT_PER_MINUTE")
                     .unwrap_or_else(|_| "60".to_string())
+                    .parse()?,
+            },
+            crypto: CryptoConfig {
+                server_private_key: env::var("SERVER_PRIVATE_KEY")
+                    .map_err(|_| "SERVER_PRIVATE_KEY environment variable is required")?,
+            },
+            store: StoreConfig {
+                token_ttl_hours: env::var("TOKEN_TTL_HOURS")
+                    .unwrap_or_else(|_| "48".to_string())
+                    .parse()?,
+                cleanup_interval_hours: env::var("CLEANUP_INTERVAL_HOURS")
+                    .unwrap_or_else(|_| "1".to_string())
                     .parse()?,
             },
         })
