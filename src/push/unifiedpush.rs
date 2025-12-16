@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{info, error, warn};
+use log::{info, error, debug};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use tokio::fs;
 
 use crate::config::Config;
+use crate::crypto::Platform;
 use super::PushService;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,5 +160,40 @@ impl PushService for UnifiedPushService {
         }
 
         Ok(())
+    }
+
+    async fn send_to_token(
+        &self,
+        device_token: &str,
+        _platform: &Platform,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // For UnifiedPush, the device_token IS the endpoint URL
+        let payload = serde_json::json!({
+            "type": "silent_wake",
+            "timestamp": chrono::Utc::now().timestamp()
+        });
+
+        debug!("Sending UnifiedPush to endpoint: {}...", &device_token[..30.min(device_token.len())]);
+
+        let response = self.client
+            .post(device_token)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            info!("UnifiedPush notification sent successfully");
+            Ok(())
+        } else {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            error!("UnifiedPush error: {} - {}", status, error_text);
+            Err(format!("UnifiedPush send failed: {}", status).into())
+        }
+    }
+
+    fn supports_platform(&self, platform: &Platform) -> bool {
+        // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.)
+        matches!(platform, Platform::Android)
     }
 }

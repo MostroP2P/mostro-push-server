@@ -7,9 +7,19 @@ pub mod unifiedpush;
 pub use fcm::FcmPush;
 pub use unifiedpush::UnifiedPushService;
 
+use crate::crypto::Platform;
+
 #[async_trait]
 pub trait PushService: Send + Sync {
     async fn send_silent_push(&self) -> Result<(), Box<dyn std::error::Error>>;
+    
+    async fn send_to_token(
+        &self,
+        device_token: &str,
+        platform: &Platform,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+    
+    fn supports_platform(&self, platform: &Platform) -> bool;
 }
 
 // Implement PushService for Arc<UnifiedPushService> to allow shared ownership
