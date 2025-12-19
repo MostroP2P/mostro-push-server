@@ -82,6 +82,16 @@ impl FcmPush {
         }
     }
 
+    /// Initialize FCM service - validates that we can get an access token
+    pub async fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.service_account.is_none() {
+            return Err("No service account configured".into());
+        }
+        // Try to get an access token to validate credentials
+        self.get_access_token().await?;
+        Ok(())
+    }
+
     async fn get_access_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Check cached token
         {

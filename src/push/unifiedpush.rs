@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{info, error, debug};
+use log::{info, error, debug, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
