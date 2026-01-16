@@ -26,10 +26,10 @@ echo "📝 Configurando secrets..."
 # Configurar todos los secrets
 flyctl secrets set \
   NOSTR_RELAYS="wss://relay.mostro.network" \
-  MOSTRO_PUBKEY="0a537332f2d569059add3fd2e376e1d6b8c1e1b9f7a999ac2592b4afbba74a00" \
-  SERVER_PRIVATE_KEY="ccc61d16dfd10fbcca1322fdf5fed6cb1863db4e27030ae164dbcbfcc263154d" \
-  FIREBASE_PROJECT_ID="mostro-test" \
-  FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/mostro-test-firebase-adminsdk-fbsvc-9da9480201.json" \
+  MOSTRO_PUBKEY="82fa8cb978b43c79b2156585bac2c022276a21d2aead6d9f7c575c005be88390" \
+  SERVER_PRIVATE_KEY="2dfb72f7e130b4c6f971c5bac364b9f854f2409de51fb53d4dbd3e17bd69b98e" \
+  FIREBASE_PROJECT_ID="mostro-mobile" \
+  FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/mostro-mobile-firebase-adminsdk-fbsvc-1ff8f6232c.json" \
   FCM_ENABLED="true" \
   UNIFIEDPUSH_ENABLED="false" \
   SERVER_HOST="0.0.0.0" \
