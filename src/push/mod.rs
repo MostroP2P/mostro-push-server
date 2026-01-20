@@ -7,7 +7,7 @@ pub mod unifiedpush;
 pub use fcm::FcmPush;
 pub use unifiedpush::UnifiedPushService;
 
-use crate::crypto::Platform;
+use crate::store::Platform;
 
 #[async_trait]
 pub trait PushService: Send + Sync {

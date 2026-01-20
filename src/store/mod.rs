@@ -1,9 +1,24 @@
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
+use serde::Serialize;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-use crate::crypto::Platform;
+/// Platform identifier for push notifications
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum Platform {
+    Android,
+    Ios,
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Platform::Android => write!(f, "android"),
+            Platform::Ios => write!(f, "ios"),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RegisteredToken {
@@ -39,7 +54,7 @@ impl TokenStore {
 
         let mut tokens = self.tokens.write().await;
         tokens.insert(trade_pubkey.clone(), token);
-        
+
         info!(
             "Registered token for trade_pubkey: {}... (total: {})",
             &trade_pubkey[..16.min(trade_pubkey.len())],
@@ -50,7 +65,7 @@ impl TokenStore {
     pub async fn unregister(&self, trade_pubkey: &str) -> bool {
         let mut tokens = self.tokens.write().await;
         let removed = tokens.remove(trade_pubkey).is_some();
-        
+
         if removed {
             info!(
                 "Unregistered token for trade_pubkey: {}... (total: {})",
@@ -63,7 +78,7 @@ impl TokenStore {
                 &trade_pubkey[..16.min(trade_pubkey.len())]
             );
         }
-        
+
         removed
     }
 
@@ -76,17 +91,17 @@ impl TokenStore {
         let mut tokens = self.tokens.write().await;
         let now = Utc::now();
         let ttl = chrono::Duration::hours(self.ttl_hours as i64);
-        
+
         let initial_count = tokens.len();
         tokens.retain(|_, token| {
             now.signed_duration_since(token.registered_at) < ttl
         });
-        
+
         let removed = initial_count - tokens.len();
         if removed > 0 {
             info!("Cleaned up {} expired tokens (remaining: {})", removed, tokens.len());
         }
-        
+
         removed
     }
 
@@ -98,14 +113,14 @@ impl TokenStore {
         let tokens = self.tokens.read().await;
         let mut android_count = 0;
         let mut ios_count = 0;
-        
+
         for token in tokens.values() {
             match token.platform {
                 Platform::Android => android_count += 1,
                 Platform::Ios => ios_count += 1,
             }
         }
-        
+
         TokenStoreStats {
             total: tokens.len(),
             android: android_count,
@@ -126,7 +141,7 @@ pub fn start_cleanup_task(store: std::sync::Arc<TokenStore>, interval_hours: u64
         let mut interval = tokio::time::interval(
             tokio::time::Duration::from_secs(interval_hours * 3600)
         );
-        
+
         loop {
             interval.tick().await;
             let removed = store.cleanup_expired().await;

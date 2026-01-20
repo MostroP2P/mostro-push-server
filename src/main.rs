@@ -4,16 +4,18 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 mod config;
-mod crypto;
 mod nostr;
 mod push;
 mod api;
 mod store;
 mod utils;
 
+// Keep crypto module for future Phase 4 implementation
+#[allow(dead_code)]
+mod crypto;
+
 use api::routes::AppState;
 use config::Config;
-use crypto::TokenCrypto;
 use nostr::NostrListener;
 use push::{PushService, FcmPush, UnifiedPushService};
 use store::TokenStore;
@@ -24,24 +26,19 @@ async fn main() -> std::io::Result<()> {
     dotenv::dotenv().ok();
 
     info!("Starting Mostro Push Backend v{}...", env!("CARGO_PKG_VERSION"));
+    info!("Phase 3: Token registration without encryption");
+    info!("Encryption will be enabled in Phase 4");
 
     // Load configuration
     let config = Config::from_env().expect("Failed to load configuration");
 
-    // Initialize token crypto
-    let token_crypto = Arc::new(
-        TokenCrypto::new(&config.crypto.server_private_key)
-            .expect("Failed to initialize token crypto - check SERVER_PRIVATE_KEY")
-    );
-    info!("Server public key: {}", token_crypto.public_key_hex());
-
     // Initialize token store
     let token_store = Arc::new(TokenStore::new(config.store.token_ttl_hours));
-    
+
     // Start cleanup task
     store::start_cleanup_task(token_store.clone(), config.store.cleanup_interval_hours);
-    info!("Token store initialized (TTL: {}h, cleanup interval: {}h)", 
-        config.store.token_ttl_hours, 
+    info!("Token store initialized (TTL: {}h, cleanup interval: {}h)",
+        config.store.token_ttl_hours,
         config.store.cleanup_interval_hours
     );
 
@@ -83,11 +80,11 @@ async fn main() -> std::io::Result<()> {
 
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
-        config.clone(), 
+        config.clone(),
         push_services.clone(),
         token_store.clone(),
     ).expect("Failed to initialize Nostr listener - check MOSTRO_PUBKEY");
-    
+
     tokio::spawn(async move {
         nostr_listener.start().await;
     });
@@ -95,17 +92,16 @@ async fn main() -> std::io::Result<()> {
     // Create app state for HTTP handlers
     let app_state = AppState {
         token_store: token_store.clone(),
-        token_crypto: token_crypto.clone(),
     };
 
     // Start HTTP API server
     let server_addr = format!("{}:{}", config.server.host, config.server.port);
     info!("Starting HTTP server on {}", server_addr);
     info!("API endpoints:");
-    info!("  GET  /api/health    - Health check");
-    info!("  GET  /api/status    - Server status with token stats");
-    info!("  GET  /api/info      - Server public key info");
-    info!("  POST /api/register  - Register encrypted token");
+    info!("  GET  /api/health     - Health check");
+    info!("  GET  /api/status     - Server status with token stats");
+    info!("  GET  /api/info       - Server info");
+    info!("  POST /api/register   - Register token (plaintext)");
     info!("  POST /api/unregister - Unregister token");
 
     HttpServer::new(move || {

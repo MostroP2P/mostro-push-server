@@ -1,16 +1,16 @@
 use actix_web::{web, HttpResponse, Responder};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use log::{info, error, warn};
+use log::{info, warn};
 use std::sync::Arc;
 
-use crate::crypto::{TokenCrypto, ENCRYPTED_TOKEN_SIZE};
-use crate::store::{TokenStore, TokenStoreStats};
+use crate::store::{TokenStore, TokenStoreStats, Platform};
 
+/// Request for registering a plaintext token (Phase 3 - unencrypted)
 #[derive(Deserialize)]
 pub struct RegisterTokenRequest {
     pub trade_pubkey: String,
-    pub encrypted_token: String,
+    pub token: String,
+    pub platform: String,
 }
 
 #[derive(Deserialize)]
@@ -22,7 +22,6 @@ pub struct UnregisterTokenRequest {
 pub struct StatusResponse {
     pub status: String,
     pub version: String,
-    pub server_pubkey: String,
     pub tokens: TokenStoreStats,
 }
 
@@ -37,7 +36,6 @@ pub struct RegisterResponse {
 #[derive(Clone)]
 pub struct AppState {
     pub token_store: Arc<TokenStore>,
-    pub token_crypto: Arc<TokenCrypto>,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -59,22 +57,21 @@ async fn status(
     state: web::Data<AppState>,
 ) -> impl Responder {
     let stats = state.token_store.get_stats().await;
-    
+
     HttpResponse::Ok().json(StatusResponse {
         status: "running".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        server_pubkey: state.token_crypto.public_key_hex(),
         tokens: stats,
     })
 }
 
-async fn server_info(
-    state: web::Data<AppState>,
-) -> impl Responder {
+async fn server_info() -> impl Responder {
+    // Phase 3: No encryption, so no server pubkey needed
+    // In Phase 4/5, this will return the server's public key for token encryption
     HttpResponse::Ok().json(serde_json::json!({
-        "server_pubkey": state.token_crypto.public_key_hex(),
         "version": env!("CARGO_PKG_VERSION"),
-        "encrypted_token_size": ENCRYPTED_TOKEN_SIZE,
+        "encryption_enabled": false,
+        "note": "Token encryption will be enabled in a future phase"
     }))
 }
 
@@ -82,7 +79,7 @@ async fn register_token(
     state: web::Data<AppState>,
     req: web::Json<RegisterTokenRequest>,
 ) -> impl Responder {
-    info!("Registering token for trade_pubkey: {}...", 
+    info!("Registering token for trade_pubkey: {}...",
         &req.trade_pubkey[..16.min(req.trade_pubkey.len())]);
 
     // Validate trade_pubkey format (should be 64 hex chars)
@@ -95,69 +92,47 @@ async fn register_token(
         });
     }
 
-    // Decode base64 encrypted token
-    let encrypted_token = match base64::engine::general_purpose::STANDARD.decode(
-        &req.encrypted_token,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            warn!("Invalid base64 in encrypted_token: {}", e);
-            return HttpResponse::BadRequest().json(RegisterResponse {
-                success: false,
-                message: "Invalid base64 encoding in encrypted_token".to_string(),
-                platform: None,
-            });
-        }
-    };
-
-    // Validate token size
-    if encrypted_token.len() != ENCRYPTED_TOKEN_SIZE {
-        warn!(
-            "Invalid encrypted token size: expected {}, got {}",
-            ENCRYPTED_TOKEN_SIZE,
-            encrypted_token.len()
-        );
+    // Validate token is not empty
+    if req.token.is_empty() {
+        warn!("Empty token provided");
         return HttpResponse::BadRequest().json(RegisterResponse {
             success: false,
-            message: format!(
-                "Invalid encrypted token size (expected {} bytes, got {})",
-                ENCRYPTED_TOKEN_SIZE,
-                encrypted_token.len()
-            ),
+            message: "Token cannot be empty".to_string(),
             platform: None,
         });
     }
 
-    // Decrypt the token
-    let decrypted = match state.token_crypto.decrypt_token(&encrypted_token) {
-        Ok(token) => token,
-        Err(e) => {
-            error!("Failed to decrypt token: {}", e);
+    // Parse platform
+    let platform = match req.platform.to_lowercase().as_str() {
+        "android" => Platform::Android,
+        "ios" => Platform::Ios,
+        _ => {
+            warn!("Invalid platform: {}", req.platform);
             return HttpResponse::BadRequest().json(RegisterResponse {
                 success: false,
-                message: format!("Failed to decrypt token: {}", e),
+                message: format!("Invalid platform '{}' (expected 'android' or 'ios')", req.platform),
                 platform: None,
             });
         }
     };
 
-    // Store the token
+    // Store the token directly (no decryption in Phase 3)
     state.token_store.register(
         req.trade_pubkey.clone(),
-        decrypted.device_token,
-        decrypted.platform.clone(),
+        req.token.clone(),
+        platform.clone(),
     ).await;
 
     info!(
         "Successfully registered {} token for trade_pubkey: {}...",
-        decrypted.platform,
+        platform,
         &req.trade_pubkey[..16]
     );
 
     HttpResponse::Ok().json(RegisterResponse {
         success: true,
         message: "Token registered successfully".to_string(),
-        platform: Some(decrypted.platform.to_string()),
+        platform: Some(platform.to_string()),
     })
 }
 
@@ -165,7 +140,7 @@ async fn unregister_token(
     state: web::Data<AppState>,
     req: web::Json<UnregisterTokenRequest>,
 ) -> impl Responder {
-    info!("Unregistering token for trade_pubkey: {}...", 
+    info!("Unregistering token for trade_pubkey: {}...",
         &req.trade_pubkey[..16.min(req.trade_pubkey.len())]);
 
     // Validate trade_pubkey format

@@ -10,7 +10,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
-use crate::crypto::Platform;
+use crate::store::Platform;
 use super::PushService;
 
 #[derive(Debug, Deserialize)]
@@ -157,26 +157,56 @@ impl FcmPush {
         Ok(token_response.access_token)
     }
 
-    fn build_silent_payload_for_token(device_token: &str) -> serde_json::Value {
+    /// Build FCM payload with notification fallback
+    ///
+    /// Strategy:
+    /// - Sends both `notification` (fallback) and `data` (for app processing)
+    /// - Uses a fixed tag "mostro-trade" so notifications can be replaced
+    /// - When app is alive: background service shows detailed notification with same tag,
+    ///   which REPLACES the generic FCM notification
+    /// - When app is killed: FCM shows generic notification as fallback
+    fn build_payload_for_token(device_token: &str) -> serde_json::Value {
         json!({
             "message": {
                 "token": device_token,
+                // Notification field - shown by FCM when app is killed (fallback)
+                "notification": {
+                    "title": "Mostro",
+                    "body": "You have an update on your trade"
+                },
+                // Data field - used by app to process when awake
                 "data": {
-                    "type": "silent_wake",
+                    "type": "trade_update",
                     "source": "mostro-push-server",
                     "timestamp": chrono::Utc::now().timestamp().to_string()
                 },
+                // Android-specific config
                 "android": {
-                    "priority": "high"
+                    "priority": "high",
+                    "notification": {
+                        // Tag allows replacing notification with same tag
+                        "tag": "mostro-trade",
+                        // Use default channel (app should create "mostro_notifications" channel)
+                        "channel_id": "mostro_notifications",
+                        // Don't show if app is in foreground
+                        "default_vibrate_timings": true
+                    }
                 },
+                // iOS-specific config
                 "apns": {
                     "headers": {
                         "apns-priority": "10",
-                        "apns-push-type": "background"
+                        "apns-collapse-id": "mostro-trade"
                     },
                     "payload": {
                         "aps": {
-                            "content-available": 1
+                            "alert": {
+                                "title": "Mostro",
+                                "body": "You have an update on your trade"
+                            },
+                            "content-available": 1,
+                            "mutable-content": 1,
+                            "thread-id": "mostro-trade"
                         }
                     }
                 }
@@ -248,7 +278,7 @@ impl PushService for FcmPush {
             self.project_id
         );
 
-        let payload = Self::build_silent_payload_for_token(device_token);
+        let payload = Self::build_payload_for_token(device_token);
 
         debug!("Sending FCM to token: {}...", &device_token[..20.min(device_token.len())]);
 

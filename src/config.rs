@@ -97,9 +97,11 @@ impl Config {
                     .unwrap_or_else(|_| "60".to_string())
                     .parse()?,
             },
+            // Phase 3: Crypto config is optional (encryption disabled)
+            // Phase 4 will require SERVER_PRIVATE_KEY
             crypto: CryptoConfig {
                 server_private_key: env::var("SERVER_PRIVATE_KEY")
-                    .map_err(|_| "SERVER_PRIVATE_KEY environment variable is required")?,
+                    .unwrap_or_else(|_| "0000000000000000000000000000000000000000000000000000000000000001".to_string()),
             },
             store: StoreConfig {
                 token_ttl_hours: env::var("TOKEN_TTL_HOURS")

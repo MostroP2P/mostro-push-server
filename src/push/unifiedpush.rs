@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use tokio::fs;
 
 use crate::config::Config;
-use crate::crypto::Platform;
+use crate::store::Platform;
 use super::PushService;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

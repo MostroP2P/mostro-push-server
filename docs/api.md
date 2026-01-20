@@ -6,6 +6,10 @@
 http://localhost:8080/api
 ```
 
+## Current Phase: Phase 3 (Unencrypted)
+
+Token registration currently accepts plaintext tokens. Encryption will be added in Phase 4.
+
 ## Endpoints
 
 ### Health Check
@@ -27,26 +31,30 @@ GET /api/health
 
 ### Server Info
 
-Get server public key and version. The public key is needed by clients to encrypt tokens.
+Get server version and encryption status.
 
 ```http
 GET /api/info
 ```
 
-**Response**
+**Response (Phase 3 - Unencrypted)**
 ```json
 {
-  "server_pubkey": "02b0b5fbc14b11279c415601e74c592b86a54cef4cfdd7b6e60382db83e68855c7",
   "version": "0.2.0",
-  "encrypted_token_size": 281
+  "encryption_enabled": false,
+  "note": "Token encryption will be enabled in a future phase"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `server_pubkey` | string | Compressed secp256k1 public key (33 bytes, hex encoded) |
-| `version` | string | Server version |
-| `encrypted_token_size` | number | Expected size of encrypted token in bytes |
+**Response (Phase 4 - Encrypted, Future)**
+```json
+{
+  "server_pubkey": "02b0b5fbc14b11279c415601e74c592b86a54cef4cfdd7b6e60382db83e68855c7",
+  "version": "0.3.0",
+  "encryption_enabled": true,
+  "encrypted_token_size": 281
+}
+```
 
 ---
 
@@ -63,7 +71,6 @@ GET /api/status
 {
   "status": "running",
   "version": "0.2.0",
-  "server_pubkey": "02b0b5fbc14b11279c415601e74c592b86a54cef4cfdd7b6e60382db83e68855c7",
   "tokens": {
     "total": 5,
     "android": 3,
@@ -76,25 +83,27 @@ GET /api/status
 
 ### Register Token
 
-Register an encrypted device token for a specific trade.
+Register a device token for a specific trade.
 
 ```http
 POST /api/register
 Content-Type: application/json
 ```
 
-**Request Body**
+**Request Body (Phase 3 - Plaintext)**
 ```json
 {
   "trade_pubkey": "a1b2c3d4e5f6...64 hex chars...",
-  "encrypted_token": "base64_encoded_encrypted_token"
+  "token": "fcm-device-token-string",
+  "platform": "android"
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `trade_pubkey` | string | 64-character hex public key of the trade |
-| `encrypted_token` | string | Base64-encoded encrypted token (281 bytes when decoded) |
+| `token` | string | FCM/APNs device token |
+| `platform` | string | `"android"` or `"ios"` |
 
 **Success Response (200)**
 ```json
@@ -118,10 +127,8 @@ Content-Type: application/json
 | Error | Description |
 |-------|-------------|
 | Invalid trade_pubkey format | Not 64 hex characters |
-| Invalid base64 encoding | encrypted_token is not valid base64 |
-| Invalid encrypted token size | Decoded token is not 281 bytes |
-| Failed to decrypt token | Decryption failed (wrong key, corrupted data) |
-| Invalid platform identifier | Platform byte not recognized |
+| Token cannot be empty | Empty token string provided |
+| Invalid platform | Platform not "android" or "ios" |
 
 ---
 
@@ -159,38 +166,6 @@ Content-Type: application/json
 
 ---
 
-## Encrypted Token Format
-
-The `encrypted_token` field must contain a base64-encoded blob with the following structure:
-
-```
-┌─────────────────────┬────────────┬─────────────────────────────────┐
-│ Ephemeral Pubkey    │   Nonce    │          Ciphertext             │
-│     (33 bytes)      │ (12 bytes) │  (220 + 16 = 236 bytes)         │
-└─────────────────────┴────────────┴─────────────────────────────────┘
-                                            │
-                                            ▼
-                              ┌─────────────────────────────┐
-                              │   Decrypted Payload         │
-                              │   (220 bytes, padded)       │
-                              ├─────────────────────────────┤
-                              │ Platform (1 byte)           │
-                              │ Token Length (2 bytes, BE)  │
-                              │ Device Token (variable)     │
-                              │ Random Padding (remainder)  │
-                              └─────────────────────────────┘
-```
-
-**Total Size**: 33 + 12 + 220 + 16 = **281 bytes**
-
-**Platform Byte Values**
-| Value | Platform |
-|-------|----------|
-| 0x01 | iOS |
-| 0x02 | Android |
-
----
-
 ## Example: cURL
 
 ### Get Server Info
@@ -198,13 +173,14 @@ The `encrypted_token` field must contain a base64-encoded blob with the followin
 curl http://localhost:8080/api/info
 ```
 
-### Register Token
+### Register Token (Phase 3 - Plaintext)
 ```bash
 curl -X POST http://localhost:8080/api/register \
   -H "Content-Type: application/json" \
   -d '{
     "trade_pubkey": "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd",
-    "encrypted_token": "Aq0LX7wUsREnwUVgHnTFkrhqVc70z917bmA4LbgOaIVcxwAAAAAAAAAAAA..."
+    "token": "dMw5ABC123:APA91bHtest-fcm-token-here",
+    "platform": "android"
   }'
 ```
 
@@ -233,3 +209,28 @@ curl http://localhost:8080/api/status
 | 500 | Internal Server Error |
 
 All responses are JSON with `Content-Type: application/json`.
+
+---
+
+## Phase 4: Encrypted Token Format (Future)
+
+When encryption is enabled in Phase 4, the register endpoint will accept encrypted tokens:
+
+**Request Body (Phase 4 - Encrypted)**
+```json
+{
+  "trade_pubkey": "a1b2c3d4e5f6...64 hex chars...",
+  "encrypted_token": "base64_encoded_encrypted_token"
+}
+```
+
+The `encrypted_token` field will contain a base64-encoded blob with the following structure:
+
+```
+┌─────────────────────┬────────────┬─────────────────────────────────┐
+│ Ephemeral Pubkey    │   Nonce    │          Ciphertext             │
+│     (33 bytes)      │ (12 bytes) │  (220 + 16 = 236 bytes)         │
+└─────────────────────┴────────────┴─────────────────────────────────┘
+```
+
+See [cryptography.md](./cryptography.md) for the full encryption specification.
