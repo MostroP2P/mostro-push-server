@@ -70,18 +70,17 @@ impl NostrListener {
         // Connect to all relays
         client.connect().await;
 
-        // Create filter for kind 1059 events from Mostro
+        // Create filter for kind 1059 (Gift Wrap) events
+        // Note: We don't filter by author because Gift Wrap uses ephemeral keys
+        // The actual sender (Mostro) is encrypted inside. We filter by 'p' tag later.
         let since = Timestamp::now() - Duration::from_secs(60);
-        let mostro_pubkey = XOnlyPublicKey::from_str(&self.mostro_pubkey)
-            .map_err(|e| format!("Invalid mostro pubkey: {}", e))?;
         let filter = Filter::new()
             .kinds(vec![Kind::Custom(1059)])
-            .author(mostro_pubkey)
             .since(since);
 
         // Subscribe to events
         client.subscribe(vec![filter]).await;
-        info!("Subscribed to kind 1059 events from Mostro: {}", self.config.nostr.mostro_pubkey);
+        info!("Subscribed to kind 1059 (Gift Wrap) events on relay");
 
         // Handle incoming events
         let token_store = self.token_store.clone();
@@ -91,7 +90,8 @@ impl NostrListener {
             .handle_notifications(|notification| async {
                 if let RelayPoolNotification::Event { event, .. } = notification {
                     if event.kind == Kind::Custom(1059) {
-                        debug!("Received kind 1059 event: {}", event.id);
+                        // Log every Gift Wrap event received
+                        info!("Received Gift Wrap (kind 1059) event: {}", event.id);
 
                         // Extract recipient from 'p' tag
                         let recipient_pubkey = event.tags.iter()
@@ -105,12 +105,12 @@ impl NostrListener {
                             });
 
                         if let Some(trade_pubkey) = recipient_pubkey {
-                            debug!("Event recipient: {}...", &trade_pubkey[..16]);
+                            info!("Event recipient (p tag): {}...", &trade_pubkey[..16.min(trade_pubkey.len())]);
 
                             // Look up token in store
                             if let Some(registered_token) = token_store.get(&trade_pubkey).await {
                                 info!(
-                                    "Found registered token for {}..., sending push to {} device",
+                                    "MATCH! Found registered token for {}..., sending push to {} device",
                                     &trade_pubkey[..16],
                                     registered_token.platform
                                 );
@@ -134,10 +134,10 @@ impl NostrListener {
                                     }
                                 }
                             } else {
-                                debug!("No registered token for {}...", &trade_pubkey[..16]);
+                                debug!("No registered token for {}...", &trade_pubkey[..16.min(trade_pubkey.len())]);
                             }
                         } else {
-                            debug!("No 'p' tag found in event {}", event.id);
+                            warn!("No 'p' tag found in Gift Wrap event {}", event.id);
                         }
                     }
                 }
