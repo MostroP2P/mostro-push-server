@@ -26,6 +26,7 @@ target
 # Firebase service account
 firebase-service-account.json
 *.json
+!.planning/**/*.json
 
 # Logs
 *.log
