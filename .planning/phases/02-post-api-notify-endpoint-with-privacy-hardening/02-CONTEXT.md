@@ -71,6 +71,12 @@ This phase is also VERIFY-03: a manual runbook documenting how an operator verif
   The `deploy-fly.sh` RUST_LOG flip (D-15) goes in commit #2, NOT a separate commit — bundle hard.
   Splitting commit #2 finer than this would ship an endpoint that leaks pubkey prefixes (without D-14 helper), or hits FCM without timeouts (without D-07 dep), or has no salt (incomplete). Those aren't valid intermediate states.
 
+### Research Resolutions (added 2026-04-25 after 02-RESEARCH.md)
+
+- **D-20: Bump `actix-web` from `"4.4"` to `"4.9"` in `Cargo.toml`.** Required so `actix_web::middleware::from_fn` (graduated from `actix-web-lab` in 4.9.0) is contractually available without depending on `Cargo.lock` resolution drift. Counts as a dependency version update, NOT a new dependency. User-approved on 2026-04-25.
+- **D-21: Add `uuid = "1"` with feature `v4` to `Cargo.toml`.** Required for NOTIFY-04 server-generated `X-Request-Id`. Standard Rust crate; one-line `uuid::Uuid::new_v4().to_string()` call from inside the middleware. User-approved on 2026-04-25 as a new dependency under the global CLAUDE.md no-new-deps rule.
+- **D-22: `PushDispatcher` gains a new method `dispatch_silent`** (Option A from RESEARCH Q3) instead of a `silent: bool` flag on the existing `dispatch`. The existing `dispatch` signature stays untouched so the Nostr listener path is byte-identical (Phase 2 does NOT touch `src/nostr/listener.rs`). The new method internally selects the silent FCM payload builder (D-05) and routes through the same backend selection logic. User-approved on 2026-04-25.
+
 ### Claude's Discretion
 
 - Exact file paths for the new modules (`src/api/notify.rs`, `src/utils/log_pubkey.rs` — names can shift for consistency with existing conventions).
