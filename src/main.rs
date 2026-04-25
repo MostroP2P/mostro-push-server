@@ -16,6 +16,7 @@ mod utils;
 #[allow(dead_code)]
 mod crypto;
 
+use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, IP_BURST, PUBKEY_BURST};
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
@@ -107,6 +108,48 @@ async fn main() -> std::io::Result<()> {
     // On saturation, the handler silently drops (warn! log without pubkey).
     let notify_semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(50));
 
+    // D-09 + LIMIT-02: per-pubkey limiter shared with /api/notify handler via AppState.
+    // Bursts are compile-time constants per D-29 (specifics).
+    let per_pubkey_limiter: Arc<PerPubkeyLimiter> = Arc::new(governor::RateLimiter::keyed(
+        governor::Quota::per_minute(
+            std::num::NonZeroU32::new(config.notify_rate_limit.per_pubkey_per_min)
+                .expect("validated > 0 in Config::from_env"),
+        )
+        .allow_burst(
+            std::num::NonZeroU32::new(PUBKEY_BURST)
+                .expect("PUBKEY_BURST is a non-zero compile-time constant"),
+        ),
+    ));
+
+    // D-20 + LIMIT-01: per-IP limiter shared via app_data (NOT in AppState).
+    // Different key type (IpAddr vs String) and different middleware lifetime.
+    let per_ip_limiter: Arc<PerIpLimiter> = Arc::new(governor::RateLimiter::keyed(
+        governor::Quota::per_minute(
+            std::num::NonZeroU32::new(config.notify_rate_limit.per_ip_per_min)
+                .expect("validated > 0 in Config::from_env"),
+        )
+        .allow_burst(
+            std::num::NonZeroU32::new(IP_BURST)
+                .expect("IP_BURST is a non-zero compile-time constant"),
+        ),
+    ));
+
+    // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.
+    api::rate_limit::start_rate_limit_cleanup_task(
+        per_pubkey_limiter.clone(),
+        Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs),
+        config.notify_rate_limit.pubkey_limiter_soft_cap,
+    );
+    info!(
+        "Rate limiters initialized (per-pubkey {}/min burst {}; per-IP {}/min burst {}; cleanup {}s; soft cap {})",
+        config.notify_rate_limit.per_pubkey_per_min,
+        PUBKEY_BURST,
+        config.notify_rate_limit.per_ip_per_min,
+        IP_BURST,
+        config.notify_rate_limit.cleanup_interval_secs,
+        config.notify_rate_limit.pubkey_limiter_soft_cap,
+    );
+
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
         config.clone(),
@@ -125,6 +168,7 @@ async fn main() -> std::io::Result<()> {
         dispatcher: dispatcher.clone(),
         semaphore: notify_semaphore.clone(),
         notify_log_salt: notify_log_salt.clone(),
+        per_pubkey_limiter: per_pubkey_limiter.clone(),
     };
 
     // Start HTTP API server
@@ -141,6 +185,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
+            .app_data(web::Data::new(per_ip_limiter.clone()))
             .configure(api::routes::configure)
     })
     .bind(server_addr)?

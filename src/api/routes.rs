@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
+use crate::api::rate_limit::{per_ip_rate_limit_mw, PerPubkeyLimiter};
 use crate::push::PushDispatcher;
 use crate::store::{TokenStore, TokenStoreStats, Platform};
 use crate::utils::log_pubkey::log_pubkey;
@@ -44,6 +45,7 @@ pub struct AppState {
     pub dispatcher: Arc<PushDispatcher>,
     pub semaphore: Arc<Semaphore>,
     pub notify_log_salt: Arc<[u8; 32]>,
+    pub per_pubkey_limiter: Arc<PerPubkeyLimiter>,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -57,6 +59,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(
                 web::resource("/notify")
                     .wrap(from_fn(request_id_mw))
+                    .wrap(from_fn(per_ip_rate_limit_mw))
                     .route(web::post().to(notify_token)),
             ),
     );

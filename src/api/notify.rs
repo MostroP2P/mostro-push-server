@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
+use governor::clock::Clock;
+use crate::api::rate_limit::rate_limited_response;
 use crate::api::routes::AppState;
 use crate::utils::log_pubkey::log_pubkey;
 
@@ -64,7 +66,18 @@ pub async fn notify_token(
     let log_pk = log_pubkey(&state.notify_log_salt, &req.trade_pubkey);
     info!("notify: request received pk={}", log_pk);
 
-    // D-12 step 4: bounded spawn via Semaphore.
+    // D-12 step 4: per-pubkey rate-limit check BEFORE semaphore acquisition.
+    // Per anti-RL-2 (D-13): byte-identical 429 to the per-IP middleware via
+    // the shared rate_limited_response helper.
+    if let Err(not_until) = state.per_pubkey_limiter.check_key(&req.trade_pubkey) {
+        let retry_after_secs = not_until
+            .wait_time_from(governor::clock::DefaultClock::default().now())
+            .as_secs()
+            .max(1);
+        return rate_limited_response(retry_after_secs);
+    }
+
+    // D-12 step 5: bounded spawn via Semaphore.
     match Arc::clone(&state.semaphore).try_acquire_owned() {
         Ok(permit) => {
             // D-12 step 5: spawn closure owns Arc clones; no &state, no &req.
