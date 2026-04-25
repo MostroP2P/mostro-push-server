@@ -72,7 +72,10 @@ Plans:
   4. Rate-limit quotas for both per-pubkey and per-IP are configurable at runtime via `NOTIFY_RATE_PER_PUBKEY_PER_MIN` and `NOTIFY_RATE_PER_IP_PER_MIN` environment variables; the existing unused `RATE_LIMIT_PER_MINUTE` env var is left untouched.
   5. The per-`trade_pubkey` keyed limiter's in-memory map is bounded over time by a periodic background `retain_recent` (or equivalent) call, and a `warn!` line is logged when the map size crosses a configurable soft cap (default ~100k entries) so an operator can detect active key-bombing.
   6. An in-process integration suite (`actix_web::test::init_service` against a real `governor` middleware and a stub `PushService`) covers the six TEST-1 scenarios — registered hit, unregistered "miss", malformed body, per-pubkey 429 boundary, per-IP 429 boundary, and `/api/register` byte-identical-shape regression — and runs green on `cargo test` against the merged milestone.
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 03-01-PLAN.md — Add per-IP middleware + per-pubkey limiter to /api/notify (rate_limit module, AppState extension, NotifyRateLimitConfig env vars, cleanup task)
+- [ ] 03-02-PLAN.md — Add in-process integration test suite (StubPushService + 19 tests across notify/rate_limit/routes covering VERIFY-01 + VERIFY-02 + 4 regressions)
 **UI hint**: no
 
 ---
@@ -119,8 +122,8 @@ These are recorded as a roadmap-level guardrail. Reviewers checking phase plans 
 |-------|----------------|--------|-----------|
 | 1. PushDispatcher refactor | 1/1 | Complete | 2026-04-25 |
 | 2. `POST /api/notify` endpoint with privacy hardening | 3/3 | Complete | 2026-04-25 |
-| 3. Dual-keyed rate limiting and verification harness | 0/0 (TBD) | Not started | - |
+| 3. Dual-keyed rate limiting and verification harness | 0/2 | Planned | - |
 
 ---
 
-*Last updated: 2026-04-25 — Phase 02 Plan 03 (`ce619fa`) shipped: dispute-chat verification runbook (VERIFY-03 closed). Phase 02 complete (3/3 plans).*
+*Last updated: 2026-04-25 — Phase 03 planned (2 plans, 7 tasks total). Plan 01 implements LIMIT-01..06; Plan 02 implements VERIFY-01 + VERIFY-02. Phase 02 complete (3/3 plans).*

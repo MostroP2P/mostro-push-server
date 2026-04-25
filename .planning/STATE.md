@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: planning
-last_updated: "2026-04-25T22:37:27.061Z"
+status: executing
+last_updated: "2026-04-25T23:41:16.867Z"
 progress:
   total_phases: 3
   completed_phases: 2
-  total_plans: 4
+  total_plans: 6
   completed_plans: 4
-  percent: 100
+  percent: 67
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -24,7 +24,7 @@ progress:
 
 **Core value:** The Mostro Mobile client receives a silent push the moment a relevant Nostr event lands on the configured relays — without the push server, Google/Apple, or any operator learning who is trading with whom or what is being said.
 
-**Current focus:** Phase 02 — post-api-notify-endpoint-with-privacy-hardening
+**Current focus:** Phase --phase — 03
 
 **Brownfield context:** Phases 1-3 of `docs/IMPLEMENTATION_PHASES.md` (HTTP API, FCM/UnifiedPush dispatch, deploy) are complete. Phase 4 (token encryption) is deferred to a separate milestone. The current milestone is the **first GSD-tracked milestone** in the project; phase numbering starts at 1.
 
@@ -32,11 +32,11 @@ progress:
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
+Phase: --phase (03) — EXECUTING
+Plan: 1 of --name
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
 **Phase 2:** /api/notify endpoint with privacy hardening — COMPLETE (3/3 plans) — commits `56a1a6d`, `d01dc97`, `ce619fa`
-**Status:** Ready to plan
+**Status:** Executing Phase --phase
 **Progress:** [██████████] 100% (Phase 02 plans); milestone-level: Phase 03 still pending
 
 ```
@@ -134,6 +134,6 @@ Phase 02 (`POST /api/notify` endpoint with privacy hardening) shipped earlier th
 
 *Last updated: 2026-04-25 by /gsd-discuss-phase 3 — Phase 03 context gathered (commit `6159a80`).*
 
-**Planned Phase:** 02 (post-api-notify-endpoint-with-privacy-hardening) — 3 plans — 2026-04-25T18:06:02.546Z
+**Planned Phase:** 03 (dual-keyed-rate-limiting-and-verification-harness) — 2 plans — 2026-04-25T23:38:11.647Z
 **Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z), 02-02 (`d01dc97`, 2026-04-25T18:32:22Z), 02-03 (`ce619fa`, 2026-04-25T18:40:41Z)
 **Phase 03 Context:** `6159a80` — 30 decisions (D-01..D-30), 4 areas discussed, OPEN-3 + OPEN-4 closed without new dependencies.
