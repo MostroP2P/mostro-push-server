@@ -1,8 +1,12 @@
+use actix_web::middleware::from_fn;
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use log::{info, warn};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
+use crate::api::notify::{notify_token, request_id_mw};
+use crate::push::PushDispatcher;
 use crate::store::{TokenStore, TokenStoreStats, Platform};
 
 /// Request for registering a plaintext token (Phase 3 - unencrypted)
@@ -36,6 +40,9 @@ pub struct RegisterResponse {
 #[derive(Clone)]
 pub struct AppState {
     pub token_store: Arc<TokenStore>,
+    pub dispatcher: Arc<PushDispatcher>,
+    pub semaphore: Arc<Semaphore>,
+    pub notify_log_salt: Arc<[u8; 32]>,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -46,6 +53,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/register", web::post().to(register_token))
             .route("/unregister", web::post().to(unregister_token))
             .route("/info", web::get().to(server_info))
+            .service(
+                web::resource("/notify")
+                    .wrap(from_fn(request_id_mw))
+                    .route(web::post().to(notify_token)),
+            ),
     );
 }
 

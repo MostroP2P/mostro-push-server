@@ -1,7 +1,9 @@
 use actix_web::{web, App, HttpServer};
 use log::info;
+use rand::RngCore;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 mod config;
 mod nostr;
@@ -90,6 +92,17 @@ async fn main() -> std::io::Result<()> {
 
     let dispatcher = Arc::new(PushDispatcher::new(push_services));
 
+    // D-09 + D-14: notify_log_salt — random per process, in-memory only,
+    // never persisted, never logged. Salt regeneration on every restart is
+    // the explicit privacy property (PRIV-01).
+    let mut salt_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt_bytes);
+    let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
+
+    // D-09 + D-03: bound the /api/notify spawn pile to 50 in-flight tasks.
+    // On saturation, the handler silently drops (warn! log without pubkey).
+    let notify_semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(50));
+
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
         config.clone(),
@@ -104,6 +117,9 @@ async fn main() -> std::io::Result<()> {
     // Create app state for HTTP handlers
     let app_state = AppState {
         token_store: token_store.clone(),
+        dispatcher: dispatcher.clone(),
+        semaphore: notify_semaphore.clone(),
+        notify_log_salt: notify_log_salt.clone(),
     };
 
     // Start HTTP API server
@@ -115,6 +131,7 @@ async fn main() -> std::io::Result<()> {
     info!("  GET  /api/info       - Server info");
     info!("  POST /api/register   - Register token (plaintext)");
     info!("  POST /api/unregister - Unregister token");
+    info!("  POST /api/notify     - Trigger silent push (best-effort)");
 
     HttpServer::new(move || {
         App::new()

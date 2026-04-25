@@ -213,6 +213,42 @@ impl FcmPush {
             }
         })
     }
+
+    /// Silent push payload for the /api/notify chat-wake path.
+    ///
+    /// Data-only (no `alert`, no notification fallback) so iOS does not
+    /// throttle the app for high-frequency silent pushes
+    /// (apns-priority: 5 + apns-push-type: background per Apple's docs).
+    /// Distinct from `build_payload_for_token` (Mostro daemon events at
+    /// apns-priority: 10 with an alert fallback). Do NOT merge:
+    /// the two paths have fundamentally different frequency profiles
+    /// (chat = continuous, daemon events = sporadic).
+    fn build_silent_payload_for_notify(device_token: &str) -> serde_json::Value {
+        json!({
+            "message": {
+                "token": device_token,
+                "data": {
+                    "type": "chat_wake",
+                    "source": "mostro-push-server",
+                    "timestamp": chrono::Utc::now().timestamp().to_string()
+                },
+                "android": {
+                    "priority": "high"
+                },
+                "apns": {
+                    "headers": {
+                        "apns-priority": "5",
+                        "apns-push-type": "background"
+                    },
+                    "payload": {
+                        "aps": {
+                            "content-available": 1
+                        }
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -247,6 +283,39 @@ impl PushService for FcmPush {
             let error_text = response.text().await?;
             error!("FCM error for {} device: {}", platform, error_text);
             Err(format!("FCM send failed: {}", error_text).into())
+        }
+    }
+
+    async fn send_silent_to_token(
+        &self,
+        device_token: &str,
+        platform: &Platform,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let auth_token = self.get_access_token().await?;
+
+        let fcm_url = format!(
+            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+            self.project_id
+        );
+
+        let payload = Self::build_silent_payload_for_notify(device_token);
+
+        debug!("Sending FCM silent to token: {}...", &device_token[..20.min(device_token.len())]);
+
+        let response = self.client
+            .post(&fcm_url)
+            .bearer_auth(&auth_token)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            info!("FCM silent notification sent to {} device", platform);
+            Ok(())
+        } else {
+            let error_text = response.text().await?;
+            error!("FCM silent error for {} device: {}", platform, error_text);
+            Err(format!("FCM silent send failed: {}", error_text).into())
         }
     }
 

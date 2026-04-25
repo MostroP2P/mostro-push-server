@@ -46,6 +46,25 @@ impl PushDispatcher {
         &self,
         token: &RegisteredToken,
     ) -> Result<DispatchOutcome, DispatchError> {
+        self.dispatch_with(token, false).await
+    }
+
+    /// Phase 2 D-22: silent variant for the /api/notify chat-wake path.
+    /// Uses each backend's `send_silent_to_token` which defaults to
+    /// `send_to_token`; FcmPush overrides with a data-only payload
+    /// (apns-priority 5, apns-push-type background) per D-05.
+    pub async fn dispatch_silent(
+        &self,
+        token: &RegisteredToken,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        self.dispatch_with(token, true).await
+    }
+
+    async fn dispatch_with(
+        &self,
+        token: &RegisteredToken,
+        silent: bool,
+    ) -> Result<DispatchOutcome, DispatchError> {
         let mut errors: Vec<String> = Vec::new();
         let mut attempted = false;
 
@@ -54,10 +73,16 @@ impl PushDispatcher {
                 continue;
             }
             attempted = true;
-            match service
-                .send_to_token(&token.device_token, &token.platform)
-                .await
-            {
+            let result = if silent {
+                service
+                    .send_silent_to_token(&token.device_token, &token.platform)
+                    .await
+            } else {
+                service
+                    .send_to_token(&token.device_token, &token.platform)
+                    .await
+            };
+            match result {
                 Ok(()) => {
                     return Ok(DispatchOutcome::Delivered {
                         backend: self.backend_names[idx],
