@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: verifying
+status: ready_to_plan
 last_updated: "2026-04-25T18:42:48.181Z"
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 4
   completed_plans: 4
   percent: 100
@@ -32,11 +32,11 @@ progress:
 
 ## Current Position
 
-Phase: 02 (post-api-notify-endpoint-with-privacy-hardening) — COMPLETE (3/3 plans)
-Plan: 3 of 3 — shipped (`ce619fa`)
+Phase: 3
+Plan: Not started
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
 **Phase 2:** /api/notify endpoint with privacy hardening — COMPLETE (3/3 plans) — commits `56a1a6d`, `d01dc97`, `ce619fa`
-**Status:** Phase complete — ready for verification
+**Status:** Ready to plan
 **Progress:** [██████████] 100% (Phase 02 plans); milestone-level: Phase 03 still pending
 
 ```

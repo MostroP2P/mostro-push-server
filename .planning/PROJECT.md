@@ -29,11 +29,11 @@ The mobile client receives a silent push the moment a relevant Nostr event lands
 
 <!-- Current scope: Milestone v1.1 — Chat notifications support. -->
 
-- [ ] **Server enables push notifications for P2P chat between buyer and seller** — currently the server only delivers Mostro daemon events; chat messages addressed to a session's `sharedKey.public` (ECDH-derived per peer) never trigger a push because the server doesn't and won't know about `sharedKey`s.
-- [ ] **Server enables push notifications for dispute chat between admin and user** — currently delivered (admin DMs are addressed to the user's `tradeKey.public` so the existing relay subscription matches), but the end-to-end flow has never been verified, and it must keep working without coupling the server to the Mostro daemon identity.
-- [ ] **Sender-triggered notification endpoint** — `POST /api/notify { trade_pubkey }` that dispatches a silent push to the device registered for that pubkey, designed so that the sender of a chat message can wake the recipient without the server learning the `sharedKey ↔ tradeKey` relationship, the sender identity, or the message content.
-- [ ] **Abuse mitigation on the new endpoint** — rate limiting per `trade_pubkey` and per source IP using the `governor` crate already declared in `Cargo.toml`. Unauthenticated by design (signature auth would reveal sender, breaking the privacy model).
-- [ ] **Compatible with the Mostro Mobile client implementing Phase 4 of `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md`** — the contract must match what the mobile client will call.
+- [ ] **Server enables push notifications for P2P chat between buyer and seller** — currently the server only delivers Mostro daemon events; chat messages addressed to a session's `sharedKey.public` (ECDH-derived per peer) never trigger a push because the server doesn't and won't know about `sharedKey`s. Validated end-to-end in Phase 2: `POST /api/notify` allows the sender to wake the recipient on demand.
+- [x] **Server enables push notifications for dispute chat between admin and user** — Validated in Phase 2 (operator runbook `docs/verification/dispute-chat.md` ships with anti-CRIT-1 guard). Pending: operator smoke on staging (tracked in `02-HUMAN-UAT.md`).
+- [x] **Sender-triggered notification endpoint** — Validated in Phase 2: `POST /api/notify { trade_pubkey }` ships with always-202, X-Request-Id middleware (UUIDv4 server-side), salted-BLAKE3 `log_pubkey()` correlators across all modules, bounded `tokio::spawn` (50-permit semaphore), separate FCM silent payload (apns-priority 5, apns-push-type background), and `RUST_LOG=info` in production. Source-level checks all green; device delivery pending operator smoke (`02-HUMAN-UAT.md`).
+- [ ] **Abuse mitigation on the new endpoint** — rate limiting per `trade_pubkey` and per source IP using the `governor` crate already declared in `Cargo.toml`. Unauthenticated by design (signature auth would reveal sender, breaking the privacy model). Phase 3 scope.
+- [ ] **Compatible with the Mostro Mobile client implementing Phase 4 of `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md`** — the contract must match what the mobile client will call. Wire shape locked in Phase 2; mobile coordination pending.
 
 ### Out of Scope
 
@@ -120,4 +120,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-24 after initialization (brownfield, Mostro Push Server milestone v1.1 — Chat notifications support)*
+*Last updated: 2026-04-25 — Phase 02 complete (POST /api/notify endpoint with privacy hardening; SC #5 migration shipped). Phase 3 (rate limiting + verification harness) is the only remaining phase in milestone v1.1.*
