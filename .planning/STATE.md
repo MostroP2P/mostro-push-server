@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
 status: executing
-last_updated: "2026-04-25T23:41:16.867Z"
+last_updated: "2026-04-25T23:52:57.455Z"
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 6
-  completed_plans: 4
-  percent: 67
+  completed_plans: 5
+  percent: 83
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -37,7 +37,7 @@ Plan: 1 of --name
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
 **Phase 2:** /api/notify endpoint with privacy hardening — COMPLETE (3/3 plans) — commits `56a1a6d`, `d01dc97`, `ce619fa`
 **Status:** Executing Phase --phase
-**Progress:** [██████████] 100% (Phase 02 plans); milestone-level: Phase 03 still pending
+**Progress:** [████████░░] 83%
 
 ```
 [████████████████████] 100%  Phase 1: PushDispatcher refactor (1/1 plans)
@@ -69,6 +69,7 @@ Plan: 1 of --name
 ---
 | Phase 02 P02 | 359 | 8 tasks | 12 files |
 | Phase 02 P02-03 | 131 | 1 tasks | 1 files |
+| Phase 03-dual-keyed-rate-limiting-and-verification-harness P03-01 | 421 | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,8 @@ Plan: 1 of --name
 - Phase 02 Plan 01: Constructed shared Arc<reqwest::Client> with timeouts (connect=2s, total=5s, pool_idle=90s) per D-07/D-08; FcmPush::new and UnifiedPushService::new now take Arc<reqwest::Client> as a second argument. No behavioural change to either dispatch path.
 - Phase 02 Plan 02: Shipped POST /api/notify endpoint with privacy hardening bundle (D-05/D-09/D-10/D-11/D-12/D-13/D-14/D-15/D-16/D-20/D-21/D-22) in atomic commit d01dc97. always-202 contract, salted-BLAKE3 log_pubkey, UUIDv4 X-Request-Id middleware scoped to /notify resource, separate FCM silent payload (apns-priority 5, apns-push-type background), bounded tokio::spawn via Arc<Semaphore>(50), RUST_LOG=info flip. Phase 1 listener path byte-identical.
 - Phase 02 Plan 03: shipped docs/verification/dispute-chat.md operator runbook for VERIFY-03 (D-17, D-18) — Spanish prose, four sections, anti-CRIT-1 grep one-liner. Plan 02-03 is doc-only; src/nostr/listener.rs byte-identical.
+- Phase 03 Plan 01: hand-rolled per_ip_rate_limit_mw over governor::DefaultKeyedRateLimiter<IpAddr> (actix-governor rejected, GPL-3.0 incompatible with project MIT)
+- Phase 03 Plan 01: per-pubkey check wired in notify_token between log_pk emission and semaphore acquire (D-12); byte-identical 429 via shared rate_limited_response (D-13)
 
 ### Open Decisions (resolved during `/gsd-plan-phase`)
 

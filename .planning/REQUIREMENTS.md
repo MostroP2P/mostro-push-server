@@ -29,12 +29,18 @@ This milestone unblocks Phase 4 of the mobile chat-notifications plan by giving 
 
 ### LIMIT — Abuse mitigation on `/api/notify`
 
-- [ ] **LIMIT-01**: A per-source-IP rate limit is enforced on `/api/notify` via an `actix-governor` middleware whose `KeyExtractor` reads `Fly-Client-IP` first (Fly's edge-injected canonical client-IP header), falls back to the rightmost segment of `X-Forwarded-For`, and finally to `req.peer_addr()` for local development. Exact governor crate version and `KeyExtractor` API are pinned in `/gsd-plan-phase` (OPEN-4).
-- [ ] **LIMIT-02**: A per-`trade_pubkey` rate limit is enforced inside the `notify_token` handler (after pubkey validation, before token lookup) using the existing `governor` crate's keyed limiter.
-- [ ] **LIMIT-03**: The rate-limiting middleware is applied **only** to the `/api/notify` route scope. `GET /api/health`, `GET /api/info`, `GET /api/status`, `POST /api/register`, and `POST /api/unregister` are not rate-limited by this milestone's middleware.
-- [ ] **LIMIT-04**: Rate-limit quotas (per-pubkey and per-IP) are configurable at runtime via two new environment variables — names tentatively `NOTIFY_RATE_PER_PUBKEY_PER_MIN` and `NOTIFY_RATE_PER_IP_PER_MIN`. The existing `RATE_LIMIT_PER_MINUTE` env var is left untouched. Burst sizes are decided in `/gsd-plan-phase` (OPEN-3).
-- [ ] **LIMIT-05**: A periodic background task calls `governor`'s `retain_recent` (or equivalent) on the per-pubkey keyed limiter to bound in-memory key cardinality on the 512MB Fly machine.
-- [ ] **LIMIT-06**: When the per-pubkey limiter's internal map size exceeds a configurable soft cap (default ~100k entries), a `warn!` line is logged so an operator can detect active key-bombing.
+- [x] **LIMIT-01
+**: A per-source-IP rate limit is enforced on `/api/notify` via an `actix-governor` middleware whose `KeyExtractor` reads `Fly-Client-IP` first (Fly's edge-injected canonical client-IP header), falls back to the rightmost segment of `X-Forwarded-For`, and finally to `req.peer_addr()` for local development. Exact governor crate version and `KeyExtractor` API are pinned in `/gsd-plan-phase` (OPEN-4).
+- [x] **LIMIT-02
+**: A per-`trade_pubkey` rate limit is enforced inside the `notify_token` handler (after pubkey validation, before token lookup) using the existing `governor` crate's keyed limiter.
+- [x] **LIMIT-03
+**: The rate-limiting middleware is applied **only** to the `/api/notify` route scope. `GET /api/health`, `GET /api/info`, `GET /api/status`, `POST /api/register`, and `POST /api/unregister` are not rate-limited by this milestone's middleware.
+- [x] **LIMIT-04
+**: Rate-limit quotas (per-pubkey and per-IP) are configurable at runtime via two new environment variables — names tentatively `NOTIFY_RATE_PER_PUBKEY_PER_MIN` and `NOTIFY_RATE_PER_IP_PER_MIN`. The existing `RATE_LIMIT_PER_MINUTE` env var is left untouched. Burst sizes are decided in `/gsd-plan-phase` (OPEN-3).
+- [x] **LIMIT-05
+**: A periodic background task calls `governor`'s `retain_recent` (or equivalent) on the per-pubkey keyed limiter to bound in-memory key cardinality on the 512MB Fly machine.
+- [x] **LIMIT-06
+**: When the per-pubkey limiter's internal map size exceeds a configurable soft cap (default ~100k entries), a `warn!` line is logged so an operator can detect active key-bombing.
 
 ### PRIV — Privacy hardening bundled across phases
 
