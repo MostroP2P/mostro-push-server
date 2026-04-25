@@ -34,7 +34,7 @@ The three independent research dimensions (Architecture, Features, Pitfalls) all
   4. The dormant `MOSTRO_PUBKEY` config field and its startup validation are either removed or annotated with a hard-anti-fix comment that names the CRIT-1 anti-requirement and forbids ever adding `.authors(mostro_pubkey)` to the listener filter chain.
 **Plans:** 1 plan
 Plans:
-- [ ] 01-01-PLAN.md — Refactor push-dispatch ownership: extract PushDispatcher, drop Mutex, add anti-CRIT-1 comment, tighten PushService trait
+- [x] 01-01-PLAN.md — Refactor push-dispatch ownership: extract PushDispatcher, drop Mutex, add anti-CRIT-1 comment, tighten PushService trait
 
 ### Phase 2: `POST /api/notify` endpoint with privacy hardening
 **Goal**: A registered Mostro Mobile client sending `POST /api/notify { trade_pubkey }` causes a silent push to reach the device registered for that pubkey, and shipping this endpoint does not introduce a `trade_pubkey ↔ source IP` correlation in production logs.

@@ -13,8 +13,8 @@ This milestone unblocks Phase 4 of the mobile chat-notifications plan by giving 
 
 ### DISPATCH — Push dispatch refactor (foundation)
 
-- [ ] **DISPATCH-01**: Push dispatch logic is extracted into a single `PushDispatcher` component that owns an immutable `Arc<[Arc<dyn PushService>]>` (no `Mutex`), exposes one async `dispatch(token)` method, and is callable by both the existing Nostr listener and the new HTTP notify handler.
-- [ ] **DISPATCH-02**: After the refactor, the existing Nostr-listener → silent-push flow for Mostro daemon events continues to work end-to-end with no observable behaviour change.
+- [x] **DISPATCH-01**: Push dispatch logic is extracted into a single `PushDispatcher` component that owns an immutable `Arc<[Arc<dyn PushService>]>` (no `Mutex`), exposes one async `dispatch(token)` method, and is callable by both the existing Nostr listener and the new HTTP notify handler.
+- [x] **DISPATCH-02**: After the refactor, the existing Nostr-listener → silent-push flow for Mostro daemon events continues to work end-to-end with no observable behaviour change.
 
 ### NOTIFY — Sender-triggered notify endpoint
 
@@ -115,8 +115,8 @@ Every v1.1 requirement is mapped to exactly one phase. Coverage: 17 / 17.
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| DISPATCH-01 | Phase 1 | Pending |
-| DISPATCH-02 | Phase 1 | Pending |
+| DISPATCH-01 | Phase 1 | Complete |
+| DISPATCH-02 | Phase 1 | Complete |
 | NOTIFY-01   | Phase 2 | Pending |
 | NOTIFY-02   | Phase 2 | Pending |
 | NOTIFY-03   | Phase 2 | Pending |
