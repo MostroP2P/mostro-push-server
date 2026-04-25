@@ -1,33 +1,27 @@
 ---
 phase: 02-post-api-notify-endpoint-with-privacy-hardening
 verified: 2026-04-25T19:08:05Z
+re_verified: 2026-04-25T19:30:00Z
 status: human_needed
-score: 5/6 must-haves verified (1 partial, with documented intentional deviation)
+score: 6/6 must-haves verified at source level (operator smoke pending)
 overrides_applied: 0
-gaps:
+gaps_resolved:
   - truth: "After the Phase 2 change is deployed (RUST_LOG=info), no log line — emitted from any module — contains a recognisable hex pubkey prefix or a registered FCM/UnifiedPush token; pubkey identifiers in logs originate exclusively from the salted truncated BLAKE3 helper."
-    status: partial
-    reason: |
-      ROADMAP Success Criterion #5 is written as "any module". CONTEXT.md D-14
-      and the Phase 2 plans deliberately narrowed the scope to /api/notify only,
-      explicitly preserving the existing 16-hex-char prefix-truncation logs in
-      src/nostr/listener.rs, src/api/routes.rs, and src/store/mod.rs (operator
-      grep continuity). Under RUST_LOG=info these legacy logs DO emit hex
-      pubkey prefixes in production. The narrower D-14 scope is fully
-      satisfied (notify.rs uses log_pubkey() exclusively); the broader
-      ROADMAP wording is not. This is an intentional, documented scope
-      reduction and a candidate for an override.
-    artifacts:
-      - path: src/api/routes.rs
-        issue: "Lines 94-95, 138-141, 155-156 emit info! lines with `&req.trade_pubkey[..16]` prefixes (register_token + unregister_token handlers)"
-      - path: src/store/mod.rs
-        issue: "Lines 58-62 and 70-74 emit info! with `&trade_pubkey[..16]` prefixes (register + unregister)"
-      - path: src/nostr/listener.rs
-        issue: "Lines 110 and 114-117 emit info! with `&trade_pubkey[..16]` prefixes (Event recipient + MATCH log lines) — these are reached on every Mostro daemon event in production"
-    missing:
-      - "Either: migrate the 7 existing `&trade_pubkey[..16]` info! call sites to log_pubkey() so SC #5 is literally satisfied"
-      - "Or: amend ROADMAP SC #5 to reflect the D-14 scope (notify.rs only) and add an explicit override entry to this VERIFICATION.md"
-      - "Note: FCM/UnifiedPush token prefix logs (fcm.rs:270, fcm.rs:303, unifiedpush.rs:139) are debug! and DO NOT emit at RUST_LOG=info — those are not part of this gap"
+    resolution: migrated_inline
+    resolution_commit: 118222b
+    resolution_notes: |
+      The SC #5 partial gap was closed inline (user decision: "Migrar ahora
+      inline"). Commit 118222b routes the shared notify_log_salt through
+      TokenStore::new and NostrListener::new and replaces the 7 legacy
+      `&trade_pubkey[..16]` info!/debug! call sites with log_pubkey(salt, pk).
+      All sites now emit pk=<8hex> correlators.
+
+      Post-migration verification:
+      - `grep -nE 'trade_pubkey\[\.\.|pubkey\[\.\.' src/store/mod.rs src/api/routes.rs src/nostr/listener.rs` → 0 matches.
+      - `cargo build --release` → green.
+      - `cargo test --release` → 7/7 passed.
+      - Anti-CRIT-1 invariant unchanged (only the comment block remains).
+      - Same salt shared across modules → same pubkey yields same 8-char correlator everywhere; operator log correlation preserved.
 human_verification:
   - test: "Manual smoke against staging: register a test pubkey + iOS FCM token via POST /api/register, then POST /api/notify { trade_pubkey } and confirm the iOS device receives a silent push within ~5s (didReceiveRemoteNotification fires)"
     expected: "HTTP 202 {\"accepted\":true}, X-Request-Id header is a server-generated UUIDv4, device wakes via background handler"
