@@ -124,49 +124,11 @@ impl UnifiedPushService {
 
 #[async_trait]
 impl PushService for UnifiedPushService {
-    async fn send_silent_push(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let endpoints = self.endpoints.read().await;
-
-        if endpoints.is_empty() {
-            info!("No UnifiedPush endpoints registered");
-            return Ok(());
-        }
-
-        let payload = serde_json::json!({
-            "type": "silent_wake",
-            "timestamp": chrono::Utc::now().timestamp()
-        });
-
-        for endpoint in endpoints.values() {
-            match self.client
-                .post(&endpoint.endpoint_url)
-                .json(&payload)
-                .send()
-                .await
-            {
-                Ok(response) => {
-                    if response.status().is_success() {
-                        info!("UnifiedPush notification sent to {}", endpoint.device_id);
-                    } else {
-                        error!("UnifiedPush error for {}: {}",
-                            endpoint.device_id, response.status());
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to send UnifiedPush to {}: {}",
-                        endpoint.device_id, e);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn send_to_token(
         &self,
         device_token: &str,
         _platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // For UnifiedPush, the device_token IS the endpoint URL
         let payload = serde_json::json!({
             "type": "silent_wake",

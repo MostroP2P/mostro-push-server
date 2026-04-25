@@ -1,7 +1,6 @@
 use actix_web::{web, App, HttpServer};
 use log::info;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 mod config;
 mod nostr;
@@ -17,7 +16,7 @@ mod crypto;
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
-use push::{PushService, FcmPush, UnifiedPushService};
+use push::{FcmPush, PushDispatcher, PushService, UnifiedPushService};
 use store::TokenStore;
 
 #[actix_web::main]
@@ -43,7 +42,7 @@ async fn main() -> std::io::Result<()> {
     );
 
     // Initialize push services
-    let mut push_services: Vec<Box<dyn PushService>> = Vec::new();
+    let mut push_services: Vec<(Arc<dyn PushService>, &'static str)> = Vec::new();
 
     // Keep UnifiedPush service separate for endpoint management
     let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone()));
@@ -62,7 +61,7 @@ async fn main() -> std::io::Result<()> {
         match fcm_service.init().await {
             Ok(_) => {
                 info!("FCM service initialized successfully");
-                push_services.push(Box::new(Arc::clone(&fcm_service)));
+                push_services.push((Arc::clone(&fcm_service) as Arc<dyn PushService>, "fcm"));
             }
             Err(e) => {
                 log::warn!("Failed to initialize FCM service: {}", e);
@@ -73,15 +72,15 @@ async fn main() -> std::io::Result<()> {
 
     if config.push.unifiedpush_enabled {
         info!("Initializing UnifiedPush service");
-        push_services.push(Box::new(Arc::clone(&unifiedpush_service)));
+        push_services.push((Arc::clone(&unifiedpush_service) as Arc<dyn PushService>, "unifiedpush"));
     }
 
-    let push_services = Arc::new(Mutex::new(push_services));
+    let dispatcher = Arc::new(PushDispatcher::new(push_services));
 
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
         config.clone(),
-        push_services.clone(),
+        dispatcher.clone(),
         token_store.clone(),
     ).expect("Failed to initialize Nostr listener - check MOSTRO_PUBKEY");
 

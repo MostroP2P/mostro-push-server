@@ -217,61 +217,12 @@ impl FcmPush {
 
 #[async_trait]
 impl PushService for FcmPush {
-    async fn send_silent_push(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let token = self.get_access_token().await
-            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-
-        let fcm_url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
-        );
-
-        let payload = json!({
-            "message": {
-                "topic": "mostro_notifications",
-                "data": {
-                    "type": "silent_wake",
-                    "timestamp": chrono::Utc::now().timestamp().to_string()
-                },
-                "android": {
-                    "priority": "high"
-                },
-                "apns": {
-                    "headers": {
-                        "apns-priority": "10"
-                    },
-                    "payload": {
-                        "aps": {
-                            "content-available": 1
-                        }
-                    }
-                }
-            }
-        });
-
-        let response = self.client
-            .post(&fcm_url)
-            .bearer_auth(&token)
-            .json(&payload)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            info!("FCM topic notification sent successfully");
-            Ok(())
-        } else {
-            error!("FCM error: {}", response.text().await?);
-            Err("FCM send failed".into())
-        }
-    }
-
     async fn send_to_token(
         &self,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let auth_token = self.get_access_token().await
-            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let auth_token = self.get_access_token().await?;
 
         let fcm_url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
