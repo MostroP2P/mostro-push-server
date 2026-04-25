@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::fs;
 
@@ -20,18 +21,18 @@ pub struct UnifiedPushEndpoint {
 
 pub struct UnifiedPushService {
     config: Config,
-    client: Client,
+    client: Arc<reqwest::Client>,
     endpoints: RwLock<HashMap<String, UnifiedPushEndpoint>>,
     storage_path: PathBuf,
 }
 
 impl UnifiedPushService {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let storage_path = PathBuf::from("data/unifiedpush_endpoints.json");
 
         Self {
             config,
-            client: Client::new(),
+            client,
             endpoints: RwLock::new(HashMap::new()),
             storage_path,
         }

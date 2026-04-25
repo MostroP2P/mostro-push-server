@@ -41,18 +41,18 @@ struct CachedToken {
 }
 
 pub struct FcmPush {
-    client: Client,
+    client: Arc<reqwest::Client>,
     service_account: Option<ServiceAccount>,
     cached_token: Arc<RwLock<Option<CachedToken>>>,
     project_id: String,
 }
 
 impl FcmPush {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let service_account_path = std::env::var("FIREBASE_SERVICE_ACCOUNT_PATH").ok();
         let project_id = std::env::var("FIREBASE_PROJECT_ID")
             .unwrap_or_else(|_| "mostro".to_string());
-        
+
         let service_account = service_account_path.and_then(|path| {
             match fs::read_to_string(&path) {
                 Ok(content) => {
@@ -75,7 +75,7 @@ impl FcmPush {
         });
 
         Self {
-            client: Client::new(),
+            client,
             service_account,
             cached_token: Arc::new(RwLock::new(None)),
             project_id,

@@ -1,6 +1,7 @@
 use actix_web::{web, App, HttpServer};
 use log::info;
 use std::sync::Arc;
+use std::time::Duration;
 
 mod config;
 mod nostr;
@@ -41,11 +42,23 @@ async fn main() -> std::io::Result<()> {
         config.store.cleanup_interval_hours
     );
 
+    // Single shared reqwest::Client with explicit timeouts. Bounds outbound
+    // FCM/UnifiedPush calls so a hung remote endpoint cannot tie up tokio
+    // worker threads under sustained load. Per Phase 2 D-07.
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .build()
+            .expect("reqwest::Client build never fails on default config"),
+    );
+
     // Initialize push services
     let mut push_services: Vec<(Arc<dyn PushService>, &'static str)> = Vec::new();
 
     // Keep UnifiedPush service separate for endpoint management
-    let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone()));
+    let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone(), Arc::clone(&http_client)));
 
     // Load existing endpoints from disk
     if let Err(e) = unifiedpush_service.load_endpoints().await {
@@ -55,7 +68,7 @@ async fn main() -> std::io::Result<()> {
     // Initialize FCM service if enabled
     if config.push.fcm_enabled {
         info!("Initializing FCM push service");
-        let fcm_service = Arc::new(FcmPush::new(config.clone()));
+        let fcm_service = Arc::new(FcmPush::new(config.clone(), Arc::clone(&http_client)));
 
         // Try to initialize FCM authentication (optional - may fail if no credentials)
         match fcm_service.init().await {
