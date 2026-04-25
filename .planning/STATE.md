@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: executing
-last_updated: "2026-04-25T18:35:46.029Z"
+status: verifying
+last_updated: "2026-04-25T18:42:48.181Z"
 progress:
   total_phases: 3
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 4
-  completed_plans: 3
-  percent: 75
+  completed_plans: 4
+  percent: 100
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -32,16 +32,16 @@ progress:
 
 ## Current Position
 
-Phase: 02 (post-api-notify-endpoint-with-privacy-hardening) — EXECUTING
-Plan: 3 of 3 (next)
+Phase: 02 (post-api-notify-endpoint-with-privacy-hardening) — COMPLETE (3/3 plans)
+Plan: 3 of 3 — shipped (`ce619fa`)
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
-**Phase 2:** Plan 1 of 3 (Plan 2 next) — `02-01-PLAN.md` shipped (commit `56a1a6d`)
-**Status:** Ready to execute
-**Progress:** [████████░░] 75%
+**Phase 2:** /api/notify endpoint with privacy hardening — COMPLETE (3/3 plans) — commits `56a1a6d`, `d01dc97`, `ce619fa`
+**Status:** Phase complete — ready for verification
+**Progress:** [██████████] 100% (Phase 02 plans); milestone-level: Phase 03 still pending
 
 ```
 [████████████████████] 100%  Phase 1: PushDispatcher refactor (1/1 plans)
-[██████░░░░░░░░░░░░░░]  33%  Phase 2: /api/notify endpoint with privacy hardening (1/3 plans)
+[████████████████████] 100%  Phase 2: /api/notify endpoint with privacy hardening (3/3 plans)
 [░░░░░░░░░░░░░░░░░░░░]   0%  Phase 3: Dual-keyed rate limiting and verification harness
 ```
 
@@ -52,13 +52,14 @@ Plan: 3 of 3 (next)
 | Metric | Value |
 |--------|-------|
 | Phases planned | 3 |
-| Phases complete | 1 |
+| Phases complete | 2 |
 | Requirements (v1.1, active) | 17 |
 | Requirements mapped to phases | 17 / 17 (100%) |
 | Open Design Decisions deferred to plan-phase | 6 (OPEN-1..6) |
 | Anti-requirements recorded | 12 (OOS-10..21) |
-| Plans complete | 2 |
-| Verifications passed | 0 (Phase 1 manual smoke pending operator; Phase 2 Plan 01 manual smoke pending operator) |
+| Plans complete | 4 |
+| Requirements closed | 8 (DISPATCH-01, DISPATCH-02, NOTIFY-01..04, PRIV-01..03, VERIFY-03) |
+| Verifications passed | 0 (Phase 1 manual smoke pending operator; Phase 2 Plans 01 + 02 manual smokes pending operator; VERIFY-03 runbook is the operator-side artefact for the dispute-chat path) |
 
 | Phase / Plan | Duration (s) | Tasks | Files |
 |--------------|--------------|-------|-------|
@@ -67,6 +68,7 @@ Plan: 3 of 3 (next)
 
 ---
 | Phase 02 P02 | 359 | 8 tasks | 12 files |
+| Phase 02 P02-03 | 131 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -82,6 +84,7 @@ Plan: 3 of 3 (next)
 - [Phase 01]: Extracted PushDispatcher with Arc<[Arc<dyn PushService>]> immutable slice; removed Mutex from dispatch path; bundled D-09 (Send + Sync error tightening) and D-10 (delete unused send_silent_push) trait-surface hygiene; added anti-CRIT-1 comment block above Filter::new().
 - Phase 02 Plan 01: Constructed shared Arc<reqwest::Client> with timeouts (connect=2s, total=5s, pool_idle=90s) per D-07/D-08; FcmPush::new and UnifiedPushService::new now take Arc<reqwest::Client> as a second argument. No behavioural change to either dispatch path.
 - Phase 02 Plan 02: Shipped POST /api/notify endpoint with privacy hardening bundle (D-05/D-09/D-10/D-11/D-12/D-13/D-14/D-15/D-16/D-20/D-21/D-22) in atomic commit d01dc97. always-202 contract, salted-BLAKE3 log_pubkey, UUIDv4 X-Request-Id middleware scoped to /notify resource, separate FCM silent payload (apns-priority 5, apns-push-type background), bounded tokio::spawn via Arc<Semaphore>(50), RUST_LOG=info flip. Phase 1 listener path byte-identical.
+- Phase 02 Plan 03: shipped docs/verification/dispute-chat.md operator runbook for VERIFY-03 (D-17, D-18) — Spanish prose, four sections, anti-CRIT-1 grep one-liner. Plan 02-03 is doc-only; src/nostr/listener.rs byte-identical.
 
 ### Open Decisions (resolved during `/gsd-plan-phase`)
 
@@ -111,9 +114,9 @@ None at roadmap stage.
 
 ## Session Continuity
 
-**Last action:** Phase 02 Plan 02 (`02-02-PLAN.md`) executed and committed (commit `d01dc97` on `feat/fcm-for-p2p-chat`). Shipped `POST /api/notify` endpoint with full privacy-hardening bundle per D-19 atomic commit grain (D-05/D-09/D-10/D-11/D-12/D-13/D-14/D-15/D-16/D-20/D-21/D-22): always-202 contract, salted-BLAKE3 `log_pubkey()` correlator, server-side UUIDv4 `X-Request-Id` middleware scoped to the `/notify` resource, separate FCM silent payload builder (apns-priority 5 + apns-push-type background), bounded `tokio::spawn` via `Arc<Semaphore>(50)` with silent drop on saturation, `deploy-fly.sh` `RUST_LOG=info` flip. SUMMARY.md created at `.planning/phases/02-post-api-notify-endpoint-with-privacy-hardening/02-02-SUMMARY.md`. `cargo build --release` and `cargo test --release` both pass (7/7 unit tests). 12 files changed (10 modified + 2 created); `src/nostr/listener.rs` byte-identical (Phase 1 invariant), all 4 existing `routes.rs` DTOs and 5 existing handlers byte-identical (COMPAT-1). Closes NOTIFY-01..04 and PRIV-01..03 (7 requirements). Manual smoke on Fly.io staging is PENDING operator action (5 smoke cases in `02-02-SUMMARY.md`).
+**Last action:** Phase 02 Plan 03 (`02-03-PLAN.md`) executed and committed (commit `ce619fa` on `feat/fcm-for-p2p-chat`). Shipped `docs/verification/dispute-chat.md` — a 203-line, 1076-word Spanish operator runbook covering VERIFY-03 (D-17, D-18). Four mandatory sections: register test pubkey via `POST /api/register`, publish a `kind 1059` Gift Wrap from a second Nostr client (NOT the Mostro daemon), verify `Push sent successfully for event ...` log + device push, and the anti-CRIT-1 grep one-liner (`grep -nE '^\s*[^/].*\.authors\( src/nostr/listener.rs`) with PASS/FAIL exit-status. Plus prerequisites, prose explanation of the anti-requirement, cleanup section (`POST /api/unregister`), recommended frequency, and references. No emojis, no Rust code comments, no `/api/notify` smoke step (that is Plan 02-02 territory). One single-file commit; `src/nostr/listener.rs` byte-identical (Phase 1 + Phase 2 invariant). Closes VERIFY-03 (1 requirement). Phase 02 now complete (3/3 plans).
 
-**Next action:** Operator runs Plan 02-01 + Plan 02-02 manual smokes on Fly.io staging; then proceed to Plan 02-03 (`docs/verification/dispute-chat.md` operator runbook for VERIFY-03). Plan 02-03 is doc-only and does not touch source code.
+**Next action:** Operator runs Plan 02-01, 02-02, and 02-03 manual smokes on Fly.io staging following the runbook. Then `/gsd-plan-phase 3` to decompose Phase 3 (Dual-keyed rate limiting + VERIFY-01/02 in-process integration suite). Phase 3 prereqs: mobile-team chat traffic-pattern data for OPEN-3 burst tuning; pre-flight crate-docs verification for OPEN-4 (`actix-governor` 0.5 vs 0.6) and explicit user approval to add it to `Cargo.toml`.
 
 **Files in play:**
 
@@ -127,7 +130,7 @@ None at roadmap stage.
 
 ---
 
-*Last updated: 2026-04-25 by executor for Plan 02-02.*
+*Last updated: 2026-04-25 by executor for Plan 02-03.*
 
 **Planned Phase:** 02 (post-api-notify-endpoint-with-privacy-hardening) — 3 plans — 2026-04-25T18:06:02.546Z
-**Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z), 02-02 (`d01dc97`, 2026-04-25T18:32:22Z)
+**Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z), 02-02 (`d01dc97`, 2026-04-25T18:32:22Z), 02-03 (`ce619fa`, 2026-04-25T18:40:41Z)

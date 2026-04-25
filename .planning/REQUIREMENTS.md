@@ -49,7 +49,8 @@ This milestone unblocks Phase 4 of the mobile chat-notifications plan by giving 
 
 - [ ] **VERIFY-01**: An in-process integration test suite (using `actix_web::test::init_service` against a real `governor` middleware and a stub `PushService`) covers `/api/notify` with: a valid registered pubkey, a valid unregistered pubkey, a malformed pubkey body, sustained calls hitting the per-pubkey 429 boundary, and sustained calls from a single `Fly-Client-IP` header value hitting the per-IP 429 boundary. The exact assertion shape adapts to the OPEN-1 resolution (e.g. `200/404` differentiated bodies vs always-`202`).
 - [ ] **VERIFY-02**: A regression test verifies the existing `/api/register` and `/api/unregister` responses are byte-identical to a frozen pre-milestone fixture, catching any incidental refactor that would break current mobile clients.
-- [ ] **VERIFY-03**: A manual runbook lives at `docs/verification/dispute-chat.md` documenting how to verify end-to-end that an admin DM (sent directly user-to-user, NOT routed through the Mostro daemon, addressed at `p` tag = a registered `trade_pubkey`) reaches the registered device as a silent push via the existing relay-monitoring path. Includes a reminder that no `.authors(mostro_pubkey)` filter must be added to the listener (anti-requirement on the milestone).
+- [x] **VERIFY-03
+**: A manual runbook lives at `docs/verification/dispute-chat.md` documenting how to verify end-to-end that an admin DM (sent directly user-to-user, NOT routed through the Mostro daemon, addressed at `p` tag = a registered `trade_pubkey`) reaches the registered device as a silent push via the existing relay-monitoring path. Includes a reminder that no `.authors(mostro_pubkey)` filter must be added to the listener (anti-requirement on the milestone).
 
 ---
 
