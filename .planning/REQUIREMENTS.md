@@ -111,12 +111,38 @@ These are surfaced from the research and **deliberately not pre-decided here**. 
 
 ## Traceability
 
-Filled in by the roadmap. Each REQ is mapped to exactly one phase.
+Every v1.1 requirement is mapped to exactly one phase. Coverage: 17 / 17.
 
-| REQ-ID | Phase |
-|--------|-------|
-| (filled by `/gsd-roadmapper`) | |
+| REQ-ID | Phase | Status |
+|--------|-------|--------|
+| DISPATCH-01 | Phase 1 | Pending |
+| DISPATCH-02 | Phase 1 | Pending |
+| NOTIFY-01   | Phase 2 | Pending |
+| NOTIFY-02   | Phase 2 | Pending |
+| NOTIFY-03   | Phase 2 | Pending |
+| NOTIFY-04   | Phase 2 | Pending |
+| PRIV-01     | Phase 2 | Pending |
+| PRIV-02     | Phase 2 | Pending |
+| PRIV-03     | Phase 2 | Pending |
+| VERIFY-03   | Phase 2 | Pending |
+| LIMIT-01    | Phase 3 | Pending |
+| LIMIT-02    | Phase 3 | Pending |
+| LIMIT-03    | Phase 3 | Pending |
+| LIMIT-04    | Phase 3 | Pending |
+| LIMIT-05    | Phase 3 | Pending |
+| LIMIT-06    | Phase 3 | Pending |
+| VERIFY-01   | Phase 3 | Pending |
+| VERIFY-02   | Phase 3 | Pending |
+
+### Phase composition
+
+| Phase | Requirements | Count |
+|-------|--------------|-------|
+| Phase 1 — PushDispatcher refactor | DISPATCH-01, DISPATCH-02 | 2 |
+| Phase 2 — `/api/notify` endpoint with privacy hardening | NOTIFY-01, NOTIFY-02, NOTIFY-03, NOTIFY-04, PRIV-01, PRIV-02, PRIV-03, VERIFY-03 | 8 |
+| Phase 3 — Dual-keyed rate limiting and verification harness | LIMIT-01, LIMIT-02, LIMIT-03, LIMIT-04, LIMIT-05, LIMIT-06, VERIFY-01, VERIFY-02 | 8 |
+| **Total** | | **17 / 17** |
 
 ---
 
-*Last updated: 2026-04-24 after `/gsd-new-project` requirements step*
+*Last updated: 2026-04-24 by `/gsd-roadmapper` (Traceability section populated from ROADMAP.md)*
