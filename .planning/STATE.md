@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: planning
-last_updated: "2026-04-25T18:06:02.554Z"
+status: verifying
+last_updated: "2026-04-25T18:22:57.484Z"
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 4
-  completed_plans: 1
-  percent: 25
+  completed_plans: 2
+  percent: 50
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -24,7 +24,7 @@ progress:
 
 **Core value:** The Mostro Mobile client receives a silent push the moment a relevant Nostr event lands on the configured relays — without the push server, Google/Apple, or any operator learning who is trading with whom or what is being said.
 
-**Current focus:** Phase 1 — PushDispatcher refactor (no behaviour change)
+**Current focus:** Phase 02 — post-api-notify-endpoint-with-privacy-hardening
 
 **Brownfield context:** Phases 1-3 of `docs/IMPLEMENTATION_PHASES.md` (HTTP API, FCM/UnifiedPush dispatch, deploy) are complete. Phase 4 (token encryption) is deferred to a separate milestone. The current milestone is the **first GSD-tracked milestone** in the project; phase numbering starts at 1.
 
@@ -32,14 +32,16 @@ progress:
 
 ## Current Position
 
-**Phase:** 1 — PushDispatcher refactor (no behaviour change) — COMPLETE
-**Plan:** 1 of 1 (complete)
-**Status:** Phase 1 complete; awaiting Phase 2 planning
-**Progress:** [██████████] 100% Phase 1 (1/1 plans)
+Phase: 02 (post-api-notify-endpoint-with-privacy-hardening) — EXECUTING
+Plan: 2 of 3 (next)
+**Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
+**Phase 2:** Plan 1 of 3 (Plan 2 next) — `02-01-PLAN.md` shipped (commit `56a1a6d`)
+**Status:** Plan 02-01 complete; ready to execute Plan 02-02
+**Progress:** [█████░░░░░] 50% (2 plans complete out of 4 known so far)
 
 ```
-[████████████████████] 100%  Phase 1: PushDispatcher refactor
-[░░░░░░░░░░░░░░░░░░░░]   0%  Phase 2: /api/notify endpoint with privacy hardening
+[████████████████████] 100%  Phase 1: PushDispatcher refactor (1/1 plans)
+[██████░░░░░░░░░░░░░░]  33%  Phase 2: /api/notify endpoint with privacy hardening (1/3 plans)
 [░░░░░░░░░░░░░░░░░░░░]   0%  Phase 3: Dual-keyed rate limiting and verification harness
 ```
 
@@ -55,12 +57,13 @@ progress:
 | Requirements mapped to phases | 17 / 17 (100%) |
 | Open Design Decisions deferred to plan-phase | 6 (OPEN-1..6) |
 | Anti-requirements recorded | 12 (OOS-10..21) |
-| Plans complete | 1 |
-| Verifications passed | 0 (Phase 1 manual smoke pending operator) |
+| Plans complete | 2 |
+| Verifications passed | 0 (Phase 1 manual smoke pending operator; Phase 2 Plan 01 manual smoke pending operator) |
 
 | Phase / Plan | Duration (s) | Tasks | Files |
 |--------------|--------------|-------|-------|
 | Phase 01 P01 | 416 | 6 tasks | 6 files |
+| Phase 02 P01 | 234 | 3 tasks | 3 files |
 
 ---
 
@@ -76,6 +79,7 @@ progress:
 | 2026-04-24 | Roadmap | Place VERIFY-03 (dispute-chat runbook) in Phase 2, not Phase 3. | The runbook is the Phase 2-end checkpoint that the Phase 1 refactor and Phase 2 addition did not regress the unchanged listener path. Putting it in Phase 3 would let a regression hide behind the rate-limiting layer's complexity. |
 
 - [Phase 01]: Extracted PushDispatcher with Arc<[Arc<dyn PushService>]> immutable slice; removed Mutex from dispatch path; bundled D-09 (Send + Sync error tightening) and D-10 (delete unused send_silent_push) trait-surface hygiene; added anti-CRIT-1 comment block above Filter::new().
+- Phase 02 Plan 01: Constructed shared Arc<reqwest::Client> with timeouts (connect=2s, total=5s, pool_idle=90s) per D-07/D-08; FcmPush::new and UnifiedPushService::new now take Arc<reqwest::Client> as a second argument. No behavioural change to either dispatch path.
 
 ### Open Decisions (resolved during `/gsd-plan-phase`)
 
@@ -105,9 +109,9 @@ None at roadmap stage.
 
 ## Session Continuity
 
-**Last action:** Phase 1 Plan 1 (`01-01-PLAN.md`) executed and committed (commit `a43aa49` on `feat/fcm-for-p2p-chat`). PushDispatcher extracted, Mutex removed from dispatch path, anti-CRIT-1 comment added above `Filter::new()`, `send_silent_push` deleted, `send_to_token` return type tightened to `Send + Sync`. SUMMARY.md created at `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-01-SUMMARY.md`. Manual smoke test on Fly.io staging is pending operator action.
+**Last action:** Phase 02 Plan 01 (`02-01-PLAN.md`) executed and committed (commit `56a1a6d` on `feat/fcm-for-p2p-chat`). Constructed shared `Arc<reqwest::Client>` with timeouts (connect=2s, total=5s, pool_idle=90s) per D-07/D-08; cascaded constructor signature change through `FcmPush::new` and `UnifiedPushService::new`. SUMMARY.md created at `.planning/phases/02-post-api-notify-endpoint-with-privacy-hardening/02-01-SUMMARY.md`. `cargo build --release` and `cargo test --release` both pass. No behavioural change to either dispatch path; Phase 1 listener-path files byte-identical. Manual smoke test on Fly.io staging is pending operator action (re-run dispute-chat verification from `01-01-SUMMARY.md`).
 
-**Next action:** Operator runs the manual smoke test (procedure in 01-01-SUMMARY.md "Manual smoke test" section); then `/gsd-plan-phase 2` to decompose Phase 2 (`POST /api/notify` endpoint with privacy hardening). Mobile-team coordination on OPEN-1 + OPEN-2 (response contract) needed before Phase 2 implementation begins.
+**Next action:** Operator runs Plan 01 manual smoke; then proceed to Plan 02-02 (`POST /api/notify` endpoint + privacy hardening bundle). Mobile-team coordination on OPEN-1 + OPEN-2 (response contract) is now resolved per `02-CONTEXT.md` D-01..D-04 (always-202 contract locked, mobile-team to be informed before Plan 02-02 implementation begins).
 
 **Files in play:**
 
@@ -121,6 +125,7 @@ None at roadmap stage.
 
 ---
 
-*Last updated: 2026-04-24 by `/gsd-roadmapper`*
+*Last updated: 2026-04-25 by executor for Plan 02-01.*
 
 **Planned Phase:** 02 (post-api-notify-endpoint-with-privacy-hardening) — 3 plans — 2026-04-25T18:06:02.546Z
+**Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z)

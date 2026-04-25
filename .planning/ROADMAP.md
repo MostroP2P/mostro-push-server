@@ -117,10 +117,10 @@ These are recorded as a roadmap-level guardrail. Reviewers checking phase plans 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. PushDispatcher refactor | 0/1 | Planned | - |
-| 2. `POST /api/notify` endpoint with privacy hardening | 0/0 (TBD) | Not started | - |
+| 1. PushDispatcher refactor | 1/1 | Complete | 2026-04-25 |
+| 2. `POST /api/notify` endpoint with privacy hardening | 1/3 | Executing | - |
 | 3. Dual-keyed rate limiting and verification harness | 0/0 (TBD) | Not started | - |
 
 ---
 
-*Last updated: 2026-04-24 by `/gsd-roadmapper` during milestone v1.1 initialisation*
+*Last updated: 2026-04-25 — Phase 02 Plan 01 (`56a1a6d`) shipped: shared `Arc<reqwest::Client>` with timeouts.*
