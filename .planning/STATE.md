@@ -1,3 +1,16 @@
+---
+gsd_state_version: 1.0
+milestone: v1.1
+milestone_name: milestone
+status: Awaiting `/gsd-plan-phase 1`
+last_updated: "2026-04-25T00:36:20.672Z"
+progress:
+  total_phases: 3
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+---
+
 # State — Mostro Push Server v1.1 (Chat Notifications)
 
 **Project:** mostro-push-server
@@ -90,6 +103,7 @@ None at roadmap stage.
 **Next action:** `/gsd-plan-phase 1` — decompose "PushDispatcher refactor (no behaviour change)" into plans.
 
 **Files in play:**
+
 - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/PROJECT.md`
 - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/REQUIREMENTS.md` (Traceability section now populated)
 - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/ROADMAP.md` (created this session)
