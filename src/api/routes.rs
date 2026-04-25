@@ -8,6 +8,7 @@ use tokio::sync::Semaphore;
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::push::PushDispatcher;
 use crate::store::{TokenStore, TokenStoreStats, Platform};
+use crate::utils::log_pubkey::log_pubkey;
 
 /// Request for registering a plaintext token (Phase 3 - unencrypted)
 #[derive(Deserialize)]
@@ -91,8 +92,10 @@ async fn register_token(
     state: web::Data<AppState>,
     req: web::Json<RegisterTokenRequest>,
 ) -> impl Responder {
-    info!("Registering token for trade_pubkey: {}...",
-        &req.trade_pubkey[..16.min(req.trade_pubkey.len())]);
+    info!(
+        "Registering token pk={}",
+        log_pubkey(&state.notify_log_salt, &req.trade_pubkey)
+    );
 
     // Validate trade_pubkey format (should be 64 hex chars)
     if req.trade_pubkey.len() != 64 || hex::decode(&req.trade_pubkey).is_err() {
@@ -136,9 +139,9 @@ async fn register_token(
     ).await;
 
     info!(
-        "Successfully registered {} token for trade_pubkey: {}...",
+        "Successfully registered {} token pk={}",
         platform,
-        &req.trade_pubkey[..16]
+        log_pubkey(&state.notify_log_salt, &req.trade_pubkey)
     );
 
     HttpResponse::Ok().json(RegisterResponse {
@@ -152,8 +155,10 @@ async fn unregister_token(
     state: web::Data<AppState>,
     req: web::Json<UnregisterTokenRequest>,
 ) -> impl Responder {
-    info!("Unregistering token for trade_pubkey: {}...",
-        &req.trade_pubkey[..16.min(req.trade_pubkey.len())]);
+    info!(
+        "Unregistering token pk={}",
+        log_pubkey(&state.notify_log_salt, &req.trade_pubkey)
+    );
 
     // Validate trade_pubkey format
     if req.trade_pubkey.len() != 64 || hex::decode(&req.trade_pubkey).is_err() {

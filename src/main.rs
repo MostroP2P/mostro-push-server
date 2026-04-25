@@ -34,8 +34,19 @@ async fn main() -> std::io::Result<()> {
     // Load configuration
     let config = Config::from_env().expect("Failed to load configuration");
 
+    // PRIV-01 / SC #5: shared log salt for privacy-safe pubkey correlators
+    // across all modules (notify, register/unregister, store, listener).
+    // Random per process, in-memory only, never persisted, never logged.
+    // Salt regeneration on every restart is the explicit privacy property.
+    let mut salt_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt_bytes);
+    let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
+
     // Initialize token store
-    let token_store = Arc::new(TokenStore::new(config.store.token_ttl_hours));
+    let token_store = Arc::new(TokenStore::new(
+        config.store.token_ttl_hours,
+        notify_log_salt.clone(),
+    ));
 
     // Start cleanup task
     store::start_cleanup_task(token_store.clone(), config.store.cleanup_interval_hours);
@@ -92,13 +103,6 @@ async fn main() -> std::io::Result<()> {
 
     let dispatcher = Arc::new(PushDispatcher::new(push_services));
 
-    // D-09 + D-14: notify_log_salt — random per process, in-memory only,
-    // never persisted, never logged. Salt regeneration on every restart is
-    // the explicit privacy property (PRIV-01).
-    let mut salt_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut salt_bytes);
-    let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
-
     // D-09 + D-03: bound the /api/notify spawn pile to 50 in-flight tasks.
     // On saturation, the handler silently drops (warn! log without pubkey).
     let notify_semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(50));
@@ -108,6 +112,7 @@ async fn main() -> std::io::Result<()> {
         config.clone(),
         dispatcher.clone(),
         token_store.clone(),
+        notify_log_salt.clone(),
     ).expect("Failed to initialize Nostr listener - check MOSTRO_PUBKEY");
 
     tokio::spawn(async move {

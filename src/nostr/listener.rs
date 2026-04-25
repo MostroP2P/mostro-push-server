@@ -7,12 +7,14 @@ use tokio::time::{sleep, Duration};
 use crate::config::Config;
 use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
 use crate::store::TokenStore;
+use crate::utils::log_pubkey::log_pubkey;
 
 pub struct NostrListener {
     config: Config,
     dispatcher: Arc<PushDispatcher>,
     token_store: Arc<TokenStore>,
     mostro_pubkey: String,
+    log_salt: Arc<[u8; 32]>,
 }
 
 impl NostrListener {
@@ -20,6 +22,7 @@ impl NostrListener {
         config: Config,
         dispatcher: Arc<PushDispatcher>,
         token_store: Arc<TokenStore>,
+        log_salt: Arc<[u8; 32]>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Validate the pubkey format
         let mostro_pubkey = config.nostr.mostro_pubkey.clone();
@@ -35,6 +38,7 @@ impl NostrListener {
             dispatcher,
             token_store,
             mostro_pubkey,
+            log_salt,
         })
     }
 
@@ -87,6 +91,7 @@ impl NostrListener {
         // Handle incoming events
         let token_store = self.token_store.clone();
         let dispatcher = self.dispatcher.clone();
+        let log_salt = self.log_salt.clone();
 
         client
             .handle_notifications(|notification| async {
@@ -107,13 +112,14 @@ impl NostrListener {
                             });
 
                         if let Some(trade_pubkey) = recipient_pubkey {
-                            info!("Event recipient (p tag): {}...", &trade_pubkey[..16.min(trade_pubkey.len())]);
+                            let log_pk = log_pubkey(&log_salt, &trade_pubkey);
+                            info!("Event recipient (p tag) pk={}", log_pk);
 
                             // Look up token in store
                             if let Some(registered_token) = token_store.get(&trade_pubkey).await {
                                 info!(
-                                    "MATCH! Found registered token for {}..., sending push to {} device",
-                                    &trade_pubkey[..16],
+                                    "MATCH! Found registered token pk={}, sending push to {} device",
+                                    log_pk,
                                     registered_token.platform
                                 );
 
@@ -134,7 +140,7 @@ impl NostrListener {
                                     }
                                 }
                             } else {
-                                debug!("No registered token for {}...", &trade_pubkey[..16.min(trade_pubkey.len())]);
+                                debug!("No registered token pk={}", log_pk);
                             }
                         } else {
                             warn!("No 'p' tag found in Gift Wrap event {}", event.id);

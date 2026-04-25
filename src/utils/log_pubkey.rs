@@ -1,9 +1,10 @@
 //! Salted, truncated pubkey hashing for privacy-safe operator logs.
 //!
-//! Per Phase 2 D-14 (PRIV-01): used ONLY in the /api/notify handler and its
-//! spawned dispatch task. Existing pubkey-prefix logs in src/nostr/listener.rs,
-//! src/api/routes.rs, and src/store/mod.rs are intentionally NOT migrated to
-//! preserve operator grep-ability through the transition.
+//! Per Phase 2 PRIV-01 / SC #5: used everywhere a `trade_pubkey` would
+//! otherwise appear in operator logs (the /api/notify handler and its
+//! spawned dispatch task, the registration/unregistration handlers, the
+//! TokenStore lifecycle logs, and the Nostr listener event-recipient and
+//! match logs). No module emits raw hex prefixes in production.
 //!
 //! The salt is generated once at process startup (random in-memory only,
 //! never persisted, never logged). Comparing log lines across process
