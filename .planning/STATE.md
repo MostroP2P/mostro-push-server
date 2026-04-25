@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: ready_to_plan
-last_updated: "2026-04-25T18:42:48.181Z"
+status: planning
+last_updated: "2026-04-25T22:37:27.061Z"
 progress:
   total_phases: 3
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 4
   completed_plans: 4
   percent: 100
@@ -114,9 +114,11 @@ None at roadmap stage.
 
 ## Session Continuity
 
-**Last action:** Phase 02 Plan 03 (`02-03-PLAN.md`) executed and committed (commit `ce619fa` on `feat/fcm-for-p2p-chat`). Shipped `docs/verification/dispute-chat.md` — a 203-line, 1076-word Spanish operator runbook covering VERIFY-03 (D-17, D-18). Four mandatory sections: register test pubkey via `POST /api/register`, publish a `kind 1059` Gift Wrap from a second Nostr client (NOT the Mostro daemon), verify `Push sent successfully for event ...` log + device push, and the anti-CRIT-1 grep one-liner (`grep -nE '^\s*[^/].*\.authors\( src/nostr/listener.rs`) with PASS/FAIL exit-status. Plus prerequisites, prose explanation of the anti-requirement, cleanup section (`POST /api/unregister`), recommended frequency, and references. No emojis, no Rust code comments, no `/api/notify` smoke step (that is Plan 02-02 territory). One single-file commit; `src/nostr/listener.rs` byte-identical (Phase 1 + Phase 2 invariant). Closes VERIFY-03 (1 requirement). Phase 02 now complete (3/3 plans).
+**Last action:** Phase 03 context gathered via `/gsd-discuss-phase 3` and committed (commit `6159a80`). Wrote `.planning/phases/03-dual-keyed-rate-limiting-and-verification-harness/03-CONTEXT.md` (30 decisions D-01..D-30) and `03-DISCUSSION-LOG.md` (4 areas, 17 questions, full audit trail). All 4 user-selected gray areas resolved: (1) per-pubkey 30/min burst 10 + per-IP 120/min burst 30 (PITFALLS RL-3 numbers, OPEN-3 closed); (2) actix-governor REJECTED due to GPL-3.0 vs project's MIT — hand-rolled middleware on `governor = "0.6"` (already declared, MIT) instead, OPEN-4 closed without new dep; (3) per-pubkey limiter wired as `Arc<DefaultKeyedRateLimiter<String>>` in `AppState`, dedicated `start_rate_limit_cleanup_task` in new `src/api/rate_limit.rs`, 60s cleanup + 100k soft-cap with env overrides, 429 byte-identical between per-IP and per-pubkey paths with `Retry-After` header; (4) tests co-located in `#[cfg(test)] mod tests` per source file, stub `PushService` with `Arc<Mutex<Vec<(String,Platform)>>>`, 6 mandatory TEST-1 scenarios + 4 additional regressions (`/api/health` 1000-burst, `X-Request-Id`, 429 byte-equality, `retain_recent` plumbing), VERIFY-02 via inline JSON literal.
 
-**Next action:** Operator runs Plan 02-01, 02-02, and 02-03 manual smokes on Fly.io staging following the runbook. Then `/gsd-plan-phase 3` to decompose Phase 3 (Dual-keyed rate limiting + VERIFY-01/02 in-process integration suite). Phase 3 prereqs: mobile-team chat traffic-pattern data for OPEN-3 burst tuning; pre-flight crate-docs verification for OPEN-4 (`actix-governor` 0.5 vs 0.6) and explicit user approval to add it to `Cargo.toml`.
+**Next action:** `/gsd-plan-phase 3` to decompose Phase 3 into executable plans. Pre-flight verifications already completed during context gathering: `actix-governor` license confirmed GPL-3.0 across all 21 published versions (rejected); `governor = "0.6"` keyed-RateLimiter API surface (`RateLimiter::keyed`, `check_key`, `retain_recent`, `len`) confirmed compatible with the implementation sketch. Mobile-team coordination on OPEN-3 burst tuning is no longer blocking — defaults locked from PITFALLS research and runtime-overridable via env vars.
+
+Phase 02 (`POST /api/notify` endpoint with privacy hardening) shipped earlier this session: commits `56a1a6d` (Plan 02-01: shared `reqwest::Client`), `d01dc97` (Plan 02-02: notify endpoint + privacy bundle), `ce619fa` (Plan 02-03: dispute-chat runbook). Operator manual smoke on Fly.io staging still pending.
 
 **Files in play:**
 
@@ -130,7 +132,8 @@ None at roadmap stage.
 
 ---
 
-*Last updated: 2026-04-25 by executor for Plan 02-03.*
+*Last updated: 2026-04-25 by /gsd-discuss-phase 3 — Phase 03 context gathered (commit `6159a80`).*
 
 **Planned Phase:** 02 (post-api-notify-endpoint-with-privacy-hardening) — 3 plans — 2026-04-25T18:06:02.546Z
 **Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z), 02-02 (`d01dc97`, 2026-04-25T18:32:22Z), 02-03 (`ce619fa`, 2026-04-25T18:40:41Z)
+**Phase 03 Context:** `6159a80` — 30 decisions (D-01..D-30), 4 areas discussed, OPEN-3 + OPEN-4 closed without new dependencies.
