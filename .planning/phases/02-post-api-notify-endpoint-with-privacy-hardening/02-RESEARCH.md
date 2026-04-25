@@ -934,9 +934,11 @@ fi
 
 **If this table contained no rows:** all claims would be verified or cited. Six assumptions remain — five are minor design choices made in CONTEXT.md (deferring detailed risk analysis to a future tuning milestone), one (A6) is a verified-now-but-future-fragile lockfile fact. None block planning.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 These need user resolution **before commit #2 begins** (commit #1 is just `reqwest::Client` hygiene, doesn't touch middleware or hashing).
+
+All three open questions below were resolved during `/gsd-discuss-phase` and now have corresponding decisions in `02-CONTEXT.md` (Research Resolutions section).
 
 ### Q1. Bump `actix-web` to `"4.9"` in `Cargo.toml`?
 
@@ -947,6 +949,7 @@ These need user resolution **before commit #2 begins** (commit #1 is just `reqwe
   2. Leave `"4.4"`, add a comment in `src/api/notify.rs` explaining the requirement. No approval needed; assumes lockfile stays current.
   3. Hand-roll middleware via `Transform + Service` traits. Works on any 4.x. ~80 lines of boilerplate. No approval needed.
 - **Recommendation:** **Option 1** if user approves; otherwise **Option 2**. Option 3 is a fallback only if user rejects the bump AND wants belt-and-suspenders.
+- **RESOLUTION:** D-20 — see `02-CONTEXT.md` "Research Resolutions" section. User approved Option 1: bump `actix-web` to `"4.9"`.
 
 ### Q2. Add `uuid = "1"` features `["v4"]` as a new dep?
 
@@ -956,12 +959,14 @@ These need user resolution **before commit #2 begins** (commit #1 is just `reqwe
   1. Add `uuid = { version = "1", features = ["v4"] }`. Reviewable; conventional. Needs user approval.
   2. Hand-roll: 16 bytes from `rand::thread_rng()`, format with `format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}", ...)` setting version/variant nibbles per RFC 4122. ~10 lines. Doesn't need approval but adds reviewer burden.
 - **Recommendation:** **Option 1**. The `uuid` crate is ubiquitous and the manual path is exactly the kind of detail CRIT-style reviewers miss.
+- **RESOLUTION:** D-21 — see `02-CONTEXT.md` "Research Resolutions" section. User approved Option 1: add `uuid = { version = "1", features = ["v4"] }`.
 
 ### Q3. `PushDispatcher` API shape for silent dispatch (Option A vs B in Pattern 5)?
 
 - **What we know:** D-05 mandates the new `build_silent_payload_for_notify` exists and is used only by `/api/notify`. CONTEXT.md leaves the dispatch wiring shape under Claude's discretion.
 - **What's unclear:** Whether `PushDispatcher::dispatch_silent` (Option A — new method) or `PushDispatcher::dispatch(token, silent: bool)` (Option B — flag parameter) is preferred.
 - **Recommendation:** **Option A** (`dispatch_silent`). More discoverable, no behavioral overload of the existing `dispatch` method (which the listener path keeps calling unchanged). The internal implementation can share an inner helper to avoid duplication. Plan-phase decides.
+- **RESOLUTION:** D-22 — see `02-CONTEXT.md` "Research Resolutions" section. User selected Option A: add `PushDispatcher::dispatch_silent` as a new method (with shared inner helper).
 
 ## Environment Availability
 
