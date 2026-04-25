@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: verifying
-last_updated: "2026-04-25T18:22:57.484Z"
+status: executing
+last_updated: "2026-04-25T18:35:46.029Z"
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 4
-  completed_plans: 2
-  percent: 50
+  completed_plans: 3
+  percent: 75
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -33,11 +33,11 @@ progress:
 ## Current Position
 
 Phase: 02 (post-api-notify-endpoint-with-privacy-hardening) — EXECUTING
-Plan: 2 of 3 (next)
+Plan: 3 of 3 (next)
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
 **Phase 2:** Plan 1 of 3 (Plan 2 next) — `02-01-PLAN.md` shipped (commit `56a1a6d`)
-**Status:** Plan 02-01 complete; ready to execute Plan 02-02
-**Progress:** [█████░░░░░] 50% (2 plans complete out of 4 known so far)
+**Status:** Ready to execute
+**Progress:** [████████░░] 75%
 
 ```
 [████████████████████] 100%  Phase 1: PushDispatcher refactor (1/1 plans)
@@ -66,6 +66,7 @@ Plan: 2 of 3 (next)
 | Phase 02 P01 | 234 | 3 tasks | 3 files |
 
 ---
+| Phase 02 P02 | 359 | 8 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,7 @@ Plan: 2 of 3 (next)
 
 - [Phase 01]: Extracted PushDispatcher with Arc<[Arc<dyn PushService>]> immutable slice; removed Mutex from dispatch path; bundled D-09 (Send + Sync error tightening) and D-10 (delete unused send_silent_push) trait-surface hygiene; added anti-CRIT-1 comment block above Filter::new().
 - Phase 02 Plan 01: Constructed shared Arc<reqwest::Client> with timeouts (connect=2s, total=5s, pool_idle=90s) per D-07/D-08; FcmPush::new and UnifiedPushService::new now take Arc<reqwest::Client> as a second argument. No behavioural change to either dispatch path.
+- Phase 02 Plan 02: Shipped POST /api/notify endpoint with privacy hardening bundle (D-05/D-09/D-10/D-11/D-12/D-13/D-14/D-15/D-16/D-20/D-21/D-22) in atomic commit d01dc97. always-202 contract, salted-BLAKE3 log_pubkey, UUIDv4 X-Request-Id middleware scoped to /notify resource, separate FCM silent payload (apns-priority 5, apns-push-type background), bounded tokio::spawn via Arc<Semaphore>(50), RUST_LOG=info flip. Phase 1 listener path byte-identical.
 
 ### Open Decisions (resolved during `/gsd-plan-phase`)
 
@@ -109,9 +111,9 @@ None at roadmap stage.
 
 ## Session Continuity
 
-**Last action:** Phase 02 Plan 01 (`02-01-PLAN.md`) executed and committed (commit `56a1a6d` on `feat/fcm-for-p2p-chat`). Constructed shared `Arc<reqwest::Client>` with timeouts (connect=2s, total=5s, pool_idle=90s) per D-07/D-08; cascaded constructor signature change through `FcmPush::new` and `UnifiedPushService::new`. SUMMARY.md created at `.planning/phases/02-post-api-notify-endpoint-with-privacy-hardening/02-01-SUMMARY.md`. `cargo build --release` and `cargo test --release` both pass. No behavioural change to either dispatch path; Phase 1 listener-path files byte-identical. Manual smoke test on Fly.io staging is pending operator action (re-run dispute-chat verification from `01-01-SUMMARY.md`).
+**Last action:** Phase 02 Plan 02 (`02-02-PLAN.md`) executed and committed (commit `d01dc97` on `feat/fcm-for-p2p-chat`). Shipped `POST /api/notify` endpoint with full privacy-hardening bundle per D-19 atomic commit grain (D-05/D-09/D-10/D-11/D-12/D-13/D-14/D-15/D-16/D-20/D-21/D-22): always-202 contract, salted-BLAKE3 `log_pubkey()` correlator, server-side UUIDv4 `X-Request-Id` middleware scoped to the `/notify` resource, separate FCM silent payload builder (apns-priority 5 + apns-push-type background), bounded `tokio::spawn` via `Arc<Semaphore>(50)` with silent drop on saturation, `deploy-fly.sh` `RUST_LOG=info` flip. SUMMARY.md created at `.planning/phases/02-post-api-notify-endpoint-with-privacy-hardening/02-02-SUMMARY.md`. `cargo build --release` and `cargo test --release` both pass (7/7 unit tests). 12 files changed (10 modified + 2 created); `src/nostr/listener.rs` byte-identical (Phase 1 invariant), all 4 existing `routes.rs` DTOs and 5 existing handlers byte-identical (COMPAT-1). Closes NOTIFY-01..04 and PRIV-01..03 (7 requirements). Manual smoke on Fly.io staging is PENDING operator action (5 smoke cases in `02-02-SUMMARY.md`).
 
-**Next action:** Operator runs Plan 01 manual smoke; then proceed to Plan 02-02 (`POST /api/notify` endpoint + privacy hardening bundle). Mobile-team coordination on OPEN-1 + OPEN-2 (response contract) is now resolved per `02-CONTEXT.md` D-01..D-04 (always-202 contract locked, mobile-team to be informed before Plan 02-02 implementation begins).
+**Next action:** Operator runs Plan 02-01 + Plan 02-02 manual smokes on Fly.io staging; then proceed to Plan 02-03 (`docs/verification/dispute-chat.md` operator runbook for VERIFY-03). Plan 02-03 is doc-only and does not touch source code.
 
 **Files in play:**
 
@@ -125,7 +127,7 @@ None at roadmap stage.
 
 ---
 
-*Last updated: 2026-04-25 by executor for Plan 02-01.*
+*Last updated: 2026-04-25 by executor for Plan 02-02.*
 
 **Planned Phase:** 02 (post-api-notify-endpoint-with-privacy-hardening) — 3 plans — 2026-04-25T18:06:02.546Z
-**Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z)
+**Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z), 02-02 (`d01dc97`, 2026-04-25T18:32:22Z)

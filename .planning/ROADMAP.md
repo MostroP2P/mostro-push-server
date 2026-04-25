@@ -53,8 +53,8 @@ Plans:
   6. A documented manual runbook at `docs/verification/dispute-chat.md` walks an operator through verifying that an admin DM (sent directly user-to-user, NOT routed through the Mostro daemon) reaches a registered device as a silent push via the existing Nostr-listener path — including the explicit reminder that no `.authors(mostro_pubkey)` filter must ever be added (anti-CRIT-1).
 **Plans:** 3 plans
 Plans:
-- [ ] 02-01-PLAN.md — Add shared reqwest::Client with timeouts (D-07/D-08 foundation; constructor cascade through FcmPush + UnifiedPushService)
-- [ ] 02-02-PLAN.md — Add POST /api/notify endpoint + privacy hardening bundle (handler, X-Request-Id middleware, log_pubkey, semaphore, silent FCM payload, RUST_LOG flip, deps)
+- [x] 02-01-PLAN.md — Add shared reqwest::Client with timeouts (D-07/D-08 foundation; constructor cascade through FcmPush + UnifiedPushService)
+- [x] 02-02-PLAN.md — Add POST /api/notify endpoint + privacy hardening bundle (handler, X-Request-Id middleware, log_pubkey, semaphore, silent FCM payload, RUST_LOG flip, deps)
 - [ ] 02-03-PLAN.md — Add dispute-chat verification runbook in Spanish (VERIFY-03)
 **UI hint**: no
 
@@ -118,9 +118,9 @@ These are recorded as a roadmap-level guardrail. Reviewers checking phase plans 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. PushDispatcher refactor | 1/1 | Complete | 2026-04-25 |
-| 2. `POST /api/notify` endpoint with privacy hardening | 1/3 | Executing | - |
+| 2. `POST /api/notify` endpoint with privacy hardening | 2/3 | Executing | - |
 | 3. Dual-keyed rate limiting and verification harness | 0/0 (TBD) | Not started | - |
 
 ---
 
-*Last updated: 2026-04-25 — Phase 02 Plan 01 (`56a1a6d`) shipped: shared `Arc<reqwest::Client>` with timeouts.*
+*Last updated: 2026-04-25 — Phase 02 Plan 02 (`d01dc97`) shipped: POST /api/notify endpoint with privacy hardening bundle (NOTIFY-01..04 + PRIV-01..03 closed).*

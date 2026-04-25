@@ -18,10 +18,14 @@ This milestone unblocks Phase 4 of the mobile chat-notifications plan by giving 
 
 ### NOTIFY — Sender-triggered notify endpoint
 
-- [ ] **NOTIFY-01**: Server exposes a new `POST /api/notify` endpoint that accepts a `{ "trade_pubkey": "<64-hex>" }` body, validates the pubkey shape, and dispatches a silent push to the device registered for that pubkey via `PushDispatcher`. The response contract (status codes / body shape) is finalized in `/gsd-plan-phase` against open decision OPEN-1 — see "Open Design Decisions" below.
-- [ ] **NOTIFY-02**: The endpoint matches the wire contract that Mostro Mobile will call from `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md` Phase 4. Any contract change negotiated under OPEN-1 is coordinated with the mobile team before implementation.
-- [ ] **NOTIFY-03**: The existing `POST /api/register`, `POST /api/unregister`, `GET /api/health`, `GET /api/info`, and `GET /api/status` endpoints' request and response shapes remain byte-identical to the pre-milestone version (no incidental refactor of `RegisterResponse` / `RegisterTokenRequest` / `UnregisterTokenRequest`).
-- [ ] **NOTIFY-04**: An `X-Request-Id` middleware generates a server-side UUIDv4 per request and exposes it on the response. The middleware ignores any inbound `X-Request-Id` from the client (privacy-safe correlation only).
+- [x] **NOTIFY-01
+**: Server exposes a new `POST /api/notify` endpoint that accepts a `{ "trade_pubkey": "<64-hex>" }` body, validates the pubkey shape, and dispatches a silent push to the device registered for that pubkey via `PushDispatcher`. The response contract (status codes / body shape) is finalized in `/gsd-plan-phase` against open decision OPEN-1 — see "Open Design Decisions" below.
+- [x] **NOTIFY-02
+**: The endpoint matches the wire contract that Mostro Mobile will call from `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md` Phase 4. Any contract change negotiated under OPEN-1 is coordinated with the mobile team before implementation.
+- [x] **NOTIFY-03
+**: The existing `POST /api/register`, `POST /api/unregister`, `GET /api/health`, `GET /api/info`, and `GET /api/status` endpoints' request and response shapes remain byte-identical to the pre-milestone version (no incidental refactor of `RegisterResponse` / `RegisterTokenRequest` / `UnregisterTokenRequest`).
+- [x] **NOTIFY-04
+**: An `X-Request-Id` middleware generates a server-side UUIDv4 per request and exposes it on the response. The middleware ignores any inbound `X-Request-Id` from the client (privacy-safe correlation only).
 
 ### LIMIT — Abuse mitigation on `/api/notify`
 
@@ -34,9 +38,12 @@ This milestone unblocks Phase 4 of the mobile chat-notifications plan by giving 
 
 ### PRIV — Privacy hardening bundled across phases
 
-- [ ] **PRIV-01**: A new `log_pubkey(pk: &str) -> String` helper in the source tree produces a salted truncated BLAKE3 hash (e.g. `BLAKE3::hash("notify-log-v1:" + pk).to_hex()[..8]`) and is the only sanctioned form of pubkey identifier in any `info!`/`warn!` log line emitted by the new endpoint or by the dispatch refactor.
-- [ ] **PRIV-02**: `deploy-fly.sh` sets `RUST_LOG="info"` (down from the current `"debug"`). Bundled into this milestone because shipping `/api/notify` while production logs at `debug` would amplify the existing token-prefix leakage in `src/push/fcm.rs` and `src/push/unifiedpush.rs`.
-- [ ] **PRIV-03**: The `notify_token` handler never logs source IP, request body, response body, FCM/UnifiedPush token strings, or anything that could correlate sender to recipient. (Source IP for rate-limiting is held in memory only by the governor middleware; not emitted to logs.)
+- [x] **PRIV-01
+**: A new `log_pubkey(pk: &str) -> String` helper in the source tree produces a salted truncated BLAKE3 hash (e.g. `BLAKE3::hash("notify-log-v1:" + pk).to_hex()[..8]`) and is the only sanctioned form of pubkey identifier in any `info!`/`warn!` log line emitted by the new endpoint or by the dispatch refactor.
+- [x] **PRIV-02
+**: `deploy-fly.sh` sets `RUST_LOG="info"` (down from the current `"debug"`). Bundled into this milestone because shipping `/api/notify` while production logs at `debug` would amplify the existing token-prefix leakage in `src/push/fcm.rs` and `src/push/unifiedpush.rs`.
+- [x] **PRIV-03
+**: The `notify_token` handler never logs source IP, request body, response body, FCM/UnifiedPush token strings, or anything that could correlate sender to recipient. (Source IP for rate-limiting is held in memory only by the governor middleware; not emitted to logs.)
 
 ### VERIFY — Verification and tests
 
