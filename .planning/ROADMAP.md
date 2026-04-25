@@ -32,7 +32,9 @@ The three independent research dimensions (Architecture, Features, Pitfalls) all
   2. There is no `tokio::sync::Mutex` left wrapping the push-services list anywhere in the runtime; the services are held as `Arc<[Arc<dyn PushService>]>` and shared lock-free between the listener and any future caller.
   3. The Nostr listener no longer inlines the "find first matching backend, send, break on success" loop; it makes a single call into the new `PushDispatcher` whose dispatch outcome is logged.
   4. The dormant `MOSTRO_PUBKEY` config field and its startup validation are either removed or annotated with a hard-anti-fix comment that names the CRIT-1 anti-requirement and forbids ever adding `.authors(mostro_pubkey)` to the listener filter chain.
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 01-01-PLAN.md — Refactor push-dispatch ownership: extract PushDispatcher, drop Mutex, add anti-CRIT-1 comment, tighten PushService trait
 
 ### Phase 2: `POST /api/notify` endpoint with privacy hardening
 **Goal**: A registered Mostro Mobile client sending `POST /api/notify { trade_pubkey }` causes a silent push to reach the device registered for that pubkey, and shipping this endpoint does not introduce a `trade_pubkey ↔ source IP` correlation in production logs.
@@ -111,7 +113,7 @@ These are recorded as a roadmap-level guardrail. Reviewers checking phase plans 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. PushDispatcher refactor | 0/0 (TBD) | Not started | - |
+| 1. PushDispatcher refactor | 0/1 | Planned | - |
 | 2. `POST /api/notify` endpoint with privacy hardening | 0/0 (TBD) | Not started | - |
 | 3. Dual-keyed rate limiting and verification harness | 0/0 (TBD) | Not started | - |
 
