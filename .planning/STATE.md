@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
 status: executing
-last_updated: "2026-04-25T23:52:57.455Z"
+last_updated: "2026-04-26T00:08:53.810Z"
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 6
-  completed_plans: 5
-  percent: 83
+  completed_plans: 6
+  percent: 100
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -37,7 +37,7 @@ Plan: 1 of --name
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
 **Phase 2:** /api/notify endpoint with privacy hardening — COMPLETE (3/3 plans) — commits `56a1a6d`, `d01dc97`, `ce619fa`
 **Status:** Executing Phase --phase
-**Progress:** [████████░░] 83%
+**Progress:** [██████████] 100%
 
 ```
 [████████████████████] 100%  Phase 1: PushDispatcher refactor (1/1 plans)
@@ -70,6 +70,7 @@ Plan: 1 of --name
 | Phase 02 P02 | 359 | 8 tasks | 12 files |
 | Phase 02 P02-03 | 131 | 1 tasks | 1 files |
 | Phase 03-dual-keyed-rate-limiting-and-verification-harness P03-01 | 421 | 3 tasks | 6 files |
+| Phase 03-dual-keyed-rate-limiting-and-verification-harness P03-02 | 739 | 4 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,9 @@ Plan: 1 of --name
 - Phase 02 Plan 03: shipped docs/verification/dispute-chat.md operator runbook for VERIFY-03 (D-17, D-18) — Spanish prose, four sections, anti-CRIT-1 grep one-liner. Plan 02-03 is doc-only; src/nostr/listener.rs byte-identical.
 - Phase 03 Plan 01: hand-rolled per_ip_rate_limit_mw over governor::DefaultKeyedRateLimiter<IpAddr> (actix-governor rejected, GPL-3.0 incompatible with project MIT)
 - Phase 03 Plan 01: per-pubkey check wired in notify_token between log_pk emission and semaphore acquire (D-12); byte-identical 429 via shared rate_limited_response (D-13)
+- actix_web::test aliased as atest in test modules to avoid shadowing #[test] stdlib attribute
+- RateLimiter<FakeRelativeClock> requires explicit 4th generic NoOpMiddleware<<FakeRelativeClock as Clock>::Instant> due to QuantaInstant/Nanos mismatch under quanta feature
+- make_test_app() redesigned as TestAppComponents factory pair to avoid annotating actix_http::Request without direct dep
 
 ### Open Decisions (resolved during `/gsd-plan-phase`)
 
@@ -135,8 +139,8 @@ Phase 02 (`POST /api/notify` endpoint with privacy hardening) shipped earlier th
 
 ---
 
-*Last updated: 2026-04-25 by /gsd-discuss-phase 3 — Phase 03 context gathered (commit `6159a80`).*
+*Last updated: 2026-04-26 by /gsd-execute-phase 03-02 — Phase 03 Plan 02 complete (commit `227a8b5`).*
 
 **Planned Phase:** 03 (dual-keyed-rate-limiting-and-verification-harness) — 2 plans — 2026-04-25T23:38:11.647Z
-**Executed Plans:** 02-01 (`56a1a6d`, 2026-04-25T18:21:19Z), 02-02 (`d01dc97`, 2026-04-25T18:32:22Z), 02-03 (`ce619fa`, 2026-04-25T18:40:41Z)
-**Phase 03 Context:** `6159a80` — 30 decisions (D-01..D-30), 4 areas discussed, OPEN-3 + OPEN-4 closed without new dependencies.
+**Executed Plans:** 02-01 (`56a1a6d`), 02-02 (`d01dc97`), 02-03 (`ce619fa`), 03-01 (`c9070a9`), 03-02 (`227a8b5`, 2026-04-26T00:08:58Z)
+**Phase 03 Complete:** VERIFY-01 + VERIFY-02 closed. 30 tests passing. Milestone v1.1 all plans executed.
