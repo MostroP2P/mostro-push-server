@@ -58,8 +58,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/info", web::get().to(server_info))
             .service(
                 web::resource("/notify")
-                    .wrap(from_fn(request_id_mw))
+                    // Order matters: actix-web wraps in reverse-registration order, so the
+                    // last `.wrap()` is the outermost. `request_id_mw` MUST be outermost so
+                    // it runs even when `per_ip_rate_limit_mw` short-circuits with 429,
+                    // keeping x-request-id present on both 429 paths (anti-RL-2 oracle).
                     .wrap(from_fn(per_ip_rate_limit_mw))
+                    .wrap(from_fn(request_id_mw))
                     .route(web::post().to(notify_token)),
             ),
     );

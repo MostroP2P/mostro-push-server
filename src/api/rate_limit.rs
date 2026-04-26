@@ -385,6 +385,96 @@ mod tests {
         assert_eq!(body_str, r#"{"success":false,"message":"rate limited"}"#);
     }
 
+    /// Anti-RL-2 oracle (header parity): both 429 paths MUST carry an
+    /// x-request-id header. If only one path carries it, an attacker can
+    /// distinguish per-IP from per-pubkey rate limiting by the header's
+    /// presence — same oracle as a divergent body.
+    ///
+    /// Both halves are NON-TAUTOLOGICAL:
+    /// - per-IP 429: rotates pubkeys, fixes IP.
+    /// - per-pubkey 429: rotates IPs, fixes pubkey.
+    #[actix_web::test]
+    async fn x_request_id_present_on_both_429_paths() {
+        // ---- Per-IP 429 ----
+        let c_ip = make_test_components();
+        let app_ip = atest::init_service(build_test_actix_app(c_ip)).await;
+        let mut ip_429_iter: Option<usize> = None;
+        let mut ip_request_id: Option<String> = None;
+        for i in 0..40 {
+            let pk = seed_hex_pubkey(i as u64);
+            let req = atest::TestRequest::post()
+                .uri("/api/notify")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({"trade_pubkey": pk}))
+                .to_request();
+            let resp = atest::call_service(&app_ip, req).await;
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                ip_429_iter = Some(i);
+                ip_request_id = resp
+                    .headers()
+                    .get("x-request-id")
+                    .map(|h| h.to_str().unwrap().to_string());
+                break;
+            }
+        }
+        let ip_iter = ip_429_iter.expect("per-IP 429 path must trigger within 40 iterations");
+        assert!(
+            ip_iter >= IP_BURST as usize,
+            "captured a per-IP 429: iter={} must be >= IP_BURST={}",
+            ip_iter,
+            IP_BURST
+        );
+        let ip_request_id =
+            ip_request_id.expect("per-IP 429 MUST carry x-request-id (request_id_mw outermost)");
+
+        // ---- Per-pubkey 429 ----
+        let c_pk = make_test_components();
+        let app_pk = atest::init_service(build_test_actix_app(c_pk)).await;
+        let mut pk_429_iter: Option<usize> = None;
+        let mut pk_request_id: Option<String> = None;
+        for i in 0..15 {
+            let ip = format!("10.30.{}.{}", i / 256, i % 256);
+            let req = atest::TestRequest::post()
+                .uri("/api/notify")
+                .insert_header(("Fly-Client-IP", ip.as_str()))
+                .set_json(serde_json::json!({"trade_pubkey": TEST_PUBKEY}))
+                .to_request();
+            let resp = atest::call_service(&app_pk, req).await;
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                pk_429_iter = Some(i);
+                pk_request_id = resp
+                    .headers()
+                    .get("x-request-id")
+                    .map(|h| h.to_str().unwrap().to_string());
+                break;
+            }
+        }
+        let pk_iter = pk_429_iter.expect("per-pubkey 429 path must trigger within 15 iterations");
+        assert!(
+            pk_iter <= PUBKEY_BURST as usize,
+            "captured a per-pubkey 429: iter={} must be <= PUBKEY_BURST={}",
+            pk_iter,
+            PUBKEY_BURST
+        );
+        let pk_request_id = pk_request_id
+            .expect("per-pubkey 429 MUST carry x-request-id (in-handler 429 already had it)");
+
+        assert!(
+            uuid::Uuid::parse_str(&ip_request_id).is_ok(),
+            "per-IP 429 x-request-id MUST be a UUIDv4: got {}",
+            ip_request_id
+        );
+        assert!(
+            uuid::Uuid::parse_str(&pk_request_id).is_ok(),
+            "per-pubkey 429 x-request-id MUST be a UUIDv4: got {}",
+            pk_request_id
+        );
+        assert_ne!(
+            ip_request_id, pk_request_id,
+            "two independent requests must produce two distinct UUIDs"
+        );
+    }
+
     /// D-25 LIMIT-05 plumbing: retain_recent on the keyed limiter reduces
     /// len() once virtual time advances past the GCRA window.
     ///
