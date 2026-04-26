@@ -143,3 +143,161 @@ pub async fn request_id_mw(
     );
     Ok(res)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{http::StatusCode, test, web, App};
+    use crate::api::routes::configure;
+    use crate::api::test_support::{
+        make_app_state, make_test_components, build_test_actix_app,
+        register_test_pubkey, StubPushService, TEST_PUBKEY, TEST_PUBKEY_2,
+    };
+    use crate::store::Platform;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// D-24 #1: Registered pubkey + valid body → 202, stub recorded one call
+    /// for the registered Android platform.
+    #[actix_web::test]
+    async fn notify_registered_pubkey_dispatches() {
+        let stub = Arc::new(StubPushService::new(vec![Platform::Android]));
+        let (state, per_ip_limiter) = make_app_state(stub.clone());
+
+        // Pre-register the pubkey before building the service.
+        register_test_pubkey(&state, TEST_PUBKEY).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(per_ip_limiter))
+                .configure(configure),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({"trade_pubkey": TEST_PUBKEY}))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // The dispatch happens in tokio::spawn — yield to let it run.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            if !stub.calls.lock().await.is_empty() {
+                break;
+            }
+        }
+
+        let calls = stub.calls.lock().await;
+        assert_eq!(calls.len(), 1, "stub should record exactly 1 dispatch");
+        assert_eq!(calls[0].0, "test_fcm_token");
+        assert_eq!(calls[0].1, Platform::Android);
+    }
+
+    /// D-24 #2: Unregistered pubkey → 202 (anti-CRIT-2 always-202),
+    /// stub recorded zero calls.
+    #[actix_web::test]
+    async fn notify_unregistered_pubkey_no_dispatch() {
+        let c = make_test_components();
+        let stub = c.stub.clone();
+        let app = test::init_service(build_test_actix_app(c)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({"trade_pubkey": TEST_PUBKEY_2}))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "anti-CRIT-2 always-202");
+
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        let calls = stub.calls.lock().await;
+        assert!(calls.is_empty(), "no dispatch for unregistered pubkey");
+    }
+
+    /// D-24 #3: Malformed body — three sub-cases (non-hex, wrong length, missing field).
+    #[actix_web::test]
+    async fn notify_malformed_body_returns_400() {
+        let c = make_test_components();
+        let app = test::init_service(build_test_actix_app(c)).await;
+
+        // Sub-case A: pubkey too short.
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({"trade_pubkey": "tooshort"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Sub-case B: 64 chars but not hex.
+        let bad_hex: String = "z".repeat(64);
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({"trade_pubkey": bad_hex}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Sub-case C: missing field — serde rejects with 400 automatically.
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload("{}")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// D-25 NOTIFY-04 regression: every /notify response (202/400) carries a
+    /// server-generated UUIDv4 x-request-id header; inbound X-Request-Id from
+    /// the client is overwritten.
+    #[actix_web::test]
+    async fn notify_x_request_id_always_uuidv4_and_overwrites_client_value() {
+        let c = make_test_components();
+        let app = test::init_service(build_test_actix_app(c)).await;
+
+        // 202 path — inbound X-Request-Id from client must be overwritten.
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .insert_header(("X-Request-Id", "spoofed-by-client-12345"))
+            .set_json(serde_json::json!({"trade_pubkey": TEST_PUBKEY}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let id_value = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id header MUST be present on every /notify response")
+            .to_str()
+            .unwrap();
+        assert_ne!(id_value, "spoofed-by-client-12345", "client value must be overwritten");
+        assert!(Uuid::parse_str(id_value).is_ok(), "x-request-id must be UUIDv4 parseable");
+
+        // 400 path — header MUST also be present.
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({"trade_pubkey": "tooshort"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let id_value = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id header MUST be on 400 too (request_id_mw is outermost)")
+            .to_str()
+            .unwrap();
+        assert!(Uuid::parse_str(id_value).is_ok());
+    }
+}
