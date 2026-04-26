@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: milestone
-status: milestone_complete
-last_updated: "2026-04-26T00:08:53.810Z"
+status: completed
+last_updated: "2026-04-26T00:59:55.131Z"
 progress:
   total_phases: 3
-  completed_phases: 4
+  completed_phases: 3
   total_plans: 6
   completed_plans: 6
-  percent: 133
+  percent: 100
 ---
 
 # State — Mostro Push Server v1.1 (Chat Notifications)
@@ -36,7 +36,7 @@ Phase: 03
 Plan: Not started
 **Phase 1:** PushDispatcher refactor (no behaviour change) — COMPLETE (1/1 plans)
 **Phase 2:** /api/notify endpoint with privacy hardening — COMPLETE (3/3 plans) — commits `56a1a6d`, `d01dc97`, `ce619fa`
-**Status:** Milestone complete
+**Status:** v1.1 milestone complete
 **Progress:** [██████████] 100%
 
 ```
@@ -136,6 +136,20 @@ Phase 02 (`POST /api/notify` endpoint with privacy hardening) shipped earlier th
 - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/SUMMARY.md`
 - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/{ARCHITECTURE,FEATURES,PITFALLS}.md`
 - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/codebase/{ARCHITECTURE,CONCERNS,CONVENTIONS,INTEGRATIONS,STACK,STRUCTURE,TESTING}.md`
+
+---
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone close on 2026-04-26:
+
+| Category | Item | Status |
+|----------|------|--------|
+| uat_gap | Phase 02 — 02-HUMAN-UAT.md (7 pending operator scenarios: iOS/Android device wake on FCM silent push, dispute-chat runbook walkthrough, PRIV audit on staging logs) | partial |
+| verification_gap | Phase 01 — 01-VERIFICATION.md (DISPATCH-02 operator smoke on Fly.io staging) | human_needed |
+| verification_gap | Phase 02 — 02-VERIFICATION.md (device-delivery scenarios require real APNs/FCM credentials) | human_needed |
+
+These items are `human_needed` by design — Apple/Google edge behaviour and physical-device wake-up cannot be asserted from in-process tests. Operator UAT happens post-tag during staging rollout.
 
 ---
 
