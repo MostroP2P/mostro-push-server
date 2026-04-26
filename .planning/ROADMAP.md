@@ -74,8 +74,8 @@ Plans:
   6. An in-process integration suite (`actix_web::test::init_service` against a real `governor` middleware and a stub `PushService`) covers the six TEST-1 scenarios — registered hit, unregistered "miss", malformed body, per-pubkey 429 boundary, per-IP 429 boundary, and `/api/register` byte-identical-shape regression — and runs green on `cargo test` against the merged milestone.
 **Plans:** 2 plans
 Plans:
-- [ ] 03-01-PLAN.md — Add per-IP middleware + per-pubkey limiter to /api/notify (rate_limit module, AppState extension, NotifyRateLimitConfig env vars, cleanup task)
-- [ ] 03-02-PLAN.md — Add in-process integration test suite (StubPushService + 19 tests across notify/rate_limit/routes covering VERIFY-01 + VERIFY-02 + 4 regressions)
+- [x] 03-01-PLAN.md — Add per-IP middleware + per-pubkey limiter to /api/notify (rate_limit module, AppState extension, NotifyRateLimitConfig env vars, cleanup task)
+- [x] 03-02-PLAN.md — Add in-process integration test suite (StubPushService + 19 tests across notify/rate_limit/routes covering VERIFY-01 + VERIFY-02 + 4 regressions)
 **UI hint**: no
 
 ---
