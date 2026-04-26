@@ -1,3 +1,4 @@
+use log::info;
 use serde::Deserialize;
 use std::env;
 
@@ -9,6 +10,7 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub crypto: CryptoConfig,
     pub store: StoreConfig,
+    pub notify_rate_limit: NotifyRateLimitConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,14 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub max_per_minute: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotifyRateLimitConfig {
+    pub per_pubkey_per_min: u32,        // NOTIFY_RATE_PER_PUBKEY_PER_MIN, default 30 (D-01)
+    pub per_ip_per_min: u32,            // NOTIFY_RATE_PER_IP_PER_MIN, default 120 (D-02)
+    pub cleanup_interval_secs: u64,     // NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS, default 60 (D-16)
+    pub pubkey_limiter_soft_cap: usize, // NOTIFY_PUBKEY_LIMITER_SOFT_CAP, default 100000 (D-17)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +121,101 @@ impl Config {
                     .unwrap_or_else(|_| "1".to_string())
                     .parse()?,
             },
+            notify_rate_limit: NotifyRateLimitConfig {
+                per_pubkey_per_min: {
+                    let v: u32 = match env::var("NOTIFY_RATE_PER_PUBKEY_PER_MIN") {
+                        Ok(s) => s.parse()?,
+                        Err(_) => {
+                            info!("NOTIFY_RATE_PER_PUBKEY_PER_MIN unset, using default 30");
+                            30
+                        }
+                    };
+                    if v == 0 {
+                        return Err("NOTIFY_RATE_PER_PUBKEY_PER_MIN must be > 0, got 0".into());
+                    }
+                    v
+                },
+                per_ip_per_min: {
+                    let v: u32 = match env::var("NOTIFY_RATE_PER_IP_PER_MIN") {
+                        Ok(s) => s.parse()?,
+                        Err(_) => {
+                            info!("NOTIFY_RATE_PER_IP_PER_MIN unset, using default 120");
+                            120
+                        }
+                    };
+                    if v == 0 {
+                        return Err("NOTIFY_RATE_PER_IP_PER_MIN must be > 0, got 0".into());
+                    }
+                    v
+                },
+                cleanup_interval_secs: env::var("NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS")
+                    .unwrap_or_else(|_| "60".to_string())
+                    .parse()?,
+                pubkey_limiter_soft_cap: env::var("NOTIFY_PUBKEY_LIMITER_SOFT_CAP")
+                    .unwrap_or_else(|_| "100000".to_string())
+                    .parse()?,
+            },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serializes env-mutating tests in this module; prevents races between
+    // tests that call std::env::set_var / remove_var on the same keys.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// D-04: NOTIFY_RATE_PER_PUBKEY_PER_MIN=0 must be rejected by Config::from_env
+    /// with a chained error message containing "must be > 0".
+    #[test]
+    fn rejects_zero_per_pubkey_rate() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN", "0");
+        std::env::set_var("NOTIFY_RATE_PER_IP_PER_MIN", "120");
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::set_var("MOSTRO_PUBKEY", "0".repeat(64));
+
+        let result = Config::from_env();
+
+        std::env::remove_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN");
+        std::env::remove_var("NOTIFY_RATE_PER_IP_PER_MIN");
+        std::env::remove_var("NOSTR_RELAYS");
+        std::env::remove_var("MOSTRO_PUBKEY");
+
+        let err = result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_PUBKEY_PER_MIN=0");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NOTIFY_RATE_PER_PUBKEY_PER_MIN must be > 0"),
+            "expected D-04 error message, got: {}",
+            msg
+        );
+    }
+
+    /// D-04: NOTIFY_RATE_PER_IP_PER_MIN=0 must be rejected by Config::from_env.
+    #[test]
+    fn rejects_zero_per_ip_rate() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN", "30");
+        std::env::set_var("NOTIFY_RATE_PER_IP_PER_MIN", "0");
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::set_var("MOSTRO_PUBKEY", "0".repeat(64));
+
+        let result = Config::from_env();
+
+        std::env::remove_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN");
+        std::env::remove_var("NOTIFY_RATE_PER_IP_PER_MIN");
+        std::env::remove_var("NOSTR_RELAYS");
+        std::env::remove_var("MOSTRO_PUBKEY");
+
+        let err = result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_IP_PER_MIN=0");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NOTIFY_RATE_PER_IP_PER_MIN must be > 0"),
+            "expected D-04 error message, got: {}",
+            msg
+        );
     }
 }

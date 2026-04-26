@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Web framework
-actix-web = "4.4"
+actix-web = "4.9"
 actix-rt = "2.9"
 
 # WebSocket client for Nostr
@@ -41,6 +41,7 @@ chrono = { version = "0.4", features = ["serde"] }
 governor = "0.6"
 
 # Cryptography for token encryption (MIP-05 style)
+blake3 = "1"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
@@ -51,6 +52,9 @@ base64 = "0.21"
 
 # JWT for Firebase service account authentication
 jsonwebtoken = "9"
+
+# Identifiers
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mockito = "1.2"

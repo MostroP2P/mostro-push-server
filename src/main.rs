@@ -1,7 +1,9 @@
 use actix_web::{web, App, HttpServer};
 use log::info;
+use rand::RngCore;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
 mod config;
 mod nostr;
@@ -14,10 +16,11 @@ mod utils;
 #[allow(dead_code)]
 mod crypto;
 
+use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, IP_BURST, PUBKEY_BURST};
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
-use push::{PushService, FcmPush, UnifiedPushService};
+use push::{FcmPush, PushDispatcher, PushService, UnifiedPushService};
 use store::TokenStore;
 
 #[actix_web::main]
@@ -32,8 +35,19 @@ async fn main() -> std::io::Result<()> {
     // Load configuration
     let config = Config::from_env().expect("Failed to load configuration");
 
+    // PRIV-01 / SC #5: shared log salt for privacy-safe pubkey correlators
+    // across all modules (notify, register/unregister, store, listener).
+    // Random per process, in-memory only, never persisted, never logged.
+    // Salt regeneration on every restart is the explicit privacy property.
+    let mut salt_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt_bytes);
+    let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
+
     // Initialize token store
-    let token_store = Arc::new(TokenStore::new(config.store.token_ttl_hours));
+    let token_store = Arc::new(TokenStore::new(
+        config.store.token_ttl_hours,
+        notify_log_salt.clone(),
+    ));
 
     // Start cleanup task
     store::start_cleanup_task(token_store.clone(), config.store.cleanup_interval_hours);
@@ -42,11 +56,23 @@ async fn main() -> std::io::Result<()> {
         config.store.cleanup_interval_hours
     );
 
+    // Single shared reqwest::Client with explicit timeouts. Bounds outbound
+    // FCM/UnifiedPush calls so a hung remote endpoint cannot tie up tokio
+    // worker threads under sustained load. Per Phase 2 D-07.
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .build()
+            .expect("reqwest::Client build never fails on default config"),
+    );
+
     // Initialize push services
-    let mut push_services: Vec<Box<dyn PushService>> = Vec::new();
+    let mut push_services: Vec<(Arc<dyn PushService>, &'static str)> = Vec::new();
 
     // Keep UnifiedPush service separate for endpoint management
-    let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone()));
+    let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone(), Arc::clone(&http_client)));
 
     // Load existing endpoints from disk
     if let Err(e) = unifiedpush_service.load_endpoints().await {
@@ -56,13 +82,13 @@ async fn main() -> std::io::Result<()> {
     // Initialize FCM service if enabled
     if config.push.fcm_enabled {
         info!("Initializing FCM push service");
-        let fcm_service = Arc::new(FcmPush::new(config.clone()));
+        let fcm_service = Arc::new(FcmPush::new(config.clone(), Arc::clone(&http_client)));
 
         // Try to initialize FCM authentication (optional - may fail if no credentials)
         match fcm_service.init().await {
             Ok(_) => {
                 info!("FCM service initialized successfully");
-                push_services.push(Box::new(Arc::clone(&fcm_service)));
+                push_services.push((Arc::clone(&fcm_service) as Arc<dyn PushService>, "fcm"));
             }
             Err(e) => {
                 log::warn!("Failed to initialize FCM service: {}", e);
@@ -73,16 +99,63 @@ async fn main() -> std::io::Result<()> {
 
     if config.push.unifiedpush_enabled {
         info!("Initializing UnifiedPush service");
-        push_services.push(Box::new(Arc::clone(&unifiedpush_service)));
+        push_services.push((Arc::clone(&unifiedpush_service) as Arc<dyn PushService>, "unifiedpush"));
     }
 
-    let push_services = Arc::new(Mutex::new(push_services));
+    let dispatcher = Arc::new(PushDispatcher::new(push_services));
+
+    // D-09 + D-03: bound the /api/notify spawn pile to 50 in-flight tasks.
+    // On saturation, the handler silently drops (warn! log without pubkey).
+    let notify_semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(50));
+
+    // D-09 + LIMIT-02: per-pubkey limiter shared with /api/notify handler via AppState.
+    // Bursts are compile-time constants per D-29 (specifics).
+    let per_pubkey_limiter: Arc<PerPubkeyLimiter> = Arc::new(governor::RateLimiter::keyed(
+        governor::Quota::per_minute(
+            std::num::NonZeroU32::new(config.notify_rate_limit.per_pubkey_per_min)
+                .expect("validated > 0 in Config::from_env"),
+        )
+        .allow_burst(
+            std::num::NonZeroU32::new(PUBKEY_BURST)
+                .expect("PUBKEY_BURST is a non-zero compile-time constant"),
+        ),
+    ));
+
+    // D-20 + LIMIT-01: per-IP limiter shared via app_data (NOT in AppState).
+    // Different key type (IpAddr vs String) and different middleware lifetime.
+    let per_ip_limiter: Arc<PerIpLimiter> = Arc::new(governor::RateLimiter::keyed(
+        governor::Quota::per_minute(
+            std::num::NonZeroU32::new(config.notify_rate_limit.per_ip_per_min)
+                .expect("validated > 0 in Config::from_env"),
+        )
+        .allow_burst(
+            std::num::NonZeroU32::new(IP_BURST)
+                .expect("IP_BURST is a non-zero compile-time constant"),
+        ),
+    ));
+
+    // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.
+    api::rate_limit::start_rate_limit_cleanup_task(
+        per_pubkey_limiter.clone(),
+        Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs),
+        config.notify_rate_limit.pubkey_limiter_soft_cap,
+    );
+    info!(
+        "Rate limiters initialized (per-pubkey {}/min burst {}; per-IP {}/min burst {}; cleanup {}s; soft cap {})",
+        config.notify_rate_limit.per_pubkey_per_min,
+        PUBKEY_BURST,
+        config.notify_rate_limit.per_ip_per_min,
+        IP_BURST,
+        config.notify_rate_limit.cleanup_interval_secs,
+        config.notify_rate_limit.pubkey_limiter_soft_cap,
+    );
 
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
         config.clone(),
-        push_services.clone(),
+        dispatcher.clone(),
         token_store.clone(),
+        notify_log_salt.clone(),
     ).expect("Failed to initialize Nostr listener - check MOSTRO_PUBKEY");
 
     tokio::spawn(async move {
@@ -92,6 +165,10 @@ async fn main() -> std::io::Result<()> {
     // Create app state for HTTP handlers
     let app_state = AppState {
         token_store: token_store.clone(),
+        dispatcher: dispatcher.clone(),
+        semaphore: notify_semaphore.clone(),
+        notify_log_salt: notify_log_salt.clone(),
+        per_pubkey_limiter: per_pubkey_limiter.clone(),
     };
 
     // Start HTTP API server
@@ -103,10 +180,12 @@ async fn main() -> std::io::Result<()> {
     info!("  GET  /api/info       - Server info");
     info!("  POST /api/register   - Register token (plaintext)");
     info!("  POST /api/unregister - Unregister token");
+    info!("  POST /api/notify     - Trigger silent push (best-effort)");
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
+            .app_data(web::Data::new(per_ip_limiter.clone()))
             .configure(api::routes::configure)
     })
     .bind(server_addr)?

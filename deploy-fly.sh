@@ -39,7 +39,7 @@ flyctl secrets set \
   RATE_LIMIT_PER_MINUTE="60" \
   BATCH_DELAY_MS="5000" \
   COOLDOWN_MS="60000" \
-  RUST_LOG="debug"
+  RUST_LOG="info"
 
 echo "✅ Secrets configurados"
 
