@@ -149,6 +149,7 @@ mod tests {
     use super::*;
     use actix_web::{http::StatusCode, test, web, App};
     use crate::api::routes::configure;
+    use crate::api::rate_limit::TrustProxyHeaders;
     use crate::api::test_support::{
         make_app_state, make_test_components, build_test_actix_app,
         register_test_pubkey, StubPushService, TEST_PUBKEY, TEST_PUBKEY_2,
@@ -171,6 +172,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(state))
                 .app_data(web::Data::new(per_ip_limiter))
+                .app_data(web::Data::new(TrustProxyHeaders(true)))
                 .configure(configure),
         )
         .await;

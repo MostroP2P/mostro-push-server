@@ -21,6 +21,17 @@ pub type PerPubkeyLimiter = DefaultKeyedRateLimiter<String>;
 /// Per-IP keyed rate limiter type alias (D-20).
 pub type PerIpLimiter = DefaultKeyedRateLimiter<IpAddr>;
 
+/// Newtype injected into `web::Data` to gate trust of `Fly-Client-IP` and
+/// `X-Forwarded-For`. When `false`, both proxy headers are ignored and the
+/// per-IP limiter keys exclusively on `req.peer_addr()`. Default is `false`
+/// (Config::from_env reads `NOTIFY_TRUST_PROXY_HEADERS`).
+///
+/// This guards against the bypass where a client behind no trusted proxy
+/// rotates `Fly-Client-IP` per request, forcing a fresh per-IP bucket and
+/// defeating the limiter entirely.
+#[derive(Clone, Copy, Debug)]
+pub struct TrustProxyHeaders(pub bool);
+
 /// Per-pubkey burst (D-01). Not env-overridable in this phase per D-29.
 pub const PUBKEY_BURST: u32 = 10;
 
@@ -50,22 +61,31 @@ pub fn rate_limited_response(retry_after_secs: u64) -> HttpResponse {
 /// 2. Rightmost segment of X-Forwarded-For (Fly appends the real client last).
 ///    Leftmost is attacker-controlled and MUST NOT be used.
 /// 3. req.peer_addr().ip() for local development.
-/// Returns None ONLY if all three fail; the middleware then short-circuits
-/// with 500 (fail-closed per D-11) so an attacker cannot bypass per-IP RL.
-fn extract_client_ip(req: &ServiceRequest) -> Option<IpAddr> {
-    if let Some(v) = req.headers().get("Fly-Client-IP") {
-        if let Ok(s) = v.to_str() {
-            if let Ok(ip) = IpAddr::from_str(s.trim()) {
-                return Some(ip);
+///
+/// The proxy-header steps (1) and (2) are skipped entirely when
+/// `trust_proxy_headers` is false. Without that gate, a client reachable
+/// directly (no Fly edge in front) can rotate Fly-Client-IP per request and
+/// force a fresh per-IP bucket on every call, defeating the limiter.
+///
+/// Returns None ONLY if all enabled steps fail; the middleware then
+/// short-circuits with 500 (fail-closed per D-11) so an attacker cannot
+/// bypass per-IP RL.
+fn extract_client_ip(req: &ServiceRequest, trust_proxy_headers: bool) -> Option<IpAddr> {
+    if trust_proxy_headers {
+        if let Some(v) = req.headers().get("Fly-Client-IP") {
+            if let Ok(s) = v.to_str() {
+                if let Ok(ip) = IpAddr::from_str(s.trim()) {
+                    return Some(ip);
+                }
             }
         }
-    }
-    if let Some(v) = req.headers().get("X-Forwarded-For") {
-        if let Ok(s) = v.to_str() {
-            // Rightmost segment per D-10 (Fly appends the real client IP last).
-            if let Some(last) = s.rsplit(',').next() {
-                if let Ok(ip) = IpAddr::from_str(last.trim()) {
-                    return Some(ip);
+        if let Some(v) = req.headers().get("X-Forwarded-For") {
+            if let Ok(s) = v.to_str() {
+                // Rightmost segment per D-10 (Fly appends the real client IP last).
+                if let Some(last) = s.rsplit(',').next() {
+                    if let Ok(ip) = IpAddr::from_str(last.trim()) {
+                        return Some(ip);
+                    }
                 }
             }
         }
@@ -105,7 +125,15 @@ pub async fn per_ip_rate_limit_mw(
         }
     };
 
-    let ip = match extract_client_ip(&req) {
+    // Default false when not wired: callers that forget to register
+    // TrustProxyHeaders in app_data get the safe behaviour (proxy headers
+    // ignored), not the bypass-prone one.
+    let trust_proxy_headers = req
+        .app_data::<web::Data<TrustProxyHeaders>>()
+        .map(|d| d.0)
+        .unwrap_or(false);
+
+    let ip = match extract_client_ip(&req, trust_proxy_headers) {
         Some(ip) => ip,
         None => {
             // Fail-closed per D-11: never share a global bucket; never bypass.
@@ -146,28 +174,38 @@ pub(crate) fn check_soft_cap<F: FnOnce(usize)>(len: usize, soft_cap: usize, on_o
     }
 }
 
-/// Periodic cleanup task for the per-pubkey limiter (LIMIT-05).
+/// Periodic cleanup task for any `DefaultKeyedRateLimiter<K>` (LIMIT-05).
 /// Mirrors src/store/mod.rs::start_cleanup_task.
 ///
 /// Every `interval` tick:
 /// - Calls `limiter.retain_recent()` to evict keys whose GCRA state is
-///   indistinguishable from a fresh state.
+///   indistinguishable from a fresh state. Without this, every distinct key
+///   the limiter has ever seen lives in the keyed map for the lifetime of
+///   the process — a memory leak proportional to traffic diversity (per-IP
+///   buckets accumulate one entry per unique client IP, per-pubkey buckets
+///   one per registered trade_pubkey).
 /// - Routes the LIMIT-06 soft-cap check through `check_soft_cap` so the
 ///   warn-emission path is independently unit-testable.
 /// - Cadence per D-18: every tick when over cap, no throttling.
-/// - The warn line MUST NOT include any pubkey (RL-2 + privacy).
-pub fn start_rate_limit_cleanup_task(
-    limiter: Arc<PerPubkeyLimiter>,
+/// - `label` is a stable identifier ("pubkey", "ip") used in the warn line.
+///   The warn line MUST NOT include any key value (RL-2 + privacy: pubkeys
+///   are sensitive; IPs are operator metadata that we already avoid logging
+///   per the global no-pubkey-log policy).
+pub fn start_keyed_limiter_cleanup_task<K>(
+    limiter: Arc<DefaultKeyedRateLimiter<K>>,
     interval: Duration,
     soft_cap: usize,
-) {
+    label: &'static str,
+) where
+    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+{
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
             limiter.retain_recent();
             check_soft_cap(limiter.len(), soft_cap, |n| {
-                warn!("rate-limit pubkey map size exceeded soft cap: {}", n);
+                warn!("rate-limit {} map size exceeded soft cap: {}", label, n);
             });
         }
     });
@@ -548,6 +586,55 @@ mod tests {
             captured.is_empty(),
             "boundary (soft_cap == len): callback MUST NOT fire (got {:?})",
             captured
+        );
+    }
+
+    /// Anti-bypass: when `trust_proxy_headers` is false (default), an
+    /// attacker who rotates `Fly-Client-IP` per request MUST NOT defeat the
+    /// per-IP limiter. All 40 requests share the same `peer_addr` in the
+    /// test harness, so the per-IP burst (30) MUST exhaust and the first 429
+    /// MUST appear at iteration >= IP_BURST.
+    ///
+    /// If `Fly-Client-IP` were honoured, every iteration would create a fresh
+    /// per-IP bucket and the loop would never produce a per-IP 429 — the
+    /// per-pubkey path would 429 first (and we rotate pubkeys to make sure
+    /// that path can't fire either, exposing the bypass cleanly).
+    #[actix_web::test]
+    async fn fly_client_ip_ignored_when_trust_proxy_headers_false() {
+        let c = make_test_components();
+        let app = atest::init_service(
+            App::new()
+                .app_data(web::Data::new(c.state))
+                .app_data(web::Data::new(c.per_ip_limiter))
+                .app_data(web::Data::new(TrustProxyHeaders(false)))
+                .configure(crate::api::routes::configure),
+        )
+        .await;
+
+        let peer: std::net::SocketAddr = "192.0.2.10:5555".parse().unwrap();
+        let mut first_429_iter: Option<usize> = None;
+        for i in 0..40 {
+            let pk = seed_hex_pubkey(i as u64);
+            let spoofed_ip = format!("203.0.113.{}", i % 256);
+            let req = atest::TestRequest::post()
+                .uri("/api/notify")
+                .peer_addr(peer)
+                .insert_header(("Fly-Client-IP", spoofed_ip.as_str()))
+                .set_json(serde_json::json!({"trade_pubkey": pk}))
+                .to_request();
+            let resp = atest::call_service(&app, req).await;
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                first_429_iter = Some(i);
+                break;
+            }
+        }
+        let iter = first_429_iter
+            .expect("per-IP 429 MUST trigger even with rotating Fly-Client-IP when flag is false");
+        assert!(
+            iter >= IP_BURST as usize,
+            "Fly-Client-IP must be IGNORED when trust_proxy_headers=false: iter={} must be >= IP_BURST={} (a smaller value means the spoofed header was honoured)",
+            iter,
+            IP_BURST
         );
     }
 

@@ -46,6 +46,11 @@ pub struct NotifyRateLimitConfig {
     pub per_ip_per_min: u32,            // NOTIFY_RATE_PER_IP_PER_MIN, default 120 (D-02)
     pub cleanup_interval_secs: u64,     // NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS, default 60 (D-16)
     pub pubkey_limiter_soft_cap: usize, // NOTIFY_PUBKEY_LIMITER_SOFT_CAP, default 100000 (D-17)
+    // NOTIFY_TRUST_PROXY_HEADERS, default false. Set to true ONLY when the
+    // server sits behind a proxy that overwrites Fly-Client-IP / X-Forwarded-For
+    // (e.g. Fly.io edge). Otherwise an attacker can rotate those headers per
+    // request to bypass the per-IP limiter.
+    pub trust_proxy_headers: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,10 +71,10 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect();
 
-        // Read Mostro instance public key from environment
+        // Read Mostro instance public key from environment.
+        // Default to the main Mostro instance pubkey (matches deploy-fly.sh).
         let mostro_pubkey = env::var("MOSTRO_PUBKEY")
             .unwrap_or_else(|_| {
-                // Default to the main Mostro instance pubkey
                 "82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390".to_string()
             });
 
@@ -78,8 +83,7 @@ impl Config {
                 relays,
                 subscription_id: "mostro-push-listener".to_string(),
                 event_kinds: vec![1059],
-                mostro_pubkey: env::var("MOSTRO_PUBKEY")
-                    .unwrap_or_else(|_| "dbe0b1be7aafd3cfba92d7463571bf438f09d24f4e021d9fe208ed0ab5823711".to_string()),
+                mostro_pubkey,
             },
             push: PushConfig {
                 fcm_enabled: env::var("FCM_ENABLED")
@@ -154,6 +158,13 @@ impl Config {
                 pubkey_limiter_soft_cap: env::var("NOTIFY_PUBKEY_LIMITER_SOFT_CAP")
                     .unwrap_or_else(|_| "100000".to_string())
                     .parse()?,
+                // Default false: if the server is reachable directly by clients
+                // (no trusted proxy), Fly-Client-IP / X-Forwarded-For are
+                // attacker-controlled and would let any client rotate the
+                // per-IP rate-limit bucket on every request.
+                trust_proxy_headers: env::var("NOTIFY_TRUST_PROXY_HEADERS")
+                    .unwrap_or_else(|_| "false".to_string())
+                    .parse()?,
             },
         })
     }
@@ -191,6 +202,29 @@ mod tests {
             msg.contains("NOTIFY_RATE_PER_PUBKEY_PER_MIN must be > 0"),
             "expected D-04 error message, got: {}",
             msg
+        );
+    }
+
+    /// Regression: when MOSTRO_PUBKEY is unset, Config::from_env must use the
+    /// documented main Mostro instance pubkey (matches deploy-fly.sh) rather
+    /// than a stale fallback. Guards against the duplicate-read bug where the
+    /// first lookup (with the documented default) was discarded and a second
+    /// lookup with a different default populated NostrConfig::mostro_pubkey.
+    #[test]
+    fn defaults_mostro_pubkey_to_main_instance_when_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("MOSTRO_PUBKEY");
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        let result = Config::from_env();
+
+        std::env::remove_var("NOSTR_RELAYS");
+
+        let cfg = result.expect("Config::from_env must succeed with MOSTRO_PUBKEY unset");
+        assert_eq!(
+            cfg.nostr.mostro_pubkey,
+            "82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390",
+            "default MOSTRO_PUBKEY must match deploy-fly.sh and the comment in Config::from_env"
         );
     }
 

@@ -16,7 +16,7 @@ mod utils;
 #[allow(dead_code)]
 mod crypto;
 
-use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, IP_BURST, PUBKEY_BURST};
+use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST};
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
@@ -135,10 +135,24 @@ async fn main() -> std::io::Result<()> {
     ));
 
     // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.
-    api::rate_limit::start_rate_limit_cleanup_task(
+    // Run for BOTH keyed limiters (per-pubkey and per-IP). Without the
+    // per-IP cleanup, every distinct client IP the server has ever seen
+    // sticks in the keyed map for the lifetime of the process — a slow
+    // memory leak on long-running instances with diverse client populations.
+    let cleanup_interval =
+        Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs);
+    let cleanup_soft_cap = config.notify_rate_limit.pubkey_limiter_soft_cap;
+    api::rate_limit::start_keyed_limiter_cleanup_task(
         per_pubkey_limiter.clone(),
-        Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs),
-        config.notify_rate_limit.pubkey_limiter_soft_cap,
+        cleanup_interval,
+        cleanup_soft_cap,
+        "pubkey",
+    );
+    api::rate_limit::start_keyed_limiter_cleanup_task(
+        per_ip_limiter.clone(),
+        cleanup_interval,
+        cleanup_soft_cap,
+        "ip",
     );
     info!(
         "Rate limiters initialized (per-pubkey {}/min burst {}; per-IP {}/min burst {}; cleanup {}s; soft cap {})",
@@ -182,10 +196,17 @@ async fn main() -> std::io::Result<()> {
     info!("  POST /api/unregister - Unregister token");
     info!("  POST /api/notify     - Trigger silent push (best-effort)");
 
+    let trust_proxy_headers = TrustProxyHeaders(config.notify_rate_limit.trust_proxy_headers);
+    info!(
+        "Trust proxy headers (Fly-Client-IP / X-Forwarded-For for rate-limit keys): {}",
+        trust_proxy_headers.0
+    );
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(per_ip_limiter.clone()))
+            .app_data(web::Data::new(trust_proxy_headers))
             .configure(api::routes::configure)
     })
     .bind(server_addr)?
