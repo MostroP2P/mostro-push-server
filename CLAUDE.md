@@ -35,20 +35,20 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 - Cargo (Rust standard)
 - Lockfile: present (`Cargo.lock`, committed and copied into Docker build at `Dockerfile:4`)
 ## Frameworks
-- `actix-web = "4.4"` - HTTP server and routing (`src/main.rs`, `src/api/routes.rs`)
+- `actix-web = "4.9"` - HTTP server and routing (`src/main.rs`, `src/api/routes.rs`)
 - `actix-rt = "2.9"` - Actix async runtime
 - `tokio = "1.35"` - Async runtime, channels, sync primitives, background tasks
 - `tokio-tungstenite = "0.21"` - WebSocket client library (declared in `Cargo.toml:12`; Nostr relay traffic actually flows via `nostr-sdk`)
 - `nostr-sdk = "0.27"` - Nostr protocol client used in `src/nostr/listener.rs`
-- `mockito = "1.2"` - HTTP mocking for unit tests, declared in `[dev-dependencies]` (`Cargo.toml:55-56`)
-- Built-in `cargo test` runner (no integration test suite present in repo)
+- `mockito = "1.2"` - HTTP mocking for unit tests, declared in `[dev-dependencies]`
+- Built-in `cargo test` runner — in-process integration tests live alongside the source under `#[cfg(test)] mod tests` blocks in `src/api/notify.rs`, `src/api/rate_limit.rs`, and `src/api/routes.rs` (using `actix_web::test::init_service` with a stub `PushService`)
 - `cargo build --release` - Production build (used in `Dockerfile:7` and README workflow)
 - `cargo run` - Development runner
 - `cargo clippy` - Linting (referenced in `README.md`)
 - `cargo fmt` - Formatting (referenced in `README.md`)
 ## Key Dependencies
 - `nostr-sdk = "0.27"` - Subscribes to Nostr relays, parses Gift Wrap (kind 1059) events (`src/nostr/listener.rs:2`)
-- `actix-web = "4.4"` - REST API surface for token registration (`src/api/routes.rs:1`)
+- `actix-web = "4.9"` - REST API surface for token registration and `/api/notify` (`src/api/routes.rs:1`, `src/api/notify.rs:1`)
 - `reqwest = "0.11"` (with `json` feature) - HTTPS client for FCM v1 API and UnifiedPush endpoint POSTs (`src/push/fcm.rs:3`, `src/push/unifiedpush.rs:4`)
 - `jsonwebtoken = "9"` - Signs RS256 JWTs for Firebase OAuth2 token exchange (`src/push/fcm.rs:8`)
 - `serde = "1.0"` (`derive`) and `serde_json = "1.0"` - Configuration, request bodies, FCM payloads, persisted endpoint store
@@ -62,11 +62,13 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 - `config = "0.14"` - Configuration loader (declared in `Cargo.toml:30`; runtime config currently uses `std::env` directly in `src/config.rs`)
 - `dotenv = "0.15"` - Loads `.env` at startup (`src/main.rs:26`)
 - `env_logger = "0.11"` and `log = "0.4"` - Logging facade and stdout backend
-- `governor = "0.6"` - Rate-limiting primitive (declared, not yet wired into request handlers)
+- `governor = "0.6"` - Rate-limiting primitive. Wired as the dual-key limiter on `/api/notify` (per-IP via `from_fn` middleware in `src/api/rate_limit.rs:87`, per-pubkey inside `src/api/notify.rs`). Construction lives in `src/main.rs:113-126`; the route wraps via `web::resource("/notify").wrap(...)` in `src/api/routes.rs:65`. Periodic `retain_recent()` cleanup runs for both keyed limiters.
+- `blake3 = "1"` - Salted truncated keyed hash for the privacy-safe pubkey log correlator (`src/utils/log_pubkey.rs`); the only sanctioned pubkey rendering across `src/api/notify.rs`, `src/api/routes.rs`, `src/store/mod.rs`, and `src/nostr/listener.rs`.
+- `uuid = "1"` (with `v4`) - Server-generated UUIDv4 used by the `request_id_mw` middleware on `/api/notify`; inbound `X-Request-Id` is stripped before the response header is set.
 - `futures = "0.3"` and `async-trait = "0.1"` - Async trait support (`src/push/mod.rs:1`)
 ## Configuration
 - Loaded from process env (and `.env` via `dotenv`) inside `Config::from_env()` at `src/config.rs:53-115`
-- Notable variables: `NOSTR_RELAYS`, `MOSTRO_PUBKEY`, `SERVER_PRIVATE_KEY`, `FIREBASE_PROJECT_ID`, `FIREBASE_SERVICE_ACCOUNT_PATH`, `FCM_ENABLED`, `UNIFIEDPUSH_ENABLED`, `SERVER_HOST`, `SERVER_PORT`, `TOKEN_TTL_HOURS`, `CLEANUP_INTERVAL_HOURS`, `RATE_LIMIT_PER_MINUTE`, `BATCH_DELAY_MS`, `COOLDOWN_MS`, `RUST_LOG`
+- Notable variables: `NOSTR_RELAYS`, `MOSTRO_PUBKEY`, `SERVER_PRIVATE_KEY`, `FIREBASE_PROJECT_ID`, `FIREBASE_SERVICE_ACCOUNT_PATH`, `FCM_ENABLED`, `UNIFIEDPUSH_ENABLED`, `SERVER_HOST`, `SERVER_PORT`, `TOKEN_TTL_HOURS`, `CLEANUP_INTERVAL_HOURS`, `RATE_LIMIT_PER_MINUTE`, `BATCH_DELAY_MS`, `COOLDOWN_MS`, `RUST_LOG`, `NOTIFY_RATE_PER_PUBKEY_PER_MIN`, `NOTIFY_RATE_PER_IP_PER_MIN`, `NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS`, `NOTIFY_PUBKEY_LIMITER_SOFT_CAP`, `NOTIFY_TRUST_PROXY_HEADERS`
 - Reference template: `.env.example`
 - Local development env file: `.env` (gitignored, contents not inspected)
 - Alternative TOML template: `config.toml.example` (exists but not currently parsed by `Config::from_env`)

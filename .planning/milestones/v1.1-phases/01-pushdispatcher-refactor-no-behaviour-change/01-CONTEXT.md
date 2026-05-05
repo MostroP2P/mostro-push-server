@@ -15,6 +15,8 @@ This phase is intentionally a **pure structural refactor**. Behaviour change, lo
 <decisions>
 ## Implementation Decisions
 
+The decisions below are grouped by concern; each group covers one structural slice of the refactor.
+
 ### Dispatch Component Surface
 
 - **D-01:** New module `src/push/dispatcher.rs` re-exported via `src/push/mod.rs`. Owns the services list and the iteration protocol.

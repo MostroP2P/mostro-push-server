@@ -49,10 +49,11 @@ pub struct BatchingManager {
 ```rust
 //! Salted, truncated pubkey hashing for privacy-safe operator logs.
 //!
-//! Per Phase 2 D-14 (PRIV-01): used ONLY in the /api/notify handler and its
-//! spawned dispatch task. Existing pubkey-prefix logs in src/nostr/listener.rs,
-//! src/api/routes.rs, and src/store/mod.rs are intentionally NOT migrated to
-//! preserve operator grep-ability through the transition.
+//! Per Phase 2 D-14 (PRIV-01): the canonical correlator for any log line
+//! that touches a `trade_pubkey`. As shipped, `log_pubkey()` is the sole
+//! pubkey rendering used by `src/api/routes.rs`, `src/api/notify.rs`,
+//! `src/nostr/listener.rs`, and `src/store/mod.rs`. Hex-prefix slicing of
+//! pubkeys (`&pk[..16]`) MUST NOT reappear in any module.
 
 /// Salted truncated BLAKE3 keyed-hash of a pubkey, for log correlation.
 pub fn log_pubkey(salt: &[u8; 32], pk: &str) -> String {
@@ -139,7 +140,7 @@ async fn register_token(
 
 **Mirror as-is:** the `(state: web::Data<AppState>, req: web::Json<...>) -> impl Responder` signature.
 
-**Adapt — DO NOT mirror the log line:** the `&req.trade_pubkey[..16.min(...)]` prefix-truncation is the legacy pattern that D-14 explicitly does NOT migrate retroactively. The new handler uses `log_pubkey(&state.notify_log_salt, &req.trade_pubkey)` instead. This is the load-bearing privacy delta of Phase 2 in this file.
+**Adapt — DO NOT mirror the log line:** `&req.trade_pubkey[..16.min(...)]` was the original prefix-truncation. The new handler uses `log_pubkey(&state.notify_log_salt, &req.trade_pubkey)` instead, and the same migration was applied retroactively to `src/api/routes.rs`, `src/nostr/listener.rs`, and `src/store/mod.rs`. This is the load-bearing privacy delta of Phase 2: hex-prefix slicing of pubkeys MUST NOT reappear in any module.
 
 **Net-new — bounded spawn pattern** (no analog in repo; from RESEARCH § Pattern 2 + Code Examples lines 754-814):
 
@@ -928,5 +929,5 @@ The project uses `json!` macro for one-off response shapes and named structs (`#
 **Key invariants preserved by this map:**
 - COMPAT-1: existing `RegisterResponse` / `RegisterTokenRequest` / `UnregisterTokenRequest` and the four existing handlers are NOT touched.
 - D-22: `PushDispatcher::dispatch` (used by `src/nostr/listener.rs:121`) is byte-identical; Phase 2 adds a sibling `dispatch_silent` method.
-- D-14: `log_pubkey()` is applied ONLY to new code paths in `src/api/notify.rs`. Existing prefix-truncation logs in `src/api/routes.rs`, `src/store/mod.rs`, `src/nostr/listener.rs` are intentionally left alone.
+- D-14 (as shipped): `log_pubkey()` is the sole sanctioned pubkey rendering across `src/api/notify.rs`, `src/api/routes.rs`, `src/store/mod.rs`, and `src/nostr/listener.rs`. The earlier draft of this map described the migration as notify-only; the privacy hardening was extended to the existing modules during Phase 2. Hex-prefix slicing of pubkeys MUST NOT reappear in any module.
 - D-05: `build_payload_for_token` (FCM, lines 168-215) stays untouched as the listener-path payload. New silent builder is a sibling fn.

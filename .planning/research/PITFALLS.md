@@ -496,9 +496,9 @@ This milestone interacts with the following existing concerns. **[BUNDLE]** = mu
 
 ## Sources
 
-- Codebase (HIGH): `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/nostr/listener.rs`, `src/api/routes.rs`, `src/store/mod.rs`, `src/push/fcm.rs`, `src/main.rs`, `deploy-fly.sh`, `fly.toml`.
-- Project constraints (HIGH): `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/PROJECT.md`.
-- Pre-existing analysis (HIGH): `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/codebase/CONCERNS.md`.
+- Codebase (HIGH): `src/nostr/listener.rs`, `src/api/routes.rs`, `src/store/mod.rs`, `src/push/fcm.rs`, `src/main.rs`, `deploy-fly.sh`, `fly.toml`.
+- Project constraints (HIGH): `.planning/PROJECT.md`.
+- Pre-existing analysis (HIGH): `.planning/codebase/CONCERNS.md`.
 - Apple APNs background-priority semantics (`apns-priority: 5`, `apns-push-type: background`, silent-push throttling): Apple Developer Documentation — *Pushing background updates to your app* (MEDIUM — based on stable published guidance; web search blocked this run, recommend re-verification at endpoint implementation).
 - FCM v1 payload structure (`android.priority`, `apns.headers`, `apns.payload.aps.content-available`): Firebase Cloud Messaging HTTP v1 API reference (MEDIUM — verify against current Google docs).
 - `governor` 0.6 keyed-rate-limiter retention (`retain_recent`, in-memory cardinality): governor documentation (MEDIUM — verify exact API at implementation time).

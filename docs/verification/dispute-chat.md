@@ -1,180 +1,174 @@
-# Verificación manual: ruta de chat de disputa
+# Manual verification: dispute-chat path
 
-Este runbook describe cómo un operador verifica de extremo a extremo que
-los DMs administrativos (enviados directamente usuario-a-usuario, NO
-enrutados a través del daemon de Mostro) siguen alcanzando los
-dispositivos registrados como push silenciosos a través de la ruta de
-escucha de Nostr.
+This runbook describes how an operator end-to-end verifies that
+administrative DMs (sent directly user-to-user, NOT routed through the
+Mostro daemon) still reach registered devices as silent pushes via the
+Nostr listener path.
 
-Este procedimiento se ejecuta después de cada despliegue del milestone
-v1.1 (fases 1, 2 y 3). Es la única señal de extremo a extremo de que el
-refactor de la fase 1 (`PushDispatcher`) y la adición de la fase 2
-(`POST /api/notify`) no han introducido una regresión silenciosa en la
-ruta del escucha.
+This procedure is run after every deploy of milestone v1.1 (phases 1,
+2, and 3). It is the only end-to-end signal that the Phase 1 refactor
+(`PushDispatcher`) and the Phase 2 addition (`POST /api/notify`) have
+not introduced a silent regression in the listener path.
 
-## Por qué este runbook existe
+## Why this runbook exists
 
-En Mostro, los chats de disputa entre administradores y usuarios se
-envían como mensajes Nostr directos `kind 1059` (Gift Wrap, NIP-59).
-El remitente es el administrador (un usuario humano), NO el daemon de
-Mostro. El daemon de Mostro publica eventos de actualización de trade,
-pero NO los DMs administrativos.
+In Mostro, dispute chats between administrators and users are sent as
+direct Nostr messages with `kind 1059` (Gift Wrap, NIP-59). The sender
+is the administrator (a human user), NOT the Mostro daemon. The Mostro
+daemon publishes trade-update events, but NOT administrative DMs.
 
-Por esta razón, el escucha de Nostr en `src/nostr/listener.rs` NO
-DEBE filtrar los eventos por `authors`. Filtrar por
-`mostro_pubkey` haría que los DMs administrativos se descartaran en
-silencio, rompiendo el chat de disputa para todos los usuarios.
+For this reason, the Nostr listener at `src/nostr/listener.rs` MUST
+NOT filter events by `authors`. Filtering by `mostro_pubkey` would
+silently drop administrative DMs, breaking dispute chat for every
+user.
 
-Adicionalmente, Gift Wrap (NIP-59) usa una clave externa efímera por
-evento. La clave del remitente nunca es visible en el evento externo,
-por lo que filtrar por `authors` es estructuralmente imposible
-incluso si se quisiera.
+Additionally, Gift Wrap (NIP-59) uses an ephemeral outer key per
+event. The sender's key is never visible in the outer event, so
+filtering by `authors` is structurally impossible even if it were
+desired.
 
-Esta restricción está documentada como anti-requisito **OOS-19 /
-CRIT-1** en `.planning/PROJECT.md` y como bloque de comentario sobre
-`Filter::new()` en `src/nostr/listener.rs` (introducido en la fase 1
-decisión D-11).
+This constraint is documented as anti-requirement **OOS-19 /
+CRIT-1** in `.planning/PROJECT.md` and as a comment block above
+`Filter::new()` in `src/nostr/listener.rs` (introduced in Phase 1
+decision D-11).
 
-## Prerrequisitos
+## Prerequisites
 
-- Acceso al staging de Fly.io (`mostro-push-server`).
-- `flyctl` instalado y autenticado (`flyctl auth whoami` debe
-  responder).
-- Un cliente Nostr secundario capaz de publicar eventos `kind 1059`
-  contra un relay configurado por el servidor (por ejemplo, Damus,
-  Amethyst, o un script `nostr-tool`).
-- Una `trade_pubkey` de prueba (64 caracteres hex) y un token FCM o
-  UnifiedPush de prueba registrado para esa pubkey.
-- Un dispositivo de prueba (real o emulador) capaz de recibir el push
-  silencioso correspondiente al token registrado.
-- Acceso de solo lectura al árbol de fuentes del repo
-  (`mostro-push-server`) para ejecutar la verificación grep
-  anti-CRIT-1 al final del procedimiento.
+- Access to the Fly.io staging environment (`mostro-push-server`).
+- `flyctl` installed and authenticated (`flyctl auth whoami` must
+  respond).
+- A secondary Nostr client able to publish `kind 1059` events
+  against a relay configured by the server (for example Damus,
+  Amethyst, or a `nostr-tool` script).
+- A test `trade_pubkey` (64 hex characters) and a test FCM or
+  UnifiedPush token registered for that pubkey.
+- A test device (real or emulator) able to receive the silent push
+  for the registered token.
+- Read-only access to the repo source tree
+  (`mostro-push-server`) to run the anti-CRIT-1 grep verification at
+  the end of the procedure.
 
-## Procedimiento
+## Procedure
 
-### Paso 1: Registrar la pubkey de prueba
+### Step 1: Register the test pubkey
 
-Registra el `trade_pubkey` y el token de dispositivo a través del
-endpoint existente `POST /api/register`:
+Register the `trade_pubkey` and the device token through the existing
+`POST /api/register` endpoint:
 
 ```bash
 curl -i -X POST https://mostro-push-server.fly.dev/api/register \
   -H 'content-type: application/json' \
   -d '{
     "trade_pubkey": "<64-hex-chars>",
-    "token": "<token-fcm-o-unifiedpush>",
+    "token": "<fcm-or-unifiedpush-token>",
     "platform": "android"
   }'
 ```
 
-Respuesta esperada: `200 OK` con cuerpo
+Expected response: `200 OK` with body
 `{"success":true,"message":"Token registered successfully","platform":"android"}`.
 
-Anota el `trade_pubkey` exacto que registraste — lo necesitarás en el
-paso siguiente.
+Take note of the exact `trade_pubkey` you registered — you will need
+it in the next step.
 
-### Paso 2: Publicar un evento kind 1059 desde un cliente Nostr secundario
+### Step 2: Publish a kind 1059 event from a secondary Nostr client
 
-Desde un cliente Nostr secundario (NO el daemon de Mostro — es
-importante simular que el remitente es un usuario humano, no el
-daemon), publica un Gift Wrap (NIP-59, `kind 1059`) dirigido al
-`trade_pubkey` registrado, contra uno de los relays configurados
-en el servidor (`NOSTR_RELAYS`).
+From a secondary Nostr client (NOT the Mostro daemon — it is
+important to simulate a sender that is a human user, not the
+daemon), publish a Gift Wrap (NIP-59, `kind 1059`) addressed to the
+registered `trade_pubkey`, against one of the relays configured on
+the server (`NOSTR_RELAYS`).
 
-El evento debe tener:
+The event must have:
 
 - `kind`: `1059`
-- Etiqueta `p`: el `trade_pubkey` registrado en el paso 1.
-- Clave externa: efímera (cualquier `Keys::generate()` u
-  equivalente). Esta es la clave que firma el evento externo;
-  NO es la clave del administrador.
+- `p` tag: the `trade_pubkey` registered in step 1.
+- Outer key: ephemeral (any `Keys::generate()` or equivalent). This
+  is the key that signs the outer event; it is NOT the
+  administrator's key.
 
-El contenido interno del Gift Wrap puede ser cualquier mensaje de
-prueba; el servidor de push no descifra ni inspecciona el contenido.
+The inner content of the Gift Wrap can be any test message; the push
+server does not decrypt or inspect the content.
 
-El daemon de Mostro NO envía DMs administrativos. Los administradores
-contactan a los usuarios directamente (de usuario a usuario). Filtrar
-por `mostro_pubkey` en el escucha rompería esta ruta silenciosamente,
-razón por la cual la fase 1 D-11 introdujo el bloque de comentario
-explícito en `src/nostr/listener.rs` y la fase 3 OPEN-6 mantiene el
-campo `MOSTRO_PUBKEY` inerte sin aplicarlo como filtro.
+The Mostro daemon does NOT send administrative DMs. Administrators
+contact users directly (user-to-user). Filtering by `mostro_pubkey`
+in the listener would silently break this path, which is why Phase 1
+D-11 introduced the explicit comment block in
+`src/nostr/listener.rs` and Phase 3 OPEN-6 keeps the `MOSTRO_PUBKEY`
+field inert without applying it as a filter.
 
-### Paso 3: Verificar la entrega del push silencioso
+### Step 3: Verify silent push delivery
 
-Inmediatamente después de publicar el evento, observa los logs del
-servidor en Fly.io:
+Immediately after publishing the event, watch the server logs on
+Fly.io:
 
 ```bash
 flyctl logs -a mostro-push-server | grep -E "(Push sent successfully for event|Failed to send push)"
 ```
 
-Debes ver una línea de la forma:
+You should see a line of the form:
 
 ```
 Push sent successfully for event <event-id>
 ```
 
-dentro de los siguientes ~5-10 segundos tras publicar el evento.
+within ~5-10 seconds of publishing the event.
 
-Adicionalmente, el dispositivo de prueba debe recibir el push
-silencioso. Verifícalo según el backend:
+Additionally, the test device must receive the silent push. Verify
+according to the backend:
 
-- **FCM (iOS o Android)**: el handler en background del cliente
-  móvil debe ejecutarse (por ejemplo, `didReceiveRemoteNotification`
-  en iOS, `FirebaseMessagingService.onMessageReceived` en Android).
-- **UnifiedPush (Android)**: el receptor en background del cliente
-  debe activarse según el distribuidor configurado.
+- **FCM (iOS or Android)**: the mobile client's background handler
+  must run (for example, `didReceiveRemoteNotification` on iOS,
+  `FirebaseMessagingService.onMessageReceived` on Android).
+- **UnifiedPush (Android)**: the client's background receiver must
+  fire according to the configured distributor.
 
-Si NO ves la línea `Push sent successfully for event ...` en los
-logs:
+If you do NOT see the `Push sent successfully for event ...` line in
+the logs:
 
-- Confirma que el evento llegó al relay configurado (algunas
-  herramientas Nostr fallan en silencio si el relay rechaza el
-  evento).
-- Confirma que el `p` tag coincide exactamente con el
-  `trade_pubkey` registrado (64 caracteres hex, sin
-  mayúsculas/minúsculas mezcladas).
-- Revisa los logs completos para errores en `connect_and_listen` o
-  en `dispatcher.dispatch(...)`.
+- Confirm that the event reached the configured relay (some Nostr
+  tools fail silently if the relay rejects the event).
+- Confirm that the `p` tag matches the registered `trade_pubkey`
+  exactly (64 hex characters, no mixed upper/lower case).
+- Inspect the full logs for errors in `connect_and_listen` or in
+  `dispatcher.dispatch(...)`.
 
-### Paso 4: Verificación anti-CRIT-1
+### Step 4: Anti-CRIT-1 verification
 
-Después de cada despliegue, ejecuta el siguiente comando en el árbol
-de fuentes del repo para confirmar que no se ha re-introducido el
-anti-fix prohibido (`.authors(mostro_pubkey)` en el filtro del
-escucha):
+After every deploy, run the following command in the repo source
+tree to confirm that the forbidden anti-fix
+(`.authors(mostro_pubkey)` in the listener filter) has not been
+re-introduced:
 
 ```bash
 grep -n '\.authors(' src/nostr/listener.rs
 ```
 
-Salida esperada: exactamente UNA coincidencia, dentro del bloque de
-comentario de la fase 1 D-11 (la línea que dice
-`// DO NOT add .authors(...) here.` o equivalente).
+Expected output: exactly ONE match, inside the Phase 1 D-11 comment
+block (the line that says `// DO NOT add .authors(...) here.` or
+equivalent).
 
-Para una verificación con código de salida bash que falle si
-aparece una llamada `.authors(...)` activa (no en comentario):
+For a bash exit-code verification that fails if an active
+`.authors(...)` call (not in a comment) appears:
 
 ```bash
 if grep -nE '^\s*[^/].*\.authors\(' src/nostr/listener.rs; then
-    echo "FAIL: filtro .authors() presente en el escucha — anti-CRIT-1 violado"
+    echo "FAIL: .authors() filter present in the listener — anti-CRIT-1 violated"
     exit 1
 else
-    echo "PASS: no hay filtro .authors() activo"
+    echo "PASS: no active .authors() filter"
 fi
 ```
 
-Si el comando de salida falla (`exit 1`), abre un issue de
-seguridad de inmediato — alguien ha re-introducido el anti-fix
-prohibido y los DMs administrativos están siendo descartados en
-silencio.
+If the command exits with `1`, open a security issue immediately —
+someone has re-introduced the forbidden anti-fix and administrative
+DMs are being silently dropped.
 
-## Limpieza
+## Cleanup
 
-Después de verificar, elimina el token de prueba mediante el endpoint
-`POST /api/unregister` para evitar contaminar las métricas de
-producción:
+After verification, remove the test token via the
+`POST /api/unregister` endpoint to avoid polluting production
+metrics:
 
 ```bash
 curl -i -X POST https://mostro-push-server.fly.dev/api/unregister \
@@ -182,22 +176,22 @@ curl -i -X POST https://mostro-push-server.fly.dev/api/unregister \
   -d '{"trade_pubkey": "<64-hex-chars>"}'
 ```
 
-Respuesta esperada: `200 OK` con cuerpo
+Expected response: `200 OK` with body
 `{"success":true,"message":"Token unregistered successfully"}`
-o `{"success":true,"message":"Token not found (may have already been unregistered)"}`.
+or `{"success":true,"message":"Token not found (may have already been unregistered)"}`.
 
-## Frecuencia recomendada
+## Recommended frequency
 
-- Después de cada deploy del milestone v1.1 (fases 1, 2 y 3).
-- Después de cualquier modificación de `src/nostr/listener.rs`,
-  `src/push/dispatcher.rs`, o `src/push/mod.rs`.
-- Como verificación periódica mensual en producción.
+- After every deploy of milestone v1.1 (phases 1, 2, and 3).
+- After any modification to `src/nostr/listener.rs`,
+  `src/push/dispatcher.rs`, or `src/push/mod.rs`.
+- As a periodic monthly verification in production.
 
-## Referencias
+## References
 
-- `.planning/PROJECT.md` — anti-requisito **OOS-19 / CRIT-1**.
-- `.planning/REQUIREMENTS.md` — requisito **VERIFY-03**.
-- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — decisión **D-11** (introducción del bloque de comentario anti-CRIT-1).
-- `src/nostr/listener.rs` — bloque de comentario sobre `Filter::new()`.
-- NIP-59 (Gift Wrap, `kind 1059`) — especificación del esquema de
-  evento que envuelve los DMs.
+- `.planning/PROJECT.md` — anti-requirement **OOS-19 / CRIT-1**.
+- `.planning/REQUIREMENTS.md` — requirement **VERIFY-03**.
+- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — decision **D-11** (introduction of the anti-CRIT-1 comment block).
+- `src/nostr/listener.rs` — comment block above `Filter::new()`.
+- NIP-59 (Gift Wrap, `kind 1059`) — specification of the event
+  schema that wraps the DMs.

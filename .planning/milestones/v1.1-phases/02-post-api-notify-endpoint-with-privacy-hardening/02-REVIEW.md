@@ -34,29 +34,29 @@ status: issues_found
 
 ## Summary
 
-La fase 2 introduce el endpoint `POST /api/notify` con un set coherente de medidas de privacidad: validación previa al logging, correlador BLAKE3 con salt aleatoria por proceso (nunca persistida), middleware `X-Request-Id` con scope estricto a `/notify`, payload silencioso FCM separado (apns-priority 5, apns-push-type background), dispatch desacoplado vía `tokio::spawn` con `Arc<Semaphore>(50)` y drop silencioso al saturarse.
+Phase 2 introduces the `POST /api/notify` endpoint together with a coherent set of privacy measures: validation before any logging, a BLAKE3 correlator with a per-process random salt (never persisted), an `X-Request-Id` middleware scoped strictly to `/notify`, a separate FCM silent payload (`apns-priority: 5`, `apns-push-type: background`), decoupled dispatch via `tokio::spawn` bounded by `Arc<Semaphore>(50)`, and a silent drop on saturation.
 
-La revisión NO ha encontrado vulnerabilidades de seguridad críticas. El contrato siempre-202, el scoping del middleware, la salt en memoria, el `try_acquire_owned()` con manejo de error, y el log redaction están implementados correctamente y respetan las anti-restricciones (CRIT-2/3/6, OOS-11). Los hallazgos son dos warnings menores (imports no usados detectados por `cargo check`) y seis info de menor impacto: un campo `Cargo.toml` heredado, headers APNs no esenciales pero recomendados, redundancia en re-derivación, falta de validación contra pubkeys con mayúsculas, secret hardcodeado en `deploy-fly.sh` (ya documentado como inerte por encripción desactivada — flagueado para visibilidad), y dead-code en `Cargo.toml` (deps no usadas en esta fase).
+The review found no critical security vulnerabilities. The always-202 contract, the middleware scoping, the in-memory salt, the `try_acquire_owned()` error handling, and log redaction are all implemented correctly and respect the anti-requirements (CRIT-2/3/6, OOS-11). The findings are two minor warnings (unused imports flagged by `cargo check`) and six info items: a leftover `Cargo.toml` field, non-essential but recommended APNs headers, a redundant re-derivation, missing validation against mixed-case pubkeys, a hardcoded secret in `deploy-fly.sh` (already documented as inert because encryption is disabled — flagged for visibility), and pre-existing dead-code in `Cargo.toml` (deps not used in this phase).
 
-El contrato de privacidad del endpoint es sólido: la validación de `trade_pubkey` ocurre antes de cualquier log que la referencie (línea 54 antes de línea 64 en `notify.rs`), el handler emite `info!` sólo con el correlador opaco, y el camino spawn-saturado emite un `warn!` sin pubkey alguna (línea 103 `notify.rs`). El scoping del middleware está implementado vía `web::resource("/notify").wrap(...)` (línea 56-60 `routes.rs`), evitando la fuga a `/register`/`/unregister`/`/info`/`/health`/`/status` que retiene su comportamiento previo.
+The endpoint's privacy contract is solid: `trade_pubkey` validation happens before any log line that references it (line 54 before line 64 in `notify.rs`), the handler emits `info!` only with the opaque correlator, and the spawn-saturated path emits a `warn!` with no pubkey at all (`notify.rs` line 103). Middleware scoping is implemented via `web::resource("/notify").wrap(...)` (`routes.rs` lines 56-60), preventing leakage to `/register`/`/unregister`/`/info`/`/health`/`/status`, which retain their previous behaviour.
 
 ## Warnings
 
-### WR-01: Imports no usados en `src/push/fcm.rs` y `src/push/unifiedpush.rs`
+### WR-01: Unused imports in `src/push/fcm.rs` and `src/push/unifiedpush.rs`
 
-**File:** `src/push/fcm.rs:3` y `src/push/unifiedpush.rs:3`
-**Issue:** La línea `use reqwest::Client;` quedó remanente tras el cambio del campo `client: Client` a `client: Arc<reqwest::Client>` en la fase 2 (commit usa el path completo `reqwest::Client` en su lugar). Esto produce una warning activa en `cargo check`:
+**File:** `src/push/fcm.rs:3` and `src/push/unifiedpush.rs:3`
+**Issue:** The line `use reqwest::Client;` was left over after the field migration from `client: Client` to `client: Arc<reqwest::Client>` in Phase 2 (the commit uses the fully-qualified `reqwest::Client` path instead). This produces an active warning under `cargo check`:
 
-```
+```text
 warning: unused import: `reqwest::Client`
  --> src/push/fcm.rs:3:5
 warning: unused import: `reqwest::Client`
  --> src/push/unifiedpush.rs:3:5
 ```
 
-Si el proyecto adopta `#![deny(warnings)]` o `cargo clippy -- -D warnings` en CI a futuro, esto rompería la build. Ahora mismo es ruido en la salida de `cargo check`/`cargo build`.
+If the project later adopts `#![deny(warnings)]` or `cargo clippy -- -D warnings` in CI, this would break the build. As of today it is just noise in the `cargo check`/`cargo build` output.
 
-**Fix:** Eliminar la línea en ambos archivos:
+**Fix:** Remove the line in both files:
 
 ```rust
 // src/push/fcm.rs:3 — DELETE
@@ -66,18 +66,18 @@ Si el proyecto adopta `#![deny(warnings)]` o `cargo clippy -- -D warnings` en CI
 - use reqwest::Client;
 ```
 
-`reqwest::Client` se sigue usando como tipo `Arc<reqwest::Client>` con path completo en la struct y en el constructor; no se requiere import alguno.
+`reqwest::Client` continues to be used as `Arc<reqwest::Client>` via the fully-qualified path in the struct and the constructor; no import is required.
 
 ---
 
-### WR-02: Header `x-request-id` no se añade a respuestas de error propagadas vía `?`
+### WR-02: `x-request-id` header is not added to error responses propagated via `?`
 
 **File:** `src/api/notify.rs:117-132`
-**Issue:** El middleware `request_id_mw` propaga errores de `next.call(req).await?` con el operador `?`. En ese path, la rama posterior que inserta el header `x-request-id` en la respuesta NO se ejecuta. Si en el futuro algún middleware encadenado o un extractor produce un `Err(actix_web::Error)` (en lugar de un `Ok(ServiceResponse)` con status 4xx — que es el comportamiento actual de `web::Json` malformado), el cliente no verá el correlador en esa respuesta de error.
+**Issue:** The `request_id_mw` middleware propagates errors from `next.call(req).await?` with the `?` operator. On that path, the subsequent branch that inserts the `x-request-id` header into the response is NOT executed. If any future chained middleware or extractor returns an `Err(actix_web::Error)` (instead of an `Ok(ServiceResponse)` carrying a 4xx status — which is what the current `web::Json` malformed-body handler does), the client will not see the correlator on that error response.
 
-En la práctica actual de actix-web 4.x, el extractor `web::Json` retorna `Ok(ServiceResponse)` con 400 (no `Err`) cuando el JSON no parsea, así que el camino de `?` está raramente ejercitado. El issue es defensivo / forward-looking, no un bug en producción hoy.
+In current actix-web 4.x practice, the `web::Json` extractor returns `Ok(ServiceResponse)` with 400 (not `Err`) when the JSON fails to parse, so the `?` path is rarely exercised. The issue is defensive / forward-looking, not a bug in production today.
 
-**Fix:** Si se quiere garantía en todas las respuestas (incluidas las de error propagadas), capturar el `Result` y añadir el header en ambos brazos. Ejemplo:
+**Fix:** If a guarantee on every response (including propagated errors) is desired, capture the `Result` and add the header on both branches. Example:
 
 ```rust
 let id = uuid::Uuid::new_v4().to_string();
@@ -92,35 +92,35 @@ match result {
         Ok(res)
     }
     Err(e) => {
-        // Errores de actix se convierten en respuesta 500 más adelante;
-        // el header se perdería de todas formas con el `?` actual.
-        // Para el caso 400-de-extractor (que ya entra como Ok), está cubierto.
+        // Actix errors are converted to a 500 response later;
+        // the header would be lost anyway under the current `?`.
+        // The 400-from-extractor case (which already arrives as Ok) is covered.
         Err(e)
     }
 }
 ```
 
-Alternativa más simple: dejar como está y añadir un comentario explicando que en errores propagados el header no se incluye, lo que también es aceptable porque en tales casos el cliente ya no tiene control de la respuesta. Marcar como "decisión consciente" si ese es el caso.
+Simpler alternative: leave it as is and add a comment explaining that propagated errors do not include the header — also acceptable, since in those cases the client no longer has control over the response. Mark as a "deliberate decision" if that is the chosen path.
 
 ## Info
 
-### IN-01: Dependencia `tokio-tungstenite` declarada pero no usada por la fase
+### IN-01: Dependency `tokio-tungstenite` declared but unused by the phase
 
 **File:** `Cargo.toml:12`
-**Issue:** `tokio-tungstenite = "0.21"` está declarada en el manifest. La revisión del scope (`grep -r "tokio_tungstenite\|tungstenite" src/`) no encuentra usos en la fase 2 ni en el resto del crate (el tráfico Nostr fluye por `nostr-sdk`). Esto se documenta en `CLAUDE.md` como "declared but not used", pero sigue contribuyendo al tiempo de compilación y al footprint del binario.
+**Issue:** `tokio-tungstenite = "0.21"` is declared in the manifest. A scope review (`grep -r "tokio_tungstenite\|tungstenite" src/`) finds no uses in Phase 2 nor in the rest of the crate (Nostr traffic flows via `nostr-sdk`). This is documented in `CLAUDE.md` as "declared but not used", but it still contributes to compile time and binary footprint.
 
-**Fix:** Fuera de scope para esta fase (no se quiere modificar deps sin aprobación explícita per CLAUDE.md global). Tracked como mejora futura: si efectivamente no se usa en ningún punto del crate, puede removerse en una fase de cleanup dedicada.
+**Fix:** Out of scope for this phase (no dep changes without explicit approval per the global CLAUDE.md). Tracked as a future improvement: if it really is unused anywhere in the crate, it can be removed in a dedicated cleanup phase.
 
 ---
 
-### IN-02: Header APNs `apns-expiration` ausente en payload silencioso FCM
+### IN-02: APNs `apns-expiration` header missing from FCM silent payload
 
 **File:** `src/push/fcm.rs:226-251` (`build_silent_payload_for_notify`)
-**Issue:** El payload silencioso usa `apns-priority: 5` y `apns-push-type: background`, lo cual es correcto para wakes silenciosos. Sin embargo, no incluye `apns-expiration`. Apple recomienda explícitamente que los push silenciosos especifiquen un TTL (con valor 0 — entregar inmediatamente o descartar). Sin `apns-expiration`, el comportamiento por defecto puede variar por configuración del operador APNs.
+**Issue:** The silent payload uses `apns-priority: 5` and `apns-push-type: background`, which is correct for silent wakes. However, it does not include `apns-expiration`. Apple explicitly recommends that silent pushes specify a TTL (with value 0 — deliver immediately or discard). Without `apns-expiration`, the default behaviour can vary by APNs operator configuration.
 
-Esto NO es un bug — el push se entrega — pero un `apns-expiration` explícito aumenta la predictibilidad de la entrega y reduce el riesgo de que pushes "viejos" lleguen al dispositivo cuando el contexto del trade ya cambió.
+This is NOT a bug — the push is delivered — but an explicit `apns-expiration` increases delivery predictability and reduces the risk of "stale" pushes arriving on the device after the trade context has changed.
 
-**Fix:** Añadir el header en `build_silent_payload_for_notify`:
+**Fix:** Add the header in `build_silent_payload_for_notify`:
 
 ```rust
 "apns": {
@@ -133,23 +133,23 @@ Esto NO es un bug — el push se entrega — pero un `apns-expiration` explícit
 }
 ```
 
-Tratar como mejora opcional, no bloqueante.
+Treat as an optional, non-blocking improvement.
 
 ---
 
-### IN-03: Re-derivación redundante de `log_pubkey` dentro del spawn
+### IN-03: Redundant re-derivation of `log_pubkey` inside the spawn
 
 **File:** `src/api/notify.rs:64, 81`
-**Issue:** `log_pk` ya se derivó en línea 64 (handler outer) y está disponible como `String` capturable por valor. La línea 81 lo recalcula dentro del `tokio::spawn` (`task_log_pk = log_pubkey(&salt, &pubkey)`). El cómputo es determinista (salt y pubkey no cambian), así que el resultado es idéntico al ya derivado.
+**Issue:** `log_pk` is already derived on line 64 (outer handler) and is available as a `String` capturable by value. Line 81 recomputes it inside the `tokio::spawn` (`task_log_pk = log_pubkey(&salt, &pubkey)`). The computation is deterministic (salt and pubkey do not change), so the result is identical to the one already derived.
 
-El comentario de la línea 79-80 justifica la re-derivación: "to keep task-side log lines independent of outer-scope state". Esto es defendible estilísticamente, pero dado que la salt y la pubkey YA están movidas dentro del spawn por `Arc::clone` y `clone()`, el `log_pk` outer también podría haberse `clone()`-ado al spawn.
+The comment on lines 79-80 justifies the re-derivation: "to keep task-side log lines independent of outer-scope state". This is defensible stylistically, but since the salt and pubkey are ALREADY moved into the spawn via `Arc::clone` and `clone()`, the outer `log_pk` could equally have been `clone()`-ed into the spawn.
 
-Coste: una llamada extra a `blake3::keyed_hash` por request. Con 50 permits y throughput sostenido eso es ~50/segundo de hashes redundantes — negligible, pero gratis.
+Cost: one extra `blake3::keyed_hash` call per request. With 50 permits and sustained throughput that is ~50/sec of redundant hashes — negligible, but free.
 
-**Fix:** Mantener la implementación actual si la justificación de "state independence" se valora — es defendible. Si se prefiere economía:
+**Fix:** Keep the current implementation if the "state independence" justification is valued — it is defensible. If economy is preferred:
 
 ```rust
-let log_pk_for_task = log_pk.clone(); // o reutilizar el mismo binding
+let log_pk_for_task = log_pk.clone(); // or reuse the same binding
 tokio::spawn(async move {
     let _permit = permit;
     if let Some(token) = token_store.get(&pubkey).await {
@@ -161,20 +161,20 @@ tokio::spawn(async move {
 });
 ```
 
-No es bug; es opcional.
+Not a bug; optional.
 
 ---
 
-### IN-04: Validación de pubkey acepta mayúsculas mezcladas
+### IN-04: Pubkey validation accepts mixed case
 
-**File:** `src/api/notify.rs:54` y `src/api/routes.rs:98, 159`
-**Issue:** La validación es `len() == 64 && hex::decode(...).is_ok()`. `hex::decode` acepta tanto minúsculas como mayúsculas (`0xab` y `0xAB` decodifican a lo mismo). Esto significa que `"ABCDEF...123"` y `"abcdef...123"` representan la misma pubkey pero generan correlatores `log_pubkey` distintos (BLAKE3 trabaja sobre bytes UTF-8, no sobre el valor decodificado).
+**File:** `src/api/notify.rs:54` and `src/api/routes.rs:98, 159`
+**Issue:** Validation is `len() == 64 && hex::decode(...).is_ok()`. `hex::decode` accepts both lowercase and uppercase (`0xab` and `0xAB` decode to the same value). This means `"ABCDEF...123"` and `"abcdef...123"` represent the same pubkey but yield distinct `log_pubkey` correlators (BLAKE3 hashes the UTF-8 bytes, not the decoded value).
 
-Esto puede causar "ghost pubkeys" en los logs: el mismo dispositivo con la misma pubkey en diferentes capitalizaciones aparecerá como dos correlatores distintos. El runbook `docs/verification/dispute-chat.md:137` ya menciona "sin mayúsculas/minúsculas mezcladas" como precondición operacional, lo que confirma el conocimiento del issue.
+This can cause "ghost pubkeys" in logs: the same device with the same pubkey under different capitalisations will appear as two distinct correlators. The runbook `docs/verification/dispute-chat.md:137` already lists "no mixed upper/lower case" as an operational precondition, which confirms awareness of the issue.
 
-Tampoco se hace `.to_lowercase()` antes de pasar al `token_store.get(&pubkey)`, así que un cliente que registra con `"abc..."` y notifica con `"ABC..."` quedará como pubkey no-registrada (no hay match), y el handler retorna 202 normalmente — privacidad preservada, pero el push no llega.
+Likewise, no `.to_lowercase()` is applied before `token_store.get(&pubkey)`, so a client that registers with `"abc..."` and notifies with `"ABC..."` is treated as an unregistered pubkey (no match), and the handler returns 202 normally — privacy preserved, but the push does not arrive.
 
-**Fix:** Si es un comportamiento deseado (estricto byte-for-byte), documentarlo. Si se desea normalización, normalizar a lowercase tras la validación:
+**Fix:** If the strict byte-for-byte behaviour is desired, document it. If normalisation is desired, normalise to lowercase after validation:
 
 ```rust
 if req.trade_pubkey.len() != 64 || hex::decode(&req.trade_pubkey).is_err() {
@@ -182,50 +182,50 @@ if req.trade_pubkey.len() != 64 || hex::decode(&req.trade_pubkey).is_err() {
 }
 let trade_pubkey = req.trade_pubkey.to_lowercase();
 let log_pk = log_pubkey(&state.notify_log_salt, &trade_pubkey);
-// pasar `trade_pubkey` al spawn en vez de `req.trade_pubkey.clone()`.
+// pass `trade_pubkey` into the spawn instead of `req.trade_pubkey.clone()`.
 ```
 
-Cambio de comportamiento existente — requiere coordinación con `register_token` en `routes.rs:98` para mantener consistencia (si una se normaliza, la otra debe hacerlo también, o la lookup falla).
+This is a behaviour change in `register_token` (`routes.rs:98`) too — coordination is required to keep both endpoints consistent (if one normalises, the other must as well, or the lookup fails).
 
-Tratar como issue de consistencia operacional, no de seguridad.
+Treat as an operational consistency issue, not a security one.
 
 ---
 
-### IN-05: `SERVER_PRIVATE_KEY` hardcodeado en `deploy-fly.sh`
+### IN-05: `SERVER_PRIVATE_KEY` hardcoded in `deploy-fly.sh`
 
 **File:** `deploy-fly.sh:30`
-**Issue:** El script tiene una clave privada hex de 64 caracteres en texto plano. Per la memoria del proyecto (`~/.claude/projects/.../memory/MEMORY.md`), esto se considera "inerte" porque el módulo crypto está gated `#[allow(dead_code)]` y la encripción está deshabilitada.
+**Issue:** The script ships a 64-character hex private key in plaintext. Per project memory, this is treated as "inert" because the crypto module is gated behind `#[allow(dead_code)]` and encryption is disabled.
 
-El riesgo latente: si en una fase futura (Phase 4 / encripción habilitada) se reactiva el path crypto sin re-generar y rotar la clave en producción, se publicaría un servicio cuya clave privada está en el repo público. El script también vive en disco en máquinas de operadores y puede entrar en backups/screenshots accidentalmente.
+The latent risk: if a future phase (Phase 4 / encryption enabled) reactivates the crypto path without regenerating and rotating the key in production, the service would ship with a private key that is publicly readable in the repo. The script also lives on operators' disks and can leak into backups or screenshots.
 
-**Fix:** Tracked como riesgo conocido. Antes de habilitar Phase 4:
-1. Generar nueva clave privada en producción.
-2. Rotar via `flyctl secrets set SERVER_PRIVATE_KEY=...` desde un canal seguro (no commit).
-3. Eliminar la línea hardcodeada de `deploy-fly.sh` y reemplazarla con un placeholder o lectura desde env del operador.
+**Fix:** Tracked as a known risk. Before enabling Phase 4:
+1. Generate a new private key in production.
+2. Rotate via `flyctl secrets set SERVER_PRIVATE_KEY=...` from a secure channel (never via commit).
+3. Remove the hardcoded line from `deploy-fly.sh` and replace it with a placeholder or an operator-provided env read.
 
-No requiere acción en esta fase. Reportado para visibilidad de stakeholders del milestone.
+No action required in this phase. Reported for stakeholder visibility.
 
 ---
 
-### IN-06: Dead-code warnings preexistentes acumulándose
+### IN-06: Pre-existing dead-code warnings accumulating
 
-**File:** múltiples — `src/push/fcm.rs:51` (`config` unused), `src/push/unifiedpush.rs:23` (`config` unused field), `src/push/dispatcher.rs:12` (`backend` unused field), `src/utils/batching.rs:3` (`BatchingManager` unused), `src/store/mod.rs:108` (`count` unused), etc.
-**Issue:** `cargo check` produce 21 warnings. La mayoría son preexistentes (no introducidos en esta fase) y reflejan código gated para futuras fases (`crypto/`, `batching.rs`) o campos no usados en deserialización (`ServiceAccount.project_id`).
+**File:** multiple — `src/push/fcm.rs:51` (`config` unused), `src/push/unifiedpush.rs:23` (`config` unused field), `src/push/dispatcher.rs:12` (`backend` unused field), `src/utils/batching.rs:3` (`BatchingManager` unused), `src/store/mod.rs:108` (`count` unused), etc.
+**Issue:** `cargo check` produces 21 warnings. Most are pre-existing (not introduced by this phase) and reflect code gated for future phases (`crypto/`, `batching.rs`) or fields unused under deserialization (`ServiceAccount.project_id`).
 
-El issue específico introducido en fase 2: `FcmPush::new(config: Config, ...)` y `UnifiedPushService::new(config: Config, ...)` reciben un `Config` que ya no se almacena en `FcmPush` (lee de env directamente líneas 52-54). El `config` parameter de `FcmPush::new` es completamente unused — `cargo check` lo reporta como `warning: unused variable: config`.
+The specific issue introduced by Phase 2: `FcmPush::new(config: Config, ...)` and `UnifiedPushService::new(config: Config, ...)` receive a `Config` that is no longer stored in `FcmPush` (it reads from env directly on lines 52-54). The `config` parameter on `FcmPush::new` is completely unused — `cargo check` reports it as `warning: unused variable: config`.
 
-**Fix:** Para `FcmPush::new` específicamente (introducido por la fase con la signatura nueva):
+**Fix:** For `FcmPush::new` specifically (introduced with the new signature in this phase):
 
 ```rust
 // src/push/fcm.rs:51
 pub fn new(_config: Config, client: Arc<reqwest::Client>) -> Self {
-    // ... (resto igual)
+    // ... (rest unchanged)
 }
 ```
 
-O eliminar el parámetro de la signatura si no se planea usarlo (rompe call-site en `main.rs:73` — pero esa es la única invocación). Tratar como cleanup opcional.
+Or remove the parameter from the signature if it is not planned for use (breaks the call site at `main.rs:73` — but that is the only invocation). Treat as optional cleanup.
 
-Para los warnings preexistentes (`config` en `UnifiedPushService`, `BatchingManager`, etc.), están fuera del scope de esta revisión (son artefactos de fases anteriores).
+For pre-existing warnings (`config` in `UnifiedPushService`, `BatchingManager`, etc.), they are out of scope for this review (artifacts of earlier phases).
 
 ---
 

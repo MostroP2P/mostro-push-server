@@ -68,7 +68,7 @@ v1.1 unblocks Phase 4 of the Mostro Mobile `CHAT_NOTIFICATIONS_PLAN.md`. Highlig
 
 **Codebase state (post-v1.1):** Brownfield Rust service. v1.1 shipped 6 plans across 3 phases on `feat/fcm-for-p2p-chat` (44 commits, +17,307/-153 LOC across 60 files; +1,617/-134 LOC across 13 Rust files). Codebase analysis under `.planning/codebase/` was generated 2026-04-24 and is still load-bearing for next-milestone planning.
 
-**Mobile coordination:** The companion Flutter app at `/home/andrea/Documents/oss/mostrop2p/mobile` specifies the desired behaviour in `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md`. Mobile Phase 1 (admin DM background notifications) merged; Phase 2 (P2P chat background notifications) was in PR review; Phases 3 and 4 are pending — **mobile Phase 4 is the consumer of `/api/notify` shipped in v1.1.**
+**Mobile coordination:** The companion Flutter app (sibling repo `mostro-mobile`) specifies the desired behaviour in `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md`. Mobile Phase 1 (admin DM background notifications) merged; Phase 2 (P2P chat background notifications) was in PR review; Phases 3 and 4 are pending — **mobile Phase 4 is the consumer of `/api/notify` shipped in v1.1.**
 
 **Three Nostr message classes the mobile must surface — all three covered post-v1.1:**
 

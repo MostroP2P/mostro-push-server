@@ -333,9 +333,9 @@ Direct read of the mobile plan was unavailable in this session — alignment is 
 ## Sources
 
 - **HIGH confidence (project files, read directly):**
-  - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/PROJECT.md`
-  - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/codebase/ARCHITECTURE.md`
-  - `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/docs/IMPLEMENTATION_PHASES.md`
+  - `.planning/PROJECT.md`
+  - `.planning/codebase/ARCHITECTURE.md`
+  - `docs/IMPLEMENTATION_PHASES.md`
 
 - **MEDIUM confidence (training-data ecosystem patterns, not verified live in this session):**
   - Matrix sygnal — accepts notification with no message content for E2EE-encrypted rooms (supports AF-2 reasoning).
@@ -348,7 +348,7 @@ Direct read of the mobile plan was unavailable in this session — alignment is 
 
 ## Research Limitations
 
-In this session `WebSearch`, `WebFetch`, `Bash`, and `Write` were all permission-denied, as were direct `Read` calls on `/home/andrea/Documents/oss/mostrop2p/mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md` and `$HOME/.claude/get-shit-done/templates/research-project/FEATURES.md`. This document was therefore produced from:
+In this session `WebSearch`, `WebFetch`, `Bash`, and `Write` were all permission-denied, as were direct `Read` calls on the sibling-repo `mostro-mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md` and on the GSD template `research-project/FEATURES.md`. This document was therefore produced from:
 
 1. The two project files that loaded (`PROJECT.md`, `ARCHITECTURE.md`).
 2. `IMPLEMENTATION_PHASES.md`.

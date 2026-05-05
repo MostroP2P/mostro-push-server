@@ -51,12 +51,12 @@ human_verification:
 **Phase Goal:** A registered Mostro Mobile client sending POST /api/notify { trade_pubkey } causes a silent push to reach the device registered for that pubkey, and shipping this endpoint does not introduce a trade_pubkey ↔ source IP correlation in production logs.
 
 **Verified:** 2026-04-25T19:08:05Z
-**Status:** human_needed
-**Re-verification:** No — initial verification
+**Re-verified:** 2026-04-25T19:30:00Z (SC #5 gap migrated inline — commit 118222b)
+**Status:** human_needed (operator smoke pending)
 
 ## Goal Achievement
 
-The endpoint exists, is wired through the existing `/api` scope, dispatches via the new `dispatch_silent` path, returns 202 unconditionally on parse-valid input, and ships with the privacy hardening bundle (X-Request-Id middleware, log_pubkey helper, semaphore-bounded spawn, silent FCM payload, RUST_LOG=info flip, dispute-chat runbook). All structural and source-level invariants required by the Phase goal are present and compile clean (`cargo build --release` exits 0). The two missing pieces are (1) operator-side iOS/Android delivery smoke that no static check can substitute for, and (2) one literal-vs-intent gap on SC #5 covered below.
+The endpoint exists, is wired through the existing `/api` scope, dispatches via the new `dispatch_silent` path, returns 202 unconditionally on parse-valid input, and ships with the privacy hardening bundle (X-Request-Id middleware, log_pubkey helper, semaphore-bounded spawn, silent FCM payload, RUST_LOG=info flip, dispute-chat runbook). All structural and source-level invariants required by the Phase goal are present and compile clean (`cargo build --release` exits 0). The remaining open item is operator-side iOS/Android delivery smoke that no static check can substitute for; the SC #5 literal-vs-intent gap noted in the initial pass was closed inline in commit 118222b (see `gaps_resolved` in the frontmatter).
 
 ### Observable Truths (against ROADMAP Success Criteria)
 
@@ -66,10 +66,10 @@ The endpoint exists, is wired through the existing `/api` scope, dispatches via 
 | 2 | POST /api/notify with malformed pubkey returns 400; response is byte-identical regardless of registration | ✓ VERIFIED | Validation at `src/api/notify.rs:54-61` mirrors `register_token` validation. Single `HttpResponse::Accepted()` site at line 108 (`grep -cE 'HttpResponse::Accepted\(\)' = 1`). 202 path returns `json!({"accepted": true})` — compile-time-constant body, no echo of trade_pubkey. Anti-enumeration oracle structurally satisfied per D-01. End-to-end timing equivalence remains a runtime concern (human_verification item 4). |
 | 3 | Existing /api/register, /api/unregister, /api/health, /api/info, /api/status request and response bodies remain byte-identical to the pre-milestone fixture | ✓ VERIFIED | Per-DTO and per-handler diff vs `56a1a6d^` (pre-Phase-2 tip): all 4 protected DTOs (`RegisterTokenRequest`, `UnregisterTokenRequest`, `RegisterResponse`, `StatusResponse`) byte-identical; all 5 protected handlers (`health_check`, `status`, `server_info`, `register_token`, `unregister_token`) byte-identical. Only AppState struct grew (3 new fields) — that is not part of NOTIFY-03's contract. |
 | 4 | Every /api/notify response carries a server-generated UUIDv4 X-Request-Id header; any inbound X-Request-Id is ignored | ✓ VERIFIED | `request_id_mw` at `src/api/notify.rs:117-132` strips inbound (`req.headers_mut().remove("x-request-id")` line 121) BEFORE generating UUIDv4 (line 123) and inserting into response (line 126). Wrapped via `web::resource("/notify").wrap(from_fn(request_id_mw))` (`src/api/routes.rs:56-60`). Per orchestrator note: SC #4 scope is /api/notify only (sibling endpoints intentionally exempt to preserve COMPAT-1). Confirmed: `grep web::scope("/api").wrap(` returns 0 (middleware NOT on scope). |
-| 5 | After deploy with RUST_LOG=info, no log line — emitted from any module — contains a recognisable hex pubkey prefix or a registered FCM/UnifiedPush token; pubkey identifiers come exclusively from log_pubkey() | ⚠️ PARTIAL | `notify.rs` uses `log_pubkey()` exclusively (2 calls at lines 64 and 81; no `trade_pubkey[..16]` slicing — `grep returns 0`). FCM/UnifiedPush token-prefix logs at `fcm.rs:270`, `fcm.rs:303`, `unifiedpush.rs:139` are `debug!` and silenced by RUST_LOG=info. **However**, info!-level logs at `src/store/mod.rs:60,72,78`, `src/api/routes.rs:95,141,156`, and `src/nostr/listener.rs:110,116` still emit `&trade_pubkey[..16]` prefixes and DO emit at RUST_LOG=info. CONTEXT.md D-14 explicitly chose to PRESERVE these for operator grep continuity, deliberately scoping log_pubkey() to /api/notify paths only. ROADMAP SC #5 is literally not satisfied; the narrower D-14 scope IS. See gaps section. |
+| 5 | After deploy with RUST_LOG=info, no log line — emitted from any module — contains a recognisable hex pubkey prefix or a registered FCM/UnifiedPush token; pubkey identifiers come exclusively from log_pubkey() | ✓ VERIFIED | After the inline migration in commit 118222b, `log_pubkey()` is the sole pubkey rendering across `src/api/notify.rs`, `src/api/routes.rs`, `src/store/mod.rs`, and `src/nostr/listener.rs`. Confirmed via `grep -nE 'trade_pubkey\[\.\.\|pubkey\[\.\.' src/store/mod.rs src/api/routes.rs src/nostr/listener.rs` → 0 matches. The shared `notify_log_salt` is now plumbed through `TokenStore::new` and `NostrListener::new`, so the same pubkey produces the same 8-char correlator everywhere — operator log correlation preserved. FCM/UnifiedPush token-prefix logs at `fcm.rs:270`, `fcm.rs:303`, `unifiedpush.rs:139` are `debug!` and silenced by RUST_LOG=info. |
 | 6 | docs/verification/dispute-chat.md walks an operator through verifying admin DM (user-to-user, NOT through Mostro daemon) reaches device via Nostr-listener path; includes anti-CRIT-1 reminder | ✓ VERIFIED | File exists at `docs/verification/dispute-chat.md` (203 lines, 1076 words). All 4 mandatory sections present: register pubkey (Step 1, line 56), publish kind 1059 from secondary Nostr client NOT Mostro daemon (Step 2, line 77), verify dispatch via flyctl logs (Step 3, line 103), anti-CRIT-1 grep with comment-excluding regex `^\s*[^/]` (Step 4, line 141). References OOS-19, CRIT-1, VERIFY-03, NIP-59, kind 1059. Spanish per global CLAUDE.md. |
 
-**Score:** 5/6 truths verified (1 partial)
+**Score:** 6/6 truths verified (SC #5 closed inline in commit 118222b — see `gaps_resolved`).
 
 ### Required Artifacts
 
@@ -140,14 +140,11 @@ All 8 phase-declared requirement IDs (NOTIFY-01..04, PRIV-01..03, VERIFY-03) are
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| `src/api/routes.rs` | 95, 141, 156 | `info!("... {}...", &req.trade_pubkey[..16.min(req.trade_pubkey.len())])` — register/unregister handlers emit hex pubkey prefix at info level | ⚠️ Warning | Tension with ROADMAP SC #5 "any module"; explicitly preserved by D-14. See gaps. |
-| `src/store/mod.rs` | 60, 72, 78 | `info!/debug!("... {}...", &trade_pubkey[..16.min(trade_pubkey.len())])` — TokenStore register/unregister logs | ⚠️ Warning | Same as above. The line at 78 is `debug!` (silenced by RUST_LOG=info); 60 and 72 are `info!`. |
-| `src/nostr/listener.rs` | 110, 116 | `info!("... {}...", &trade_pubkey[..16])` — Event recipient and MATCH log lines | ⚠️ Warning | Same as above; reached on every Mostro daemon event in production. |
 | `src/push/fcm.rs` | 270, 303 | `debug!("Sending FCM ... {}...", &device_token[..20.min(...)])` — FCM token prefix logs | ℹ️ Info | Silenced by RUST_LOG=info per D-15; not a runtime gap. |
 | `src/push/unifiedpush.rs` | 139 | `debug!("Sending UnifiedPush ... {}...", &device_token[..30.min(...)])` | ℹ️ Info | Silenced by RUST_LOG=info per D-15; not a runtime gap. |
 | `src/api/notify.rs` | 19-20 | Doc comment text contains the strings `sender_pubkey`, `signature`, `Idempotency-Key`, `auth header` | ℹ️ Info | False-positive on plan acceptance grep; the doccomment documents the prohibition (anti-OOS-11). Auto-fixed/documented in 02-02-SUMMARY.md. No code change needed. |
 
-No blocker (🛑) anti-patterns found. The 3 ⚠️ Warning entries cluster around a single root cause (D-14's deliberate scope reduction vs ROADMAP SC #5).
+No blocker (🛑) and no warning (⚠️) anti-patterns remain. The earlier `&trade_pubkey[..16]` info!-level call sites in `routes.rs`, `store/mod.rs`, and `nostr/listener.rs` were migrated to `log_pubkey()` in commit 118222b; only `debug!`-level token-prefix logs remain, and those are silenced by RUST_LOG=info in production.
 
 ### Human Verification Required
 
@@ -163,28 +160,9 @@ See the `human_verification:` block in the YAML frontmatter for the 7 items requ
 
 ### Gaps Summary
 
-There is one structural gap and one set of items requiring human verification.
+All structural gaps are resolved. One open item is operator-side delivery smoke.
 
-**Structural gap (SC #5 partial):** ROADMAP SC #5 says "no log line — emitted from any module — contains a recognisable hex pubkey prefix". Phase 2 CONTEXT.md D-14 deliberately narrowed log_pubkey() scope to /api/notify only, explicitly preserving 7 existing `&trade_pubkey[..16]` info!-level call sites in `src/api/routes.rs`, `src/store/mod.rs`, and `src/nostr/listener.rs` for operator grep continuity. Under RUST_LOG=info these legacy logs DO emit hex pubkey prefixes in production. The narrower D-14 scope is fully satisfied (notify.rs uses log_pubkey() exclusively); the broader ROADMAP wording is not.
-
-**This looks intentional.** D-14 in `02-CONTEXT.md` is explicit: "Existing logs in src/nostr/listener.rs (lines ~108, 115-116, 137), src/api/routes.rs (register/unregister handlers), and src/store/mod.rs (TokenStore log lines) KEEP their current `&trade_pubkey[..16]` prefix-truncation shape — NOT migrated. Rationale: operators that grep production logs by hex prefix today do not break; retroactive migration is deferred to a future observability milestone."
-
-To accept this deviation, add to VERIFICATION.md frontmatter (after operator confirms intent):
-
-```yaml
-overrides:
-  - must_have: "After the Phase 2 change is deployed (RUST_LOG=info), no log line — emitted from any module — contains a recognisable hex pubkey prefix or a registered FCM/UnifiedPush token; pubkey identifiers in logs originate exclusively from the salted truncated BLAKE3 helper."
-    reason: "Phase 2 CONTEXT.md D-14 deliberately narrowed log_pubkey() scope to /api/notify paths only. Existing 7 hex-prefix info! call sites in routes.rs, store/mod.rs, and nostr/listener.rs are preserved for operator grep continuity. Retroactive migration is deferred to a future observability milestone. The narrower D-14 scope (/api/notify only) is fully satisfied."
-    accepted_by: "<operator name>"
-    accepted_at: "<ISO timestamp>"
-```
-
-If the deviation is NOT accepted, the closure plan must migrate the 7 call sites:
-- `src/store/mod.rs` lines 58-62, 70-74 (`register`, `unregister`)
-- `src/api/routes.rs` lines 94-95, 138-141, 155-156 (`register_token`, `unregister_token`)
-- `src/nostr/listener.rs` lines 110, 114-117 (`Event recipient`, `MATCH! Found registered token`)
-
-That migration would also need to plumb the salt through `TokenStore` and the Nostr listener (currently only `AppState` holds it), enlarging the surface area beyond Phase 2's locked D-19 commit grain. This is the reason D-14 chose the narrower scope to begin with.
+**SC #5 (resolved inline, commit 118222b):** the initial pass flagged a literal-vs-intent gap because Phase 2 CONTEXT.md D-14 had narrowed `log_pubkey()` scope to `/api/notify` only, leaving 7 `&trade_pubkey[..16]` info!-level call sites in `src/store/mod.rs`, `src/api/routes.rs`, and `src/nostr/listener.rs`. The user chose to migrate inline rather than carry the deviation forward; commit 118222b plumbs the shared `notify_log_salt` through `TokenStore::new` and `NostrListener::new` and replaces the 7 legacy call sites with `log_pubkey(salt, pk)`. Post-migration verification: `grep -nE 'trade_pubkey\[\.\.|pubkey\[\.\.' src/store/mod.rs src/api/routes.rs src/nostr/listener.rs` returns 0 matches; `cargo build --release` and `cargo test --release` are green; the same salt shared across modules preserves operator log correlation.
 
 **Manual smoke gap:** D-06 explicitly defers iOS/Android device delivery confirmation to operator action post-deploy. The structural code path is complete and compiles; only Apple/Google's runtime delivery decision can validate end-to-end behaviour. See `human_verification` items 1-2.
 

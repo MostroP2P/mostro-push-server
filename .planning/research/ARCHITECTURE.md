@@ -278,17 +278,17 @@ The general principle: only fix concerns that would otherwise be re-introduced o
 
 ## Files referenced (absolute paths)
 
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/main.rs` — lines 4, 46, 79, 82-86, 93-95 (modified)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/api/routes.rs` — lines 36-49 (modified), new `notify_token` handler appended
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/nostr/listener.rs` — lines 14, 22, 36, 87, 119-135 (modified)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/push/mod.rs` — lines 4-8 (modified, add `pub mod dispatcher`)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/push/dispatcher.rs` — new
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/api/rate_limit.rs` — new
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/api/mod.rs` — add `pub mod rate_limit;`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/Cargo.toml` — add `actix-governor` (requires explicit user approval per global CLAUDE.md)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/store/mod.rs` — UNTOUCHED
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/push/fcm.rs`, `src/push/unifiedpush.rs` — UNTOUCHED
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/src/config.rs` — UNTOUCHED in this milestone
+- `src/main.rs` — lines 4, 46, 79, 82-86, 93-95 (modified)
+- `src/api/routes.rs` — lines 36-49 (modified), new `notify_token` handler appended
+- `src/nostr/listener.rs` — lines 14, 22, 36, 87, 119-135 (modified)
+- `src/push/mod.rs` — lines 4-8 (modified, add `pub mod dispatcher`)
+- `src/push/dispatcher.rs` — new
+- `src/api/rate_limit.rs` — new
+- `src/api/mod.rs` — add `pub mod rate_limit;`
+- `Cargo.toml` — add `actix-governor` (requires explicit user approval per global CLAUDE.md)
+- `src/store/mod.rs` — UNTOUCHED
+- `src/push/fcm.rs`, `src/push/unifiedpush.rs` — UNTOUCHED
+- `src/config.rs` — UNTOUCHED in this milestone
 
 ---
 

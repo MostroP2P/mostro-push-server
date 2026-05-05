@@ -1063,8 +1063,8 @@ The project's `CLAUDE.md` and global `CLAUDE.md` impose the following directives
 - `src/main.rs` (project file) — current construction site (lines 22-114) for `AppState`, push services list, `PushDispatcher`, `NostrListener`.
 - `src/push/mod.rs` (project file) — current `PushService` trait surface (Phase 1 tightened to `Box<dyn Error + Send + Sync>`).
 - `deploy-fly.sh:42` (project file) — current `RUST_LOG="debug"` value (D-15 flips to `"info"`).
-- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` and `01-01-SUMMARY.md` — Phase 1 decisions still in force; PushDispatcher API actually shipped.
-- `.planning/phases/02-post-api-notify-endpoint-with-privacy-hardening/02-CONTEXT.md` — 19 user-locked decisions for this phase.
+- `.planning/milestones/v1.1-phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` and `01-01-SUMMARY.md` — Phase 1 decisions still in force; PushDispatcher API actually shipped.
+- `.planning/milestones/v1.1-phases/02-post-api-notify-endpoint-with-privacy-hardening/02-CONTEXT.md` — 19 user-locked decisions for this phase.
 - `.planning/REQUIREMENTS.md` — NOTIFY-01..04, PRIV-01..03, VERIFY-03 specifications.
 - `.planning/research/PITFALLS.md` — CRIT-1..6, CONC-1..3, FCM-1..2, COMPAT-1, DEPLOY-1, RL-2 (carrying over).
 - [docs.rs/blake3/latest/blake3/fn.keyed_hash.html](https://docs.rs/blake3/latest/blake3/fn.keyed_hash.html) — `keyed_hash(key: &[u8; 32], input: &[u8]) -> Hash` signature.

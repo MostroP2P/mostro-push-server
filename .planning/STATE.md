@@ -129,13 +129,13 @@ Phase 02 (`POST /api/notify` endpoint with privacy hardening) shipped earlier th
 
 **Files in play:**
 
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/PROJECT.md`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/REQUIREMENTS.md` (Traceability section now populated)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/ROADMAP.md` (created this session)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/STATE.md` (this file, created this session)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/SUMMARY.md`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/{ARCHITECTURE,FEATURES,PITFALLS}.md`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/codebase/{ARCHITECTURE,CONCERNS,CONVENTIONS,INTEGRATIONS,STACK,STRUCTURE,TESTING}.md`
+- `.planning/PROJECT.md`
+- `.planning/REQUIREMENTS.md` (Traceability section now populated)
+- `.planning/ROADMAP.md` (created this session)
+- `.planning/STATE.md` (this file, created this session)
+- `.planning/research/SUMMARY.md`
+- `.planning/research/{ARCHITECTURE,FEATURES,PITFALLS}.md`
+- `.planning/codebase/{ARCHITECTURE,CONCERNS,CONVENTIONS,INTEGRATIONS,STACK,STRUCTURE,TESTING}.md`
 
 ---
 

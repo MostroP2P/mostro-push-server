@@ -101,8 +101,8 @@ This phase is also VERIFY-03: a manual runbook documenting how an operator verif
 
 ### Phase 1 artifacts (predecessor context)
 
-- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — Phase 1 decisions still in force (trait `+ Send + Sync`, structured `DispatchOutcome` / `DispatchError`, caller-side logging, dispatcher emits no log lines)
-- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-01-SUMMARY.md` — what actually landed (reviews the reconciliation of `Vec<(Arc<dyn>, &'static str)>` tuple and the intentional `field 'backend' is never read` warning)
+- `.planning/milestones/v1.1-phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — Phase 1 decisions still in force (trait `+ Send + Sync`, structured `DispatchOutcome` / `DispatchError`, caller-side logging, dispatcher emits no log lines)
+- `.planning/milestones/v1.1-phases/01-pushdispatcher-refactor-no-behaviour-change/01-01-SUMMARY.md` — what actually landed (reviews the reconciliation of `Vec<(Arc<dyn>, &'static str)>` tuple and the intentional `field 'backend' is never read` warning)
 - `src/push/dispatcher.rs` — the existing dispatcher that Phase 2 consumes. Read before writing the spawn closure in D-12.
 
 ### Research outputs (mandatory)

@@ -24,8 +24,8 @@ The biggest risks are CRIT-1 (a future reviewer "fixing" the dormant `mostro_pub
 
 > **Coverage gap acknowledgement:** The dedicated STACK.md research file does not exist for this milestone. The Stack researcher's environment denied the `WebSearch`/`WebFetch` access required to verify crate versions live, so version-pinning decisions are deferred to `/gsd-plan-phase` (which can re-attempt verification with web tools enabled). The notes below are extracted from ARCHITECTURE.md and PROJECT.md and reflect what the architecture work assumed; treat all version numbers as MEDIUM confidence.
 
-**New dependency (requires explicit user approval per global CLAUDE.md):**
-- `actix-governor` — Actix-web middleware adapter on top of the already-declared `governor` crate. Provides the `KeyExtractor` trait used to source the per-IP rate-limit key from `Fly-Client-IP`. Version pin (`0.5` vs `0.6`) is **NOT** decided here — there were `KeyExtractor` API differences across those minors and the exact signature of `extract`, `SimpleKeyExtractionError`, and `Governor::new` must be verified against current crate docs in `/gsd-plan-phase` before writing implementation code.
+**New dependency (~~requires explicit user approval per global CLAUDE.md~~ — SUPERSEDED by Phase 3 D-05):**
+- ~~`actix-governor`~~ — **Rejected during Phase 3 planning.** Every published version of `actix-governor` is licensed GPL-3.0, which is incompatible with this project's MIT license. Phase 3 PLAN D-05 records the rejection and pivots to a hand-rolled `actix_web::middleware::from_fn` middleware over the already-declared `governor::DefaultKeyedRateLimiter<IpAddr>`. The `KeyExtractor` trait surface notes below are kept for historical context only; the implemented IP key extraction lives in `src/api/rate_limit.rs::extract_client_ip` and uses `req.headers().get("Fly-Client-IP")` / rightmost-XFF / `req.peer_addr()` directly. Future implementers MUST NOT re-introduce `actix-governor` without first resolving the GPL/MIT conflict.
 
 **Already declared, finally wired in this milestone:**
 - `governor` 0.6 — keyed leaky-bucket rate limiter. Used directly inside the handler for the per-pubkey limit (because the key lives in the JSON body and cannot be middleware-extracted). API surface to verify: `RateLimiter::keyed`, `Quota::per_minute().allow_burst(...)`, `check_key`, and the `retain_recent` cleanup hook used to bound key cardinality (RL-1).
@@ -233,17 +233,17 @@ The roadmapper should mark "verify and pin `actix-governor` version + verify `go
 
 ### Primary (HIGH confidence — read directly from the codebase)
 
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/PROJECT.md`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/codebase/ARCHITECTURE.md`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/codebase/CONCERNS.md`
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/docs/IMPLEMENTATION_PHASES.md`
+- `.planning/PROJECT.md`
+- `.planning/codebase/ARCHITECTURE.md`
+- `.planning/codebase/CONCERNS.md`
+- `docs/IMPLEMENTATION_PHASES.md`
 - `src/main.rs`, `src/api/routes.rs`, `src/nostr/listener.rs`, `src/store/mod.rs`, `src/push/fcm.rs`, `src/push/mod.rs`, `src/config.rs`, `deploy-fly.sh`, `fly.toml`
 
 ### Research dimension files
 
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/ARCHITECTURE.md` (HIGH on codebase grounding, MEDIUM on `actix-governor` specifics)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/FEATURES.md` (HIGH on project-specific items, MEDIUM on ecosystem comparison)
-- `/home/andrea/Documents/oss/mostrop2p/mostro-push-server/.planning/research/PITFALLS.md` (HIGH on codebase-grounded items, MEDIUM on FCM/APNs/Fly semantics)
+- `.planning/research/ARCHITECTURE.md` (HIGH on codebase grounding, MEDIUM on `actix-governor` specifics)
+- `.planning/research/FEATURES.md` (HIGH on project-specific items, MEDIUM on ecosystem comparison)
+- `.planning/research/PITFALLS.md` (HIGH on codebase-grounded items, MEDIUM on FCM/APNs/Fly semantics)
 - **STACK.md — NOT PRODUCED** (researcher environment lacked WebSearch/WebFetch)
 
 ### Secondary (MEDIUM confidence — training-data ecosystem patterns)

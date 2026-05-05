@@ -160,8 +160,8 @@ This phase deliberately does NOT add `actix-governor` to `Cargo.toml`: every pub
 
 ### Phase 1 + 2 artifacts (predecessor context — locked decisions still in force)
 
-- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — `PushDispatcher` shape, `Arc<[Arc<dyn PushService>]>` lock-free reads, anti-CRIT-1 comment block above `Filter::new()`.
-- `.planning/phases/02-post-api-notify-endpoint-with-privacy-hardening/02-CONTEXT.md` — always-`202` contract (D-01), `tokio::spawn` + `Arc<Semaphore>(50)` (D-02 + D-03), separate FCM silent payload `apns-priority: 5` (D-05), shared `reqwest::Client` with timeouts (D-07), `log_pubkey()` helper + `notify_log_salt` in AppState (D-09 + D-14), X-Request-Id middleware scoped to `/notify` (D-13), `RUST_LOG="info"` flip (D-15), `dispatch_silent` method on `PushDispatcher` (D-22).
+- `.planning/milestones/v1.1-phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — `PushDispatcher` shape, `Arc<[Arc<dyn PushService>]>` lock-free reads, anti-CRIT-1 comment block above `Filter::new()`.
+- `.planning/milestones/v1.1-phases/02-post-api-notify-endpoint-with-privacy-hardening/02-CONTEXT.md` — always-`202` contract (D-01), `tokio::spawn` + `Arc<Semaphore>(50)` (D-02 + D-03), separate FCM silent payload `apns-priority: 5` (D-05), shared `reqwest::Client` with timeouts (D-07), `log_pubkey()` helper + `notify_log_salt` in AppState (D-09 + D-14), X-Request-Id middleware scoped to `/notify` (D-13), `RUST_LOG="info"` flip (D-15), `dispatch_silent` method on `PushDispatcher` (D-22).
 - `src/api/notify.rs` — handler that Phase 3 wraps with the per-pubkey check (D-12). Order of operations preserved.
 - `src/api/routes.rs` — `AppState` structure that grows ONE new field in this phase (D-09). Existing fields untouched.
 

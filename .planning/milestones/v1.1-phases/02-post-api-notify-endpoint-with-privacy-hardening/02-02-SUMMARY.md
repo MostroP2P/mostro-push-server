@@ -293,7 +293,7 @@ T-02-10 (anti-CRIT-1 listener regression) and T-02-RUNBOOK-VERIFICATION are miti
 
 ## Hand-off to Plan 03 (VERIFY-03 dispute-chat runbook)
 
-The endpoint exists and is operator-verifiable on Fly.io staging. Plan 03 produces a Spanish-language operator runbook at `docs/verification/dispute-chat.md` walking through:
+The endpoint exists and is operator-verifiable on Fly.io staging. Plan 03 produces an operator runbook at `docs/verification/dispute-chat.md` walking through:
 1. `POST /api/register` with a test pubkey.
 2. Publishing a `kind 1059` Gift Wrap from a second Nostr client (NOT the Mostro daemon) addressed at the registered `trade_pubkey`.
 3. Verifying the listener emits `info!("Push sent successfully for event ...")` and the device receives a silent push.
