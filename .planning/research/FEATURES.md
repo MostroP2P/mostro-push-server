@@ -241,7 +241,7 @@ Folded into TS-4. Listed for visibility.
 
 ## Feature Dependencies
 
-```
+```text
 TS-1 (POST /api/notify)
   ├── enables TS-2 (rate limiting)
   ├── enables TS-3 (error contract)

@@ -578,7 +578,7 @@ impl FcmPush {
 }
 ```
 
-**Net-new — `send_silent_to_token` method** (per RESEARCH line 575 recommendation; sibling to existing `send_to_token` at lines 220-251). Mirror the existing `send_to_token` body (auth-token fetch, URL construction, POST, status check) but call `Self::build_silent_payload_for_notify(device_token)` instead of `Self::build_payload_for_token(device_token)`. This stays a `pub fn` on `FcmPush`, NOT on the `PushService` trait (UnifiedPush has no per-payload distinction).
+**Net-new — `send_silent_to_token` method** (per RESEARCH line 575 recommendation; sibling to existing `send_to_token` at lines 220-251). The trait `PushService` exposes `send_silent_to_token` as a **default method** that delegates to `send_to_token` (so `UnifiedPush` and any future backend without a per-payload distinction get the right behaviour for free). `FcmPush` **overrides** this default with an FCM-specific body that mirrors `send_to_token` (auth-token fetch, URL construction, POST, status check) but calls `Self::build_silent_payload_for_notify(device_token)` instead of `Self::build_payload_for_token(device_token)`. See the trait extension under "Trait surface delta" further down for the default-method signature.
 
 **Pitfalls observed during analog read:**
 - The existing `build_payload_for_token` at line 198 uses `apns-priority: "10"` with `content-available: 1`. **This is the documented anti-pattern that D-05 separates from** — Apple throttles apps that ship this combination at chat frequency. The existing builder stays untouched because it serves the listener path (low-frequency Mostro daemon events), where the throttling risk is acceptable.

@@ -55,7 +55,7 @@ Per-IP gets rejected first (cheap, before body parsing); per-pubkey gets checked
 
 ## Data flow — `POST /api/notify`
 
-```
+```text
 Mobile client (User A — sender)
         |  HTTP POST /api/notify  { "trade_pubkey": "<peer B's tradeKey.public>" }
         v
@@ -99,7 +99,7 @@ notify_token returns:
 
 The Nostr-driven path (current behaviour) flows through the same `PushDispatcher::dispatch`:
 
-```
+```text
 NostrListener::handle_notifications closure (src/nostr/listener.rs:90-146)
         |  extracts p tag -> trade_pubkey
         |  token_store.get(&trade_pubkey)

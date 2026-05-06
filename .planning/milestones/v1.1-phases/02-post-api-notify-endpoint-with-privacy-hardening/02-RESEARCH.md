@@ -186,7 +186,7 @@ grep -A1 'name = "actix-web"' Cargo.lock | head -2
 
 ### System Architecture Diagram
 
-```
+```text
                 Mobile client (sender — User A)
                          │
                          │  POST /api/notify { "trade_pubkey": "<64-hex>" }
@@ -262,7 +262,7 @@ grep -A1 'name = "actix-web"' Cargo.lock | head -2
 
 ### Recommended Project Structure (Phase 2 deltas only)
 
-```
+```text
 src/
 ├── api/
 │   ├── mod.rs           # add `pub mod notify;`
@@ -1018,7 +1018,7 @@ All three open questions below were resolved during `/gsd-discuss-phase` and now
 
 - **Per task commit:** `cargo build --release` (compile + clippy-clean).
 - **Per wave merge:** `cargo build --release` + the manual grep checks tabulated above.
-- **Phase gate:** All NOTIFY-* / PRIV-* / VERIFY-03 manual checks PASS + Fly.io staging deploy + D-06 iOS smoke + D-17 runbook walkthrough.
+- **Phase gate:** All `NOTIFY-*` / `PRIV-*` / `VERIFY-03` manual checks PASS + Fly.io staging deploy + D-06 iOS smoke + D-17 runbook walkthrough.
 
 ### Wave 0 Gaps
 

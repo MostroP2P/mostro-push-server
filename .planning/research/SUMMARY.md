@@ -215,8 +215,8 @@ The roadmapper should mark "verify and pin `actix-governor` version + verify `go
 |---|---|---|
 | Stack | LOW (no file) — see coverage gap above | Version pins inferred from ARCHITECTURE; not independently verified. |
 | Features | MEDIUM-HIGH | HIGH on project-specific items (grounded in PROJECT.md and codebase analysis); MEDIUM on ecosystem comparison (FEATURES researcher couldn't access ntfy/sygnal docs). Privacy reasoning is HIGH because it's grounded in PROJECT.md's invariants. |
-| Architecture | HIGH on layering / build-order / data flow (codebase-grounded with file/line citations); MEDIUM on `actix-governor` API specifics (web verification was unavailable). |
-| Pitfalls | HIGH on items grounded in the codebase (file/line citations); MEDIUM on FCM/iOS delivery semantics and Fly proxy header behavior (based on stable published guidance, web search was unavailable). |
+| Architecture | HIGH | Layering / build-order / data flow are codebase-grounded with file/line citations; `actix-governor` API specifics remain MEDIUM due to unavailable web verification. |
+| Pitfalls | HIGH | Codebase-grounded pitfalls are strong (file/line citations); FCM/iOS delivery semantics and Fly proxy-header behaviour remain MEDIUM, based on stable published guidance without live web verification. |
 
 **Overall confidence:** MEDIUM-HIGH for proceeding to REQUIREMENTS.md and ROADMAP.md, with the explicit understanding that `/gsd-plan-phase` must verify the items listed above before implementation begins.
 

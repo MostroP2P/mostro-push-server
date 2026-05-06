@@ -89,7 +89,7 @@ v1.1 unblocks Phase 4 of the Mostro Mobile `CHAT_NOTIFICATIONS_PLAN.md`. Highlig
 - Zero CI workflow — bundled with a hardening milestone.
 - No request signing on `/api/register` — bundled with anti-abuse work.
 
-**Stack at a glance (post-v1.1):** Rust 1.75+ (edition 2021), Tokio 1.35 + actix-web 4.4, `nostr-sdk` 0.27, `reqwest` 0.11 (FCM v1 + UnifiedPush, shared Arc client with 2s/5s timeouts), `jsonwebtoken` 9 (Firebase OAuth2), `governor` 0.6 (wired in v1.1 over hand-rolled `from_fn` middleware — `actix-governor` rejected for GPL-3.0). New v1.1 deps: `blake3` 1, `uuid` 1 (v4). Single Fly.io machine, 512MB, region `gru`.
+**Stack at a glance (post-v1.1):** Rust 1.75+ (edition 2021), Tokio 1.35 + actix-web 4.9 (resolves to 4.11.0 in Cargo.lock), `nostr-sdk` 0.27, `reqwest` 0.11 (FCM v1 + UnifiedPush, shared Arc client with 2s/5s timeouts), `jsonwebtoken` 9 (Firebase OAuth2), `governor` 0.6 (wired in v1.1 over hand-rolled `from_fn` middleware — `actix-governor` rejected for GPL-3.0). New v1.1 deps: `blake3` 1, `uuid` 1 (v4). Single Fly.io machine, 512MB, region `gru`.
 
 ## Constraints
 

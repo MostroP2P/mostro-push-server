@@ -272,7 +272,7 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 - Mounted under `/api`:
 - `tokio::spawn(async move { nostr_listener.start().await; })` in `src/main.rs:88-90`.
 - `tokio::spawn` cleanup loop in `src/store/mod.rs:140-152` started by `store::start_cleanup_task` (called from `src/main.rs:39`).
-## Error Handling
+## Error Handling — Runtime Behaviour
 - Reconnection with backoff: `NostrListener::start` retries forever, sleeping 5s on a clean close and 10s on errors (`src/nostr/listener.rs:42-55`).
 - Validation at the boundary: HTTP handlers reject malformed `trade_pubkey` (must be 64 hex chars), empty tokens, and unknown platforms with `400 Bad Request` and a `RegisterResponse { success: false, message }` (`src/api/routes.rs:86-117`).
 - Non-fatal startup degradation: FCM init failures log a warning and exclude FCM from the dispatch list (`src/main.rs:62-72`); UnifiedPush endpoint load failures log and continue (`src/main.rs:51-54`, `src/push/unifiedpush.rs:64-69`).

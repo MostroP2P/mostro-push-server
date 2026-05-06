@@ -63,7 +63,7 @@ This phase deliberately does NOT add `actix-governor` to `Cargo.toml`: every pub
 ### Middleware Wiring & Composition
 
 - **D-19: Middleware stack on `/api/notify` (outermost first).**
-  ```
+  ```rust
   web::resource("/notify")
       .wrap(from_fn(request_id_mw))      // outermost: sets X-Request-Id on EVERY response, including 429s
       .wrap(from_fn(per_ip_rate_limit_mw)) // inner: 429 if per-IP exhausted, BEFORE body parse
