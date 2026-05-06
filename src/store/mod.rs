@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use crate::utils::log_pubkey::log_pubkey;
 
 /// Platform identifier for push notifications
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -30,13 +33,15 @@ pub struct RegisteredToken {
 pub struct TokenStore {
     tokens: RwLock<HashMap<String, RegisteredToken>>,
     ttl_hours: u64,
+    log_salt: Arc<[u8; 32]>,
 }
 
 impl TokenStore {
-    pub fn new(ttl_hours: u64) -> Self {
+    pub fn new(ttl_hours: u64, log_salt: Arc<[u8; 32]>) -> Self {
         Self {
             tokens: RwLock::new(HashMap::new()),
             ttl_hours,
+            log_salt,
         }
     }
 
@@ -56,8 +61,8 @@ impl TokenStore {
         tokens.insert(trade_pubkey.clone(), token);
 
         info!(
-            "Registered token for trade_pubkey: {}... (total: {})",
-            &trade_pubkey[..16.min(trade_pubkey.len())],
+            "Registered token pk={} (total: {})",
+            log_pubkey(&self.log_salt, &trade_pubkey),
             tokens.len()
         );
     }
@@ -68,14 +73,14 @@ impl TokenStore {
 
         if removed {
             info!(
-                "Unregistered token for trade_pubkey: {}... (total: {})",
-                &trade_pubkey[..16.min(trade_pubkey.len())],
+                "Unregistered token pk={} (total: {})",
+                log_pubkey(&self.log_salt, trade_pubkey),
                 tokens.len()
             );
         } else {
             debug!(
-                "Token not found for trade_pubkey: {}...",
-                &trade_pubkey[..16.min(trade_pubkey.len())]
+                "Token not found pk={}",
+                log_pubkey(&self.log_salt, trade_pubkey)
             );
         }
 

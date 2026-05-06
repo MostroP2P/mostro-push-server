@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::fs;
 
@@ -20,18 +21,18 @@ pub struct UnifiedPushEndpoint {
 
 pub struct UnifiedPushService {
     config: Config,
-    client: Client,
+    client: Arc<reqwest::Client>,
     endpoints: RwLock<HashMap<String, UnifiedPushEndpoint>>,
     storage_path: PathBuf,
 }
 
 impl UnifiedPushService {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let storage_path = PathBuf::from("data/unifiedpush_endpoints.json");
 
         Self {
             config,
-            client: Client::new(),
+            client,
             endpoints: RwLock::new(HashMap::new()),
             storage_path,
         }
@@ -124,49 +125,11 @@ impl UnifiedPushService {
 
 #[async_trait]
 impl PushService for UnifiedPushService {
-    async fn send_silent_push(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let endpoints = self.endpoints.read().await;
-
-        if endpoints.is_empty() {
-            info!("No UnifiedPush endpoints registered");
-            return Ok(());
-        }
-
-        let payload = serde_json::json!({
-            "type": "silent_wake",
-            "timestamp": chrono::Utc::now().timestamp()
-        });
-
-        for endpoint in endpoints.values() {
-            match self.client
-                .post(&endpoint.endpoint_url)
-                .json(&payload)
-                .send()
-                .await
-            {
-                Ok(response) => {
-                    if response.status().is_success() {
-                        info!("UnifiedPush notification sent to {}", endpoint.device_id);
-                    } else {
-                        error!("UnifiedPush error for {}: {}",
-                            endpoint.device_id, response.status());
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to send UnifiedPush to {}: {}",
-                        endpoint.device_id, e);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn send_to_token(
         &self,
         device_token: &str,
         _platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // For UnifiedPush, the device_token IS the endpoint URL
         let payload = serde_json::json!({
             "type": "silent_wake",

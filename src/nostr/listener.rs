@@ -2,25 +2,27 @@ use log::{info, error, warn, debug};
 use nostr_sdk::prelude::*;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
-use crate::push::PushService;
+use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
 use crate::store::TokenStore;
+use crate::utils::log_pubkey::log_pubkey;
 
 pub struct NostrListener {
     config: Config,
-    push_services: Arc<Mutex<Vec<Box<dyn PushService>>>>,
+    dispatcher: Arc<PushDispatcher>,
     token_store: Arc<TokenStore>,
     mostro_pubkey: String,
+    log_salt: Arc<[u8; 32]>,
 }
 
 impl NostrListener {
     pub fn new(
         config: Config,
-        push_services: Arc<Mutex<Vec<Box<dyn PushService>>>>,
+        dispatcher: Arc<PushDispatcher>,
         token_store: Arc<TokenStore>,
+        log_salt: Arc<[u8; 32]>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Validate the pubkey format
         let mostro_pubkey = config.nostr.mostro_pubkey.clone();
@@ -30,12 +32,13 @@ impl NostrListener {
         // Validate it's valid hex by trying to parse it
         XOnlyPublicKey::from_str(&mostro_pubkey)
             .map_err(|_| "Invalid MOSTRO_PUBKEY (not a valid public key)")?;
-        
+
         Ok(Self {
             config,
-            push_services,
+            dispatcher,
             token_store,
             mostro_pubkey,
+            log_salt,
         })
     }
 
@@ -70,9 +73,12 @@ impl NostrListener {
         // Connect to all relays
         client.connect().await;
 
-        // Create filter for kind 1059 (Gift Wrap) events
-        // Note: We don't filter by author because Gift Wrap uses ephemeral keys
-        // The actual sender (Mostro) is encrypted inside. We filter by 'p' tag later.
+        // DO NOT add .authors(...) to this Filter. Two reasons:
+        //  1. Gift Wrap (NIP-59, kind 1059) wraps each event with an EPHEMERAL outer key.
+        //     The outer pubkey is never the Mostro daemon — filtering by author would drop everything.
+        //  2. Admin DMs in disputes are sent directly user-to-user, NOT through the Mostro daemon.
+        //     A mostro_pubkey author filter would silently drop every dispute notification.
+        // See PROJECT.md anti-requirement OOS-19 / PITFALLS CRIT-1.
         let since = Timestamp::now() - Duration::from_secs(60);
         let filter = Filter::new()
             .kinds(vec![Kind::Custom(1059)])
@@ -84,7 +90,8 @@ impl NostrListener {
 
         // Handle incoming events
         let token_store = self.token_store.clone();
-        let push_services = self.push_services.clone();
+        let dispatcher = self.dispatcher.clone();
+        let log_salt = self.log_salt.clone();
 
         client
             .handle_notifications(|notification| async {
@@ -105,36 +112,35 @@ impl NostrListener {
                             });
 
                         if let Some(trade_pubkey) = recipient_pubkey {
-                            info!("Event recipient (p tag): {}...", &trade_pubkey[..16.min(trade_pubkey.len())]);
+                            let log_pk = log_pubkey(&log_salt, &trade_pubkey);
+                            info!("Event recipient (p tag) pk={}", log_pk);
 
                             // Look up token in store
                             if let Some(registered_token) = token_store.get(&trade_pubkey).await {
                                 info!(
-                                    "MATCH! Found registered token for {}..., sending push to {} device",
-                                    &trade_pubkey[..16],
+                                    "MATCH! Found registered token pk={}, sending push to {} device",
+                                    log_pk,
                                     registered_token.platform
                                 );
 
-                                // Send push notification to the specific device
-                                let services = push_services.lock().await;
-                                for service in services.iter() {
-                                    if service.supports_platform(&registered_token.platform) {
-                                        match service.send_to_token(
-                                            &registered_token.device_token,
-                                            &registered_token.platform,
-                                        ).await {
-                                            Ok(_) => {
-                                                info!("Push sent successfully for event {}", event.id);
-                                                break; // Only need one service to succeed
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to send push: {}", e);
-                                            }
+                                // Dispatch via PushDispatcher (lock-free; iteration protocol owned by dispatcher).
+                                match dispatcher.dispatch(&registered_token).await {
+                                    Ok(DispatchOutcome::Delivered { backend: _ }) => {
+                                        info!("Push sent successfully for event {}", event.id);
+                                    }
+                                    Err(DispatchError::NoBackendForPlatform) => {
+                                        // Preserve existing observable behaviour: today's loop simply
+                                        // exits silently when no service supports the platform.
+                                        // Phase 2's /api/notify handler will distinguish this case.
+                                    }
+                                    Err(DispatchError::AllBackendsFailed { errors }) => {
+                                        for err in errors {
+                                            error!("Failed to send push: {}", err);
                                         }
                                     }
                                 }
                             } else {
-                                debug!("No registered token for {}...", &trade_pubkey[..16.min(trade_pubkey.len())]);
+                                debug!("No registered token pk={}", log_pk);
                             }
                         } else {
                             warn!("No 'p' tag found in Gift Wrap event {}", event.id);

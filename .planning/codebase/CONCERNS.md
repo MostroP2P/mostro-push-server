@@ -1,7 +1,7 @@
 # Codebase Concerns
 
 **Analysis Date:** 2026-04-24
-**Repository:** `/home/andrea/Documents/oss/mostrop2p/mostro-push-server`
+**Repository:** `mostro-push-server`
 
 ## Tech Debt
 
