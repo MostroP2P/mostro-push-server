@@ -435,6 +435,71 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 
 ---
 
+### Rate-limit invariants (Phase 3 contract — load-bearing for `/api/notify`)
+
+The `/api/notify` resource shipped in Phase 2 gains a **dual-keyed** rate
+limiter in Phase 3 that future implementers MUST honour exactly. The
+contract is summarised here so this PATTERNS map remains an authoritative
+reference even when Phase 3 plan files are read in isolation.
+
+**Wiring shape (mirrors the `configure()` snippet above, with one extra
+`.wrap(...)` layered inside the same `web::resource("/notify")`):**
+
+```rust
+web::resource("/notify")
+    .wrap(from_fn(request_id_mw))         // outermost: sets X-Request-Id on every response, including 429
+    .wrap(from_fn(per_ip_rate_limit_mw))  // inner: 429 if per-IP exhausted, BEFORE body parse
+    .route(web::post().to(notify_token))  // handler runs the per-pubkey check post-parse
+```
+
+**Per-IP limiter (middleware, `src/api/rate_limit.rs::per_ip_rate_limit_mw`):**
+
+- Quota: `NOTIFY_RATE_PER_IP_PER_MIN` per minute, burst `IP_BURST` (default 30).
+- Key precedence (`extract_client_ip`): `Fly-Client-IP` → rightmost segment of
+  `X-Forwarded-For` → `req.peer_addr().ip()`. Leftmost-XFF MUST NOT be read
+  (anti-CRIT-4 spoofing). The proxy headers are honoured ONLY when
+  `NOTIFY_TRUST_PROXY_HEADERS=true`; otherwise the limiter keys exclusively
+  on `req.peer_addr()` so a direct-to-internet deployment cannot be bypassed
+  by a client rotating `Fly-Client-IP`.
+- Fail-closed: if no IP can be extracted (proxy headers disabled and
+  `peer_addr` is None), return `500` rather than share a global bucket.
+
+**Per-pubkey limiter (in-handler, `notify_token`):**
+
+- Quota: `NOTIFY_RATE_PER_PUBKEY_PER_MIN` per minute, burst `PUBKEY_BURST`
+  (default 10). Held in `AppState` as `Arc<DefaultKeyedRateLimiter<String>>`.
+- Check runs AFTER pubkey validation and `log_pubkey()` derivation, BEFORE
+  the semaphore acquire. The pubkey is the keyed map key.
+- Both limiters share a periodic `retain_recent()` cleanup task (60s default,
+  100k soft-cap, both keyed maps cleaned by `start_keyed_limiter_cleanup_task`).
+
+**429 response contract (BYTE-IDENTICAL between per-IP and per-pubkey paths,
+anti-RL-2 oracle):**
+
+- Body: `{"success":false,"message":"rate limited"}` — built via the shared
+  `rate_limited_response(retry_after_secs)` helper so both call sites cannot
+  drift. A divergent body would let an attacker distinguish which limiter
+  fired and infer registration state.
+- Headers: `Retry-After: <secs>` (whole seconds, `.max(1)`); `x-request-id`
+  (UUIDv4 from `request_id_mw`, present on every 429 because the middleware
+  is outermost). Header parity matters: missing `x-request-id` on one path
+  but not the other is the same oracle as a divergent body.
+
+**Anti-patterns this contract forbids:**
+
+- `actix-governor` (any version) — GPL-3.0, incompatible with the project's
+  MIT licence (D-05). Use the hand-rolled `from_fn` middleware over
+  `governor::DefaultKeyedRateLimiter<IpAddr>` instead.
+- Reading the leftmost segment of `X-Forwarded-For` (CRIT-4 spoofing).
+- Trusting `Fly-Client-IP` unconditionally on direct-to-internet deployments
+  (the `NOTIFY_TRUST_PROXY_HEADERS` flag must gate it).
+- Rate-limiting any sibling route under `web::scope("/api")`. The middleware
+  MUST stay scoped to `web::resource("/notify")` only — wrapping the scope
+  rate-limits `/api/health`, which triggers Fly's health-check restart loop
+  (DEPLOY-3).
+
+---
+
 ### MODIFY `src/api/mod.rs` (module barrel, n/a)
 
 **Analog:** itself.
@@ -940,3 +1005,4 @@ The project uses `json!` macro for one-off response shapes and named structs (`#
 - D-22: `PushDispatcher::dispatch` (used by `src/nostr/listener.rs:121`) is byte-identical; Phase 2 adds a sibling `dispatch_silent` method.
 - D-14 (as shipped): `log_pubkey()` is the sole sanctioned pubkey rendering across `src/api/notify.rs`, `src/api/routes.rs`, `src/store/mod.rs`, and `src/nostr/listener.rs`. The earlier draft of this map described the migration as notify-only; the privacy hardening was extended to the existing modules during Phase 2. Hex-prefix slicing of pubkeys MUST NOT reappear in any module.
 - D-05: `build_payload_for_token` (FCM, lines 168-215) stays untouched as the listener-path payload. New silent builder is a sibling fn.
+- Phase 3 rate-limit contract: `/api/notify` is dual-keyed (per-IP middleware + per-pubkey in-handler). Both 429 paths emit a byte-identical body `{"success":false,"message":"rate limited"}` plus `Retry-After` and `x-request-id` headers (anti-RL-2 oracle). Per-IP key extraction follows `Fly-Client-IP` → rightmost-XFF → `peer_addr` precedence and is gated by `NOTIFY_TRUST_PROXY_HEADERS`; fail-closed when no IP can be resolved. Middleware MUST stay scoped to `web::resource("/notify")` only — never the `/api` scope (DEPLOY-3 health-check loop). See the dedicated "Rate-limit invariants" subsection above for the full contract.
