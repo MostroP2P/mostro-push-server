@@ -1,361 +1,135 @@
-# Mostro Push Backend
+# Mostro Push Server
 
-Privacy-preserving push notification server for Mostro P2P trades. Inspired by [MIP-05](https://github.com/marmot-chat/mips), this server enables targeted push notifications without exposing user data to Firebase/Apple.
+Privacy-preserving push notification backend for the [Mostro](https://mostro.network/) P2P trading ecosystem.
 
-## How It Works
+The server observes Nostr Gift Wrap events (`kind 1059`), looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush so Mostro Mobile clients can wake up and process trade events. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
+
+## How it works
 
 ```
-┌─────────────────┐     1. Register token      ┌──────────────────┐
-│  Mostro Mobile  │ ─────────────────────────► │  Push Server     │
-│                 │     (encrypted)            │                  │
-│  trade_pubkey   │                            │  Stores:         │
-│  + FCM token    │                            │  trade_pubkey →  │
-└─────────────────┘                            │  device_token    │
-                                               └────────┬─────────┘
-                                                        │
-┌─────────────────┐     2. Publishes event     ┌────────▼─────────┐
-│  Mostro Daemon  │ ─────────────────────────► │  Nostr Relay     │
-│                 │     kind 1059              │                  │
-│  (no changes    │     p: trade_pubkey        │                  │
-│   required)     │                            └────────┬─────────┘
-└─────────────────┘                                     │
-                                                        │ 3. Server observes
-                                               ┌────────▼─────────┐
-                                               │  Push Server     │
-                                               │                  │
-                                               │  Extracts p tag  │
-                                               │  Looks up token  │
-                                               │  Sends push      │
-                                               └────────┬─────────┘
-                                                        │
-                                               ┌────────▼─────────┐
-                                               │  FCM / APNs      │
-                                               │  (silent push)   │
-                                               └────────┬─────────┘
-                                                        │
-                                               ┌────────▼─────────┐
-                                               │  Mostro Mobile   │
-                                               │  wakes up,       │
-                                               │  fetches events  │
-                                               └──────────────────┘
+                                                       ┌──────────────────┐
+┌─────────────────┐    1. POST /api/register           │                  │
+│  Mostro Mobile  │ ──────────────────────────────────▶│  Push Server     │
+│                 │       trade_pubkey + device_token  │                  │
+│                 │                                    │  Stores:         │
+│  Mostro Mobile  │    1b. POST /api/notify            │  trade_pubkey →  │
+│  (sender)       │ ──────────────────────────────────▶│  device_token    │
+│                 │       trade_pubkey                 │                  │
+└─────────────────┘                                    └────────┬─────────┘
+                                                                │
+┌─────────────────┐    2. Publishes kind 1059          ┌────────▼─────────┐
+│  Mostro Daemon  │ ──────────────────────────────────▶│  Nostr Relay     │
+│  / dispute      │       p: trade_pubkey              │                  │
+│  admin / peer   │                                    └────────┬─────────┘
+└─────────────────┘                                             │
+                                                       ┌────────▼─────────┐
+                                                       │  Push Server     │
+                                                       │  observes event  │
+                                                       │  looks up token  │
+                                                       └────────┬─────────┘
+                                                                │
+                                                       ┌────────▼─────────┐
+                                                       │  FCM / UnifiedPush│
+                                                       └────────┬─────────┘
+                                                                │
+                                                       ┌────────▼─────────┐
+                                                       │  Mostro Mobile   │
+                                                       │  wakes, fetches  │
+                                                       │  events          │
+                                                       └──────────────────┘
 ```
 
-## Privacy Properties
+Two ingress paths feed the same dispatcher:
 
-- **Server knows**: Temporary mapping of `trade_pubkey` → `device_token`, timing of events
-- **Server does NOT know**: User identity (npub), message content, which orders belong to whom
-- **Firebase/Apple know**: A notification occurred (unavoidable with push)
-- **Firebase/Apple do NOT know**: Nostr identity, trade details, message content
+1. **Listener path** — the Nostr listener subscribes to `kind 1059` on configured relays and dispatches when a `p` tag matches a registered `trade_pubkey`.
+2. **Sender-triggered path** — `POST /api/notify` lets a sender ask the server to wake the recipient when an event was sent peer-to-peer without going through the Mostro daemon (e.g. dispute admin DMs).
 
-## Features
+## Privacy properties
 
-- **Targeted notifications**: Only the recipient device receives the push (not broadcast)
-- **Encrypted token registration**: Device tokens are encrypted with server's public key
-- **Privacy-first**: No persistent storage, tokens auto-expire
-- Firebase Cloud Messaging (FCM) support
-- UnifiedPush support (GrapheneOS, LineageOS)
-- Automatic relay reconnection
-- HTTP API for token management
+- The server stores `trade_pubkey -> device_token` in memory only. No persistence other than UnifiedPush endpoint URLs.
+- The server does **not** authenticate `/api/register`, `/api/unregister`, or `/api/notify`. Adding signatures or sender identifiers would let the operator correlate sender and recipient.
+- `/api/notify` always returns `202` on parse-valid input. Registered and unregistered pubkeys are indistinguishable in status, body, and headers; rate-limit responses are byte-identical between the per-IP and per-pubkey paths. The endpoint cannot be used as an enumeration oracle.
+- Inbound `X-Request-Id` on `/api/notify` is stripped; the server generates its own UUIDv4 per request.
+- All `trade_pubkey`s in logs go through a salted truncated BLAKE3 keyed hash (`log_pubkey`), with a per-process random salt that is never persisted.
+- The Nostr listener does **not** filter by `authors`. Gift Wrap uses an ephemeral outer key, and admin DMs in disputes are user-to-user — an author filter would silently drop them.
+
+What the server *does* see: an in-memory mapping of `trade_pubkey -> device_token`, and timing of incoming Gift Wrap events. It does not see message content, sender identity, or peer relationships.
 
 ## Requirements
 
-- Rust 1.75 or higher
-- Access to a Nostr relay
-- (Optional) Firebase account with service account for FCM
+- Rust 1.75 or later
+- Access to one or more Nostr relays
+- Optional: Firebase project with a service-account JSON for FCM
 
-## Installation
-
-### 1. Clone the repository
+## Quick start
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/MostroP2P/mostro-push-server.git
 cd mostro-push-server
-```
-
-### 2. Configure environment variables
-
-```bash
 cp .env.example .env
-nano .env
+# edit .env: NOSTR_RELAYS is required; FIREBASE_* if FCM is enabled
+cargo run --release
 ```
 
-Edit the `.env` file with your configurations:
-
-```bash
-NOSTR_RELAYS=wss://relay.mostro.network
-SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
-FCM_ENABLED=true
-UNIFIEDPUSH_ENABLED=true
-FIREBASE_PROJECT_ID=your-project
-RUST_LOG=info
-```
-
-### 3. Run in development mode
-
-```bash
-cargo run
-```
-
-### 4. Build for production
-
-```bash
-cargo build --release
-./target/release/mostro-push-backend
-```
-
-## Docker Usage
-
-### Build
-
-```bash
-docker build -t mostro-push-backend .
-```
-
-### Run
-
-```bash
-docker-compose up -d
-```
-
-## API Endpoints
-
-### Health Check
+Verify it is up:
 
 ```bash
 curl http://localhost:8080/api/health
 ```
 
-Response:
-```json
-{"status":"ok"}
-```
+## API endpoints
 
-### Server Info
+| Method | Path             | Purpose                                                   |
+|--------|------------------|-----------------------------------------------------------|
+| GET    | `/api/health`    | Liveness                                                  |
+| GET    | `/api/info`      | Server version and feature flags                          |
+| GET    | `/api/status`    | Server status with token counts                           |
+| POST   | `/api/register`  | Register a device token for a `trade_pubkey`              |
+| POST   | `/api/unregister`| Remove a registered token                                 |
+| POST   | `/api/notify`    | Trigger a silent push to the device for a `trade_pubkey`  |
 
-Get the server's public key (needed by clients to encrypt tokens):
+See [docs/api.md](docs/api.md) for full request and response shapes.
 
-```bash
-curl http://localhost:8080/api/info
-```
-
-Response:
-```json
-{
-  "server_pubkey": "02abc123...",
-  "version": "0.2.0",
-  "encrypted_token_size": 281
-}
-```
-
-### Status
+## Docker
 
 ```bash
-curl http://localhost:8080/api/status
+docker build -t mostro-push-backend .
+docker-compose up -d
+docker-compose logs -f
 ```
 
-Response:
-```json
-{
-  "status": "running",
-  "version": "0.2.0",
-  "server_pubkey": "02abc123...",
-  "tokens": {
-    "total": 42,
-    "android": 35,
-    "ios": 7
-  }
-}
-```
+## Documentation
 
-### Register Token
-
-Register an encrypted device token for a trade. The client must encrypt the token using the server's public key.
-
-```bash
-curl -X POST http://localhost:8080/api/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "trade_pubkey": "abc123...def456",
-    "encrypted_token": "<base64-encoded-encrypted-token>"
-  }'
-```
-
-Response:
-```json
-{
-  "success": true,
-  "message": "Token registered successfully",
-  "platform": "android"
-}
-```
-
-### Unregister Token
-
-```bash
-curl -X POST http://localhost:8080/api/unregister \
-  -H "Content-Type: application/json" \
-  -d '{
-    "trade_pubkey": "abc123...def456"
-  }'
-```
-
-## Architecture
-
-```
-┌─────────────────┐
-│  Nostr Relays   │
-│ (kind 1059)     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Rust Backend   │
-│  - WebSocket    │
-│  - Event batch  │
-│  - HTTP API     │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    │         │
-    ▼         ▼
-┌─────┐   ┌──────────┐
-│ FCM │   │UnifiedPush│
-└──┬──┘   └────┬─────┘
-   │           │
-   ▼           ▼
-[Android]   [GrapheneOS]
-```
-
-## Project Structure
-
-```
-mostro-push-backend/
-├── Cargo.toml
-├── .env.example
-├── src/
-│   ├── main.rs              # Entry point
-│   ├── config.rs            # Configuration
-│   ├── nostr/
-│   │   ├── mod.rs
-│   │   └── listener.rs      # Nostr event listener
-│   ├── push/
-│   │   ├── mod.rs           # PushService trait
-│   │   ├── fcm.rs           # FCM implementation
-│   │   └── unifiedpush.rs   # UnifiedPush implementation
-│   ├── api/
-│   │   ├── mod.rs
-│   │   └── routes.rs        # HTTP endpoints
-│   └── utils/
-│       ├── mod.rs
-│       └── batching.rs      # Batching management
-├── Dockerfile
-├── docker-compose.yml
-└── README.md
-```
-
-## Firebase (FCM) Configuration
-
-To use FCM, you need:
-
-1. Create a project in [Firebase Console](https://console.firebase.google.com/)
-2. Download the service account JSON file
-3. Configure the environment variables:
-
-```bash
-FIREBASE_PROJECT_ID=your-project-id
-FIREBASE_SERVICE_ACCOUNT_PATH=/path/to/service-account.json
-FCM_ENABLED=true
-```
-
-## Monitoring
-
-The backend logs detailed information that you can monitor:
-
-```bash
-# Production logs
-tail -f /var/log/mostro-push-backend/app.log
-
-# Docker logs
-docker-compose logs -f push-backend
-```
-
-Important events:
-- Connection to Nostr relays
-- Receipt of kind 1059 events
-- Notification sending
-- Connection errors
+- [docs/architecture.md](docs/architecture.md) — components, data flow, concurrency, privacy invariants
+- [docs/api.md](docs/api.md) — full HTTP contract
+- [docs/configuration.md](docs/configuration.md) — environment variables
+- [docs/deployment.md](docs/deployment.md) — Fly.io, Docker, nginx, systemd
+- [docs/unifiedpush.md](docs/unifiedpush.md) — UnifiedPush backend notes
+- [docs/verification/dispute-chat.md](docs/verification/dispute-chat.md) — end-to-end runbook for the listener path
 
 ## Development
 
-### Run tests
-
 ```bash
-cargo test
-```
-
-### Linting
-
-```bash
+cargo test       # in-process integration tests live alongside source
 cargo clippy
-```
-
-### Formatting
-
-```bash
 cargo fmt
 ```
 
-## Testing
-
-A test script is provided to verify all endpoints:
+A shell-script smoke test for a running instance:
 
 ```bash
-# Start the server
 RUST_LOG=info cargo run
-
-# In another terminal, run tests
-./test_server.sh
+./test_server.sh    # in another terminal
 ```
-
-The test script will:
-1. Check health endpoint
-2. Verify status endpoint
-3. Register a test UnifiedPush endpoint
-4. Verify persistence (check data/unifiedpush_endpoints.json)
-5. Unregister the endpoint
-6. Test the notification system
-
-## Implementation Status
-
-### ✅ Completed
-- [x] Nostr listener with Mostro pubkey filtering (Option B: Silent Push Global)
-- [x] UnifiedPush endpoint registration/unregistration
-- [x] Persistent storage for UnifiedPush endpoints (JSON file)
-- [x] FCM OAuth2 token refresh with JWT signing
-- [x] Intelligent notification batching (5s delay, 60s cooldown)
-- [x] HTTP API for endpoint management
-- [x] Automatic relay reconnection
-
-### 🔄 TODO
-- [ ] Implement retry logic for failed push deliveries
-- [ ] Add metrics and monitoring (Prometheus)
-- [ ] Implement authentication for API endpoints
-- [ ] Support for multiple Mostro instances
-- [ ] Integration tests with mock Nostr relay
-- [ ] Docker deployment configuration
 
 ## License
 
-See [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome. Please open an issue first to discuss the changes you would like to make.
+[MIT](LICENSE).
 
 ## Resources
 
-- [UnifiedPush Spec](https://unifiedpush.org/developers/spec/)
+- [MIP-05: Privacy-Preserving Push Notifications](https://github.com/MostroP2P/MIPs)
+- [UnifiedPush specification](https://unifiedpush.org/developers/spec/)
 - [Nostr SDK Rust](https://docs.rs/nostr-sdk/)
 - [Actix Web](https://actix.rs/docs/)
 - [FCM v1 API](https://firebase.google.com/docs/cloud-messaging/migrate-v1)
