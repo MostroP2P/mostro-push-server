@@ -1,196 +1,124 @@
-# Configuration Guide
+# Configuration
 
-## Environment Variables
+The server reads its configuration from environment variables at startup. `dotenv` is loaded from `.env` if present. There is no TOML or YAML config file path; `config.toml.example` is leftover and not currently parsed.
 
-The server is configured via environment variables. Copy `.env.example` to `.env` and customize:
+Copy the template and edit it:
 
 ```bash
 cp .env.example .env
 ```
 
-### Required Variables
+## Required
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `SERVER_PRIVATE_KEY` | 32-byte hex private key for token decryption | `ccc61d16dfd10fbcca1322fdf5fed6cb1863db4e27030ae164dbcbfcc263154d` |
-| `NOSTR_RELAYS` | Comma-separated list of Nostr relay URLs | `wss://relay.mostro.network` |
+| Variable        | Description                                                                                  |
+|-----------------|----------------------------------------------------------------------------------------------|
+| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kind 1059. |
 
-### Optional Variables
+`NOSTR_RELAYS` is the only variable without a default; the server fails to boot if it is unset.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MOSTRO_PUBKEY` | `dbe0b1be...` | Hex pubkey of Mostro daemon to listen for |
-| `FIREBASE_PROJECT_ID` | `mostro` | Firebase project ID |
-| `FIREBASE_SERVICE_ACCOUNT_PATH` | - | Path to Firebase service account JSON |
-| `FCM_ENABLED` | `true` | Enable Firebase Cloud Messaging |
-| `UNIFIEDPUSH_ENABLED` | `true` | Enable UnifiedPush support |
-| `SERVER_HOST` | `0.0.0.0` | HTTP server bind address |
-| `SERVER_PORT` | `8080` | HTTP server port |
-| `TOKEN_TTL_HOURS` | `48` | Token expiration time in hours |
-| `CLEANUP_INTERVAL_HOURS` | `1` | How often to clean expired tokens |
-| `RATE_LIMIT_PER_MINUTE` | `60` | Max requests per minute |
-| `BATCH_DELAY_MS` | `5000` | Batch delay for notifications |
-| `COOLDOWN_MS` | `60000` | Cooldown between batches |
-| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+## Nostr listener
 
----
+| Variable        | Default                                                              | Description                                              |
+|-----------------|----------------------------------------------------------------------|----------------------------------------------------------|
+| `MOSTRO_PUBKEY` | `82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390`   | Hex pubkey of the Mostro daemon. Used for log context only — it is NOT applied as an `authors` filter on the listener (privacy invariant; see [architecture.md](./architecture.md)). |
 
-## Generating a Server Private Key
+## HTTP server
 
-Generate a secure random 32-byte hex key:
+| Variable      | Default     | Description                                  |
+|---------------|-------------|----------------------------------------------|
+| `SERVER_HOST` | `0.0.0.0`   | Bind address                                 |
+| `SERVER_PORT` | `8080`      | Bind port                                    |
 
-```bash
-openssl rand -hex 32
-```
+## Push backends
 
-Output example:
-```
-ccc61d16dfd10fbcca1322fdf5fed6cb1863db4e27030ae164dbcbfcc263154d
-```
+| Variable                        | Default | Description                                                                                |
+|---------------------------------|---------|--------------------------------------------------------------------------------------------|
+| `FCM_ENABLED`                   | `true`  | Enable Firebase Cloud Messaging backend                                                    |
+| `UNIFIEDPUSH_ENABLED`           | `true`  | Enable UnifiedPush backend                                                                 |
+| `FIREBASE_PROJECT_ID`           | -       | Firebase project ID, required when `FCM_ENABLED=true`                                      |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | -       | Absolute path to the Firebase service-account JSON. If missing or unreadable, FCM is disabled at startup with a warning; the server keeps running. |
+| `BATCH_DELAY_MS`                | `5000`  | Reserved (declared on `PushConfig`; not currently consumed)                                |
+| `COOLDOWN_MS`                   | `60000` | Reserved (declared on `PushConfig`; not currently consumed)                                |
 
-**Important**: Keep this key secret! Anyone with this key can decrypt device tokens.
+## Token store
 
----
+| Variable                  | Default | Description                                                                  |
+|---------------------------|---------|------------------------------------------------------------------------------|
+| `TOKEN_TTL_HOURS`         | `48`    | Tokens older than this are evicted by the cleanup task                       |
+| `CLEANUP_INTERVAL_HOURS`  | `1`     | How often the cleanup task runs                                              |
 
-## Firebase Configuration
+## `/api/notify` rate limiter
 
-### 1. Create Service Account
+The dual-keyed rate limiter is documented in detail in [architecture.md](./architecture.md). Defaults are tuned for the Fly.io single-machine deployment.
 
-1. Go to [Firebase Console](https://console.firebase.google.com/)
-2. Select your project
-3. Go to **Project Settings** → **Service accounts**
-4. Click **Generate new private key**
-5. Save the JSON file securely
+| Variable                                      | Default  | Description                                                                                          |
+|-----------------------------------------------|----------|------------------------------------------------------------------------------------------------------|
+| `NOTIFY_RATE_PER_PUBKEY_PER_MIN`              | `30`     | Per-`trade_pubkey` quota; burst is fixed at 10 and is NOT env-overridable                            |
+| `NOTIFY_RATE_PER_IP_PER_MIN`                  | `120`    | Per-IP quota; burst is fixed at 30 and is NOT env-overridable                                        |
+| `NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS`     | `60`     | How often `retain_recent` runs on each keyed limiter to bound memory                                 |
+| `NOTIFY_PUBKEY_LIMITER_SOFT_CAP`              | `100000` | Soft cap on the per-pubkey limiter map size; exceeding it produces a `warn!` log line                |
+| `NOTIFY_TRUST_PROXY_HEADERS`                  | `false`  | When `true`, trust `Fly-Client-IP` then rightmost `X-Forwarded-For` for the per-IP key. **Set to `true` only behind a trusted proxy** (e.g. the Fly.io edge). On a directly reachable server an attacker can rotate these headers per request and defeat the per-IP limiter. |
 
-### 2. Configure Server
+Setting either of `NOTIFY_RATE_PER_PUBKEY_PER_MIN` or `NOTIFY_RATE_PER_IP_PER_MIN` to `0` causes startup to fail with a chained error message; both must be greater than zero.
 
-```bash
-# Create secrets directory
-mkdir -p secrets
+## Legacy / reserved
 
-# Move service account file
-mv ~/Downloads/your-project-firebase-adminsdk-xxxxx.json secrets/service-account.json
+| Variable                | Default                                                                | Description                                                                                              |
+|-------------------------|------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| `RATE_LIMIT_PER_MINUTE` | `60`                                                                   | Reserved (declared on `RateLimitConfig`; not currently consumed). Independent from `NOTIFY_RATE_*`.       |
+| `SERVER_PRIVATE_KEY`    | `0x00…01`                                                              | Reserved for future encrypted-token registration. Inert in the current build because the `crypto` module is gated `#[allow(dead_code)]` and the registration handler accepts plaintext. |
 
-# Add to .gitignore
-echo "secrets/" >> .gitignore
-```
+## Logging
 
-### 3. Set Environment Variable
+| Variable   | Default | Description                                          |
+|------------|---------|------------------------------------------------------|
+| `RUST_LOG` | `info`  | Standard `env_logger` filter syntax.                 |
 
 ```bash
-FIREBASE_SERVICE_ACCOUNT_PATH=./secrets/service-account.json
-FIREBASE_PROJECT_ID=your-project-id
+# Standard
+RUST_LOG=info
+
+# Module-specific
+RUST_LOG=mostro_push_backend=debug,actix_web=info
 ```
 
----
-
-## Example .env File
+## Example `.env`
 
 ```bash
-# Nostr Configuration
+# Nostr
 NOSTR_RELAYS=wss://relay.mostro.network
-MOSTRO_PUBKEY=0a537332f2d569059add3fd2e376e1d6b8c1e1b9f7a999ac2592b4afbba74a00
-
-# Server Keypair (KEEP SECRET!)
-SERVER_PRIVATE_KEY=ccc61d16dfd10fbcca1322fdf5fed6cb1863db4e27030ae164dbcbfcc263154d
-
-# Firebase Configuration
-FIREBASE_PROJECT_ID=mostro-test
-FIREBASE_SERVICE_ACCOUNT_PATH=./secrets/service-account.json
-FCM_ENABLED=true
-
-# UnifiedPush
-UNIFIEDPUSH_ENABLED=false
+MOSTRO_PUBKEY=82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390
 
 # Server
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 
-# Token Store
+# Push backends
+FCM_ENABLED=true
+UNIFIEDPUSH_ENABLED=false
+FIREBASE_PROJECT_ID=mostro-mobile
+FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/mostro-mobile-firebase-adminsdk.json
+
+# Token store
 TOKEN_TTL_HOURS=48
 CLEANUP_INTERVAL_HOURS=1
 
-# Rate Limiting
-RATE_LIMIT_PER_MINUTE=60
-BATCH_DELAY_MS=5000
-COOLDOWN_MS=60000
+# /api/notify rate limiter (Fly.io defaults)
+NOTIFY_RATE_PER_PUBKEY_PER_MIN=30
+NOTIFY_RATE_PER_IP_PER_MIN=120
+NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS=60
+NOTIFY_PUBKEY_LIMITER_SOFT_CAP=100000
+NOTIFY_TRUST_PROXY_HEADERS=true
 
 # Logging
 RUST_LOG=info
 ```
 
----
+## Generating a Firebase service account
 
-## Client Configuration
+1. [Firebase Console](https://console.firebase.google.com/) → your project → Project Settings → Service accounts.
+2. Click **Generate new private key**, save the JSON file outside the repo.
+3. Mount it into the runtime (Docker volume, Fly.io secret file, or a path on disk for systemd).
+4. Set `FIREBASE_SERVICE_ACCOUNT_PATH` to the path the binary will read at startup.
 
-The mobile client needs to know:
-
-1. **Push Server URL**: Where to register tokens
-2. **Server Public Key**: Fetched from `/api/info` endpoint
-
-### Flutter Client (config.dart)
-
-```dart
-class Config {
-  // Push notification server
-  static const String pushServerUrl = String.fromEnvironment(
-    'PUSH_SERVER_URL',
-    defaultValue: 'https://push.mostro.network',
-  );
-}
-```
-
-For local testing:
-```dart
-defaultValue: 'http://192.168.1.7:8080',
-```
-
----
-
-## Firewall Configuration
-
-If running locally and testing from a mobile device on the same network:
-
-```bash
-# Allow incoming connections on port 8080
-sudo iptables -I INPUT -p tcp --dport 8080 -j ACCEPT
-
-# Or with ufw
-sudo ufw allow 8080/tcp
-```
-
----
-
-## Logging
-
-Control log verbosity with `RUST_LOG`:
-
-```bash
-# Minimal logging
-RUST_LOG=warn
-
-# Standard logging
-RUST_LOG=info
-
-# Debug logging (includes token operations)
-RUST_LOG=debug
-
-# Trace logging (very verbose)
-RUST_LOG=trace
-
-# Module-specific logging
-RUST_LOG=mostro_push_backend=debug,actix_web=info
-```
-
----
-
-## Production Checklist
-
-- [ ] Generate unique `SERVER_PRIVATE_KEY`
-- [ ] Configure Firebase service account
-- [ ] Set `RUST_LOG=info` or `warn`
-- [ ] Use HTTPS (reverse proxy with nginx/caddy)
-- [ ] Set appropriate `TOKEN_TTL_HOURS`
-- [ ] Configure firewall rules
-- [ ] Set up monitoring/alerting
-- [ ] Backup server private key securely
+If FCM init fails (file missing, JSON invalid, OAuth refusal) the server logs a warning and runs without FCM. UnifiedPush, if enabled, continues to work.

@@ -1,43 +1,36 @@
 # API Reference
 
-## Base URL
+All endpoints are mounted under `/api`. Bodies and responses are JSON unless noted otherwise.
 
+| Method | Path             | Purpose                                                |
+|--------|------------------|--------------------------------------------------------|
+| GET    | `/api/health`    | Liveness probe                                         |
+| GET    | `/api/info`      | Server version and feature flags                       |
+| GET    | `/api/status`    | Server status with token counts                        |
+| POST   | `/api/register`  | Register a device token for a `trade_pubkey`           |
+| POST   | `/api/unregister`| Remove a registered token                              |
+| POST   | `/api/notify`    | Trigger a silent push to the device for a `trade_pubkey` |
+
+## GET /api/health
+
+Liveness check. Always `200 OK`.
+
+```bash
+curl http://localhost:8080/api/health
 ```
-http://localhost:8080/api
-```
 
-## Current Phase: Phase 3 (Unencrypted)
-
-Token registration currently accepts plaintext tokens. Encryption will be added in Phase 4.
-
-## Endpoints
-
-### Health Check
-
-Check if the server is running.
-
-```http
-GET /api/health
-```
-
-**Response**
 ```json
-{
-  "status": "ok"
-}
+{"status":"ok"}
 ```
 
----
+## GET /api/info
 
-### Server Info
+Returns server version and feature flags. Token registration is currently plaintext; `encryption_enabled` is `false`.
 
-Get server version and encryption status.
-
-```http
-GET /api/info
+```bash
+curl http://localhost:8080/api/info
 ```
 
-**Response (Phase 3 - Unencrypted)**
 ```json
 {
   "version": "0.2.0",
@@ -46,27 +39,14 @@ GET /api/info
 }
 ```
 
-**Response (Phase 4 - Encrypted, Future)**
-```json
-{
-  "server_pubkey": "02b0b5fbc14b11279c415601e74c592b86a54cef4cfdd7b6e60382db83e68855c7",
-  "version": "0.3.0",
-  "encryption_enabled": true,
-  "encrypted_token_size": 281
-}
+## GET /api/status
+
+Returns server status and token-store statistics.
+
+```bash
+curl http://localhost:8080/api/status
 ```
 
----
-
-### Server Status
-
-Get server status including token statistics.
-
-```http
-GET /api/status
-```
-
-**Response**
 ```json
 {
   "status": "running",
@@ -79,33 +59,28 @@ GET /api/status
 }
 ```
 
----
+## POST /api/register
 
-### Register Token
+Registers a device token for a `trade_pubkey`. The token is stored in plaintext in memory; HTTPS is the only confidentiality layer in transit.
 
-Register a device token for a specific trade.
+Request:
 
-```http
-POST /api/register
-Content-Type: application/json
-```
-
-**Request Body (Phase 3 - Plaintext)**
 ```json
 {
-  "trade_pubkey": "a1b2c3d4e5f6...64 hex chars...",
-  "token": "fcm-device-token-string",
+  "trade_pubkey": "<64-char hex>",
+  "token": "<fcm-or-unifiedpush-token>",
   "platform": "android"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `trade_pubkey` | string | 64-character hex public key of the trade |
-| `token` | string | FCM/APNs device token |
-| `platform` | string | `"android"` or `"ios"` |
+| Field          | Type   | Description                                              |
+|----------------|--------|----------------------------------------------------------|
+| `trade_pubkey` | string | 64 hex characters                                        |
+| `token`        | string | FCM device token, or UnifiedPush endpoint URL            |
+| `platform`     | string | `"android"` or `"ios"`                                   |
 
-**Success Response (200)**
+Success — `200 OK`:
+
 ```json
 {
   "success": true,
@@ -114,123 +89,111 @@ Content-Type: application/json
 }
 ```
 
-**Error Response (400)**
+Validation failure — `400 Bad Request`:
+
 ```json
 {
   "success": false,
-  "message": "Invalid trade_pubkey format (expected 64 hex characters)",
-  "platform": null
+  "message": "Invalid trade_pubkey format (expected 64 hex characters)"
 }
 ```
 
-**Possible Errors**
-| Error | Description |
-|-------|-------------|
-| Invalid trade_pubkey format | Not 64 hex characters |
-| Token cannot be empty | Empty token string provided |
-| Invalid platform | Platform not "android" or "ios" |
+Possible validation errors:
 
----
+- `trade_pubkey` not 64 hex characters
+- `token` empty
+- `platform` not `"android"` or `"ios"`
 
-### Unregister Token
+## POST /api/unregister
 
-Remove a registered token for a trade.
+Removes a registered token by `trade_pubkey`.
 
-```http
-POST /api/unregister
-Content-Type: application/json
+Request:
+
+```json
+{ "trade_pubkey": "<64-char hex>" }
 ```
 
-**Request Body**
+Always `200 OK` on parse-valid input. The body distinguishes "removed" vs "was not registered":
+
+```json
+{ "success": true, "message": "Token unregistered successfully" }
+```
+
+```json
+{ "success": true, "message": "Token not found (may have already been unregistered)" }
+```
+
+## POST /api/notify
+
+Sender-triggered silent push to the device registered for `trade_pubkey`. Used by the mobile client when peer-to-peer chat events are sent without a Mostro-daemon hop, so the recipient app needs an external wake-up signal.
+
+### Privacy contract
+
+- Always `202 Accepted` on parse-valid input. The response body is identical for registered and unregistered pubkeys, so this endpoint cannot be used as an enumeration oracle.
+- The dispatch happens in a `tokio::spawn` task detached from the response. The 202 means "accepted for dispatch", not "delivered". FCM `200` further along the pipeline only means Google accepted the request, not that the device woke.
+- No authentication, no `sender_pubkey`, no signature, no `Idempotency-Key`. Adding any of these would let the operator correlate sender and recipient.
+- Every response (202 / 400 / 429) carries a server-generated UUIDv4 `x-request-id` header. Any inbound `X-Request-Id` from the client is stripped first; a client cannot pin its own correlator into server logs.
+- Rate-limit responses are byte-identical between the per-IP and per-pubkey paths so the two cannot be distinguished by callers.
+
+### Request
+
+```json
+{ "trade_pubkey": "<64-char hex>" }
+```
+
+### Responses
+
+`202 Accepted`:
+
+```json
+{ "accepted": true }
+```
+
+`400 Bad Request` — malformed JSON or invalid `trade_pubkey`:
+
 ```json
 {
-  "trade_pubkey": "a1b2c3d4e5f6...64 hex chars..."
+  "success": false,
+  "message": "Invalid trade_pubkey format (expected 64 hex characters)"
 }
 ```
 
-**Success Response (200)**
+`429 Too Many Requests` — per-IP or per-pubkey limiter hit. The body is identical on both paths; clients must read `Retry-After` (whole seconds, minimum 1) to back off:
+
 ```json
-{
-  "success": true,
-  "message": "Token unregistered successfully"
-}
+{ "success": false, "message": "rate limited" }
 ```
 
-**Not Found Response (200)**
-```json
-{
-  "success": true,
-  "message": "Token not found (may have already been unregistered)"
-}
+```
+Retry-After: 12
 ```
 
----
+### Example
 
-## Example: cURL
-
-### Get Server Info
 ```bash
-curl http://localhost:8080/api/info
+curl -i -X POST http://localhost:8080/api/notify \
+  -H 'content-type: application/json' \
+  -d '{"trade_pubkey":"a1b2c3d4e5f67890123456789012345678901234567890123456789012345abc"}'
 ```
 
-### Register Token (Phase 3 - Plaintext)
-```bash
-curl -X POST http://localhost:8080/api/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "trade_pubkey": "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd",
-    "token": "dMw5ABC123:APA91bHtest-fcm-token-here",
-    "platform": "android"
-  }'
-```
+## HTTP status summary
 
-### Unregister Token
-```bash
-curl -X POST http://localhost:8080/api/unregister \
-  -H "Content-Type: application/json" \
-  -d '{
-    "trade_pubkey": "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd"
-  }'
-```
+| Status | Used by                                                                       |
+|--------|-------------------------------------------------------------------------------|
+| 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
+| 202    | `/api/notify` on parse-valid input                                            |
+| 400    | Malformed body, invalid `trade_pubkey`, invalid `platform`, empty `token`     |
+| 429    | `/api/notify` only — per-IP or per-pubkey rate limit                          |
+| 500    | `/api/notify` only — fail-closed when the per-IP key cannot be extracted      |
 
-### Check Status
-```bash
-curl http://localhost:8080/api/status
-```
+## Rate limiting
 
----
+Only `/api/notify` is rate-limited. Limits are per-IP and per-`trade_pubkey`; both must allow the request to pass. Defaults:
 
-## Error Codes
+- Per-pubkey: `30/min`, burst `10` (env `NOTIFY_RATE_PER_PUBKEY_PER_MIN`)
+- Per-IP: `120/min`, burst `30` (env `NOTIFY_RATE_PER_IP_PER_MIN`)
 
-| HTTP Status | Meaning |
-|-------------|---------|
-| 200 | Success |
-| 400 | Bad Request - Invalid input |
-| 500 | Internal Server Error |
+The other endpoints are intentionally not rate-limited at the HTTP layer; capacity at the edge is governed by `fly.toml` `hard_limit = 25`.
 
-All responses are JSON with `Content-Type: application/json`.
-
----
-
-## Phase 4: Encrypted Token Format (Future)
-
-When encryption is enabled in Phase 4, the register endpoint will accept encrypted tokens:
-
-**Request Body (Phase 4 - Encrypted)**
-```json
-{
-  "trade_pubkey": "a1b2c3d4e5f6...64 hex chars...",
-  "encrypted_token": "base64_encoded_encrypted_token"
-}
-```
-
-The `encrypted_token` field will contain a base64-encoded blob with the following structure:
-
-```
-┌─────────────────────┬────────────┬─────────────────────────────────┐
-│ Ephemeral Pubkey    │   Nonce    │          Ciphertext             │
-│     (33 bytes)      │ (12 bytes) │  (220 + 16 = 236 bytes)         │
-└─────────────────────┴────────────┴─────────────────────────────────┘
-```
-
-See [cryptography.md](./cryptography.md) for the full encryption specification.
+See [configuration.md](./configuration.md) for the full rate-limit knob list and the `NOTIFY_TRUST_PROXY_HEADERS` flag governing trust of `Fly-Client-IP` / `X-Forwarded-For`.

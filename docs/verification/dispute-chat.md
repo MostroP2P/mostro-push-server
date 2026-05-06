@@ -5,10 +5,10 @@ administrative DMs (sent directly user-to-user, NOT routed through the
 Mostro daemon) still reach registered devices as silent pushes via the
 Nostr listener path.
 
-This procedure is run after every deploy of milestone v1.1 (phases 1,
-2, and 3). It is the only end-to-end signal that the Phase 1 refactor
-(`PushDispatcher`) and the Phase 2 addition (`POST /api/notify`) have
-not introduced a silent regression in the listener path.
+Run it after every deploy and after any change to
+`src/nostr/listener.rs`, `src/push/dispatcher.rs`, or
+`src/push/mod.rs`. It is the only end-to-end signal that the
+listener path is intact.
 
 ## Why this runbook exists
 
@@ -27,10 +27,9 @@ event. The sender's key is never visible in the outer event, so
 filtering by `authors` is structurally impossible even if it were
 desired.
 
-This constraint is documented as anti-requirement **OOS-19 /
-CRIT-1** in `.planning/PROJECT.md` and as a comment block above
-`Filter::new()` in `src/nostr/listener.rs` (introduced in Phase 1
-decision D-11).
+This constraint is documented in [docs/architecture.md](../architecture.md)
+as a privacy invariant and enforced by a comment block above
+`Filter::new()` in `src/nostr/listener.rs`.
 
 ## Prerequisites
 
@@ -45,8 +44,8 @@ decision D-11).
 - A test device (real or emulator) able to receive the silent push
   for the registered token.
 - Read-only access to the repo source tree
-  (`mostro-push-server`) to run the anti-CRIT-1 grep verification at
-  the end of the procedure.
+  (`mostro-push-server`) to run the listener-filter grep verification
+  at the end of the procedure.
 
 ## Procedure
 
@@ -92,10 +91,10 @@ server does not decrypt or inspect the content.
 
 The Mostro daemon does NOT send administrative DMs. Administrators
 contact users directly (user-to-user). Filtering by `mostro_pubkey`
-in the listener would silently break this path, which is why Phase 1
-D-11 introduced the explicit comment block in
-`src/nostr/listener.rs` and Phase 3 OPEN-6 keeps the `MOSTRO_PUBKEY`
-field inert without applying it as a filter.
+in the listener would silently break this path, which is why
+`src/nostr/listener.rs` carries an explicit comment block above
+`Filter::new()` and `MOSTRO_PUBKEY` is kept as configuration context
+only — it is never applied as an `authors` filter.
 
 ### Step 3: Verify silent push delivery
 
@@ -133,27 +132,26 @@ the logs:
 - Inspect the full logs for errors in `connect_and_listen` or in
   `dispatcher.dispatch(...)`.
 
-### Step 4: Anti-CRIT-1 verification
+### Step 4: Listener-filter verification
 
-After every deploy, run the following command in the repo source
-tree to confirm that the forbidden anti-fix
-(`.authors(mostro_pubkey)` in the listener filter) has not been
-re-introduced:
+After every deploy, run the following command in the repo source tree
+to confirm that the forbidden `.authors(mostro_pubkey)` call has not
+been reintroduced into the Nostr `Filter`:
 
 ```bash
 grep -n '\.authors(' src/nostr/listener.rs
 ```
 
-Expected output: exactly ONE match, inside the Phase 1 D-11 comment
-block (the line that says `// DO NOT add .authors(...) here.` or
-equivalent).
+Expected output: exactly ONE match, inside the comment block above
+`Filter::new()` (the line that says `// DO NOT add .authors(...) here.`
+or equivalent).
 
 For a bash exit-code verification that fails if an active
 `.authors(...)` call (not in a comment) appears:
 
 ```bash
 if grep -nE '^\s*[^/].*\.authors\(' src/nostr/listener.rs; then
-    echo "FAIL: .authors() filter present in the listener — anti-CRIT-1 violated"
+    echo "FAIL: .authors() filter present in the listener"
     exit 1
 else
     echo "PASS: no active .authors() filter"
@@ -161,8 +159,8 @@ fi
 ```
 
 If the command exits with `1`, open a security issue immediately —
-someone has re-introduced the forbidden anti-fix and administrative
-DMs are being silently dropped.
+someone has reintroduced the forbidden filter and administrative DMs
+are being silently dropped.
 
 ## Cleanup
 
@@ -182,16 +180,16 @@ or `{"success":true,"message":"Token not found (may have already been unregister
 
 ## Recommended frequency
 
-- After every deploy of milestone v1.1 (phases 1, 2, and 3).
+- After every deploy.
 - After any modification to `src/nostr/listener.rs`,
   `src/push/dispatcher.rs`, or `src/push/mod.rs`.
 - As a periodic monthly verification in production.
 
 ## References
 
-- `.planning/PROJECT.md` — anti-requirement **OOS-19 / CRIT-1**.
-- `.planning/REQUIREMENTS.md` — requirement **VERIFY-03**.
-- `.planning/phases/01-pushdispatcher-refactor-no-behaviour-change/01-CONTEXT.md` — decision **D-11** (introduction of the anti-CRIT-1 comment block).
-- `src/nostr/listener.rs` — comment block above `Filter::new()`.
-- NIP-59 (Gift Wrap, `kind 1059`) — specification of the event
-  schema that wraps the DMs.
+- [docs/architecture.md](../architecture.md) — privacy invariants
+  (no `.authors(...)` filter, no enumeration oracle, etc.).
+- `src/nostr/listener.rs` — comment block above `Filter::new()` that
+  enforces this constraint at the source level.
+- NIP-59 (Gift Wrap, `kind 1059`) — specification of the event schema
+  that wraps the DMs.

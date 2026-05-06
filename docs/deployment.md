@@ -1,86 +1,140 @@
-# Deployment Guide
+# Deployment
 
-## Prerequisites
+The reference deployment target is Fly.io. The repo also ships a `Dockerfile` and a `docker-compose.yml` for local containerized runs and for use with other PaaS providers.
 
-- Rust 1.70+ installed
-- Firebase project with Cloud Messaging enabled
-- Access to Nostr relay(s)
+## Fly.io (reference)
 
-## Building for Production
+`fly.toml` provisions:
 
-```bash
-# Clone repository
-git clone https://github.com/MostroP2P/mostro-push-server.git
-cd mostro-push-server
+- App `mostro-push-server`, region `gru` (São Paulo)
+- One VM, `512 MB` RAM, 1 shared CPU
+- Internal port `8080`, HTTPS forced at the edge
+- `auto_start_machines = true`, `min_machines_running = 1`
+- Hard connection limit of `25` per machine
 
-# Build release binary
-cargo build --release
+The 25-connection hard limit is the inbound capacity ceiling. The `/api/notify` spawn pool (50 permits) is independent and bounds concurrent outbound dispatch tasks, not inbound connections.
 
-# Binary location
-ls -la target/release/mostro-push-backend
-```
-
-## Configuration
-
-### 1. Generate Server Keys
+### First-time setup
 
 ```bash
-# Generate a secure private key
-openssl rand -hex 32 > server_private_key.txt
-
-# View the key (keep this secret!)
-cat server_private_key.txt
+flyctl auth login
+flyctl launch --no-deploy   # reads fly.toml, creates the app, no deploy yet
 ```
 
-### 2. Firebase Setup
+### Configure secrets and deploy
 
-1. Go to [Firebase Console](https://console.firebase.google.com/)
-2. Create or select a project
-3. Enable Cloud Messaging
-4. Go to **Project Settings** → **Service accounts**
-5. Click **Generate new private key**
-6. Save the JSON file
+`deploy-fly.sh` is an idempotent wrapper that sets all secrets and runs `flyctl deploy`. Inspect it before running and replace any placeholder values with your own — in particular `FIREBASE_PROJECT_ID`, `FIREBASE_SERVICE_ACCOUNT_PATH`, and the secret values you want in production.
 
 ```bash
-mkdir -p /etc/mostro-push/secrets
-mv ~/Downloads/firebase-adminsdk-*.json /etc/mostro-push/secrets/service-account.json
-chmod 600 /etc/mostro-push/secrets/service-account.json
+./deploy-fly.sh
 ```
 
-### 3. Create Environment File
+Or do it by hand:
 
 ```bash
-cat > /etc/mostro-push/.env << 'EOF'
-# Nostr
-NOSTR_RELAYS=wss://relay.mostro.network
-MOSTRO_PUBKEY=dbe0b1be7aafd3cfba92d7463571bf438f09d24f4e021d9fe208ed0ab5823711
+flyctl secrets set \
+  NOSTR_RELAYS="wss://relay.mostro.network" \
+  MOSTRO_PUBKEY="82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390" \
+  FIREBASE_PROJECT_ID="your-project-id" \
+  FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/firebase-service-account.json" \
+  FCM_ENABLED="true" \
+  UNIFIEDPUSH_ENABLED="false" \
+  SERVER_HOST="0.0.0.0" \
+  SERVER_PORT="8080" \
+  TOKEN_TTL_HOURS="48" \
+  CLEANUP_INTERVAL_HOURS="1" \
+  NOTIFY_TRUST_PROXY_HEADERS="true" \
+  RUST_LOG="info"
 
-# Server Keys
-SERVER_PRIVATE_KEY=<your-generated-key>
-
-# Firebase
-FIREBASE_PROJECT_ID=your-project-id
-FIREBASE_SERVICE_ACCOUNT_PATH=/etc/mostro-push/secrets/service-account.json
-FCM_ENABLED=true
-
-# Server
-SERVER_HOST=127.0.0.1
-SERVER_PORT=8080
-
-# Token Store
-TOKEN_TTL_HOURS=48
-CLEANUP_INTERVAL_HOURS=1
-
-# Logging
-RUST_LOG=info
-EOF
-
-chmod 600 /etc/mostro-push/.env
+flyctl deploy
 ```
 
-## Systemd Service
+`NOTIFY_TRUST_PROXY_HEADERS=true` is correct on Fly because requests reach the app behind the Fly edge proxy, which sets `Fly-Client-IP`. On any deployment where the app is reachable directly, leave this `false`; otherwise an attacker can rotate that header per request and defeat the per-IP limiter.
 
-Create `/etc/systemd/system/mostro-push.service`:
+The Firebase service account JSON is bundled into the Docker image at the path specified by `FIREBASE_SERVICE_ACCOUNT_PATH`. Provision it before the build (the `Dockerfile` copies the `secrets/` directory).
+
+### Subsequent deploys
+
+```bash
+flyctl deploy
+```
+
+Secrets persist; only re-run `flyctl secrets set` when a value changes.
+
+### Operations
+
+```bash
+flyctl status                        # app + machine status
+flyctl logs                          # streaming logs
+flyctl logs -a mostro-push-server    # explicit app filter
+flyctl secrets list                  # list configured secret names
+flyctl ssh console                   # shell into the running VM
+flyctl scale vm shared-cpu-1x --memory 512
+```
+
+### Verifying a deploy
+
+```bash
+curl https://mostro-push-server.fly.dev/api/health
+curl https://mostro-push-server.fly.dev/api/info
+curl https://mostro-push-server.fly.dev/api/status
+```
+
+After every deploy, also run the [dispute-chat verification runbook](./verification/dispute-chat.md) to confirm the Nostr listener path still delivers a silent push end-to-end.
+
+## Docker
+
+Build the image:
+
+```bash
+docker build -t mostro-push-backend .
+```
+
+Run with `docker-compose`:
+
+```bash
+docker-compose up -d
+docker-compose logs -f
+```
+
+`docker-compose.yml` mounts `./secrets` read-only and `./data` read-write so UnifiedPush endpoints persist across restarts.
+
+## Reverse proxy (nginx)
+
+If the server is fronted by nginx instead of the Fly edge, terminate TLS at nginx and forward to `127.0.0.1:8080`. Set `NOTIFY_TRUST_PROXY_HEADERS=true` only if nginx is configured to set `Fly-Client-IP` or to put the client IP at the rightmost segment of `X-Forwarded-For`.
+
+```nginx
+server {
+    listen 80;
+    server_name push.example.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name push.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/push.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/push.example.com/privkey.pem;
+
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+    }
+}
+```
+
+## Systemd (bare-metal)
 
 ```ini
 [Unit]
@@ -97,7 +151,6 @@ EnvironmentFile=/etc/mostro-push/.env
 Restart=always
 RestartSec=5
 
-# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -108,250 +161,56 @@ ReadWritePaths=/opt/mostro-push/data
 WantedBy=multi-user.target
 ```
 
-### Install and Start
-
 ```bash
-# Create user
 sudo useradd -r -s /bin/false mostro
-
-# Create directories
 sudo mkdir -p /opt/mostro-push/data
+sudo cp target/release/mostro-push-backend /opt/mostro-push/
 sudo chown -R mostro:mostro /opt/mostro-push
 
-# Copy binary
-sudo cp target/release/mostro-push-backend /opt/mostro-push/
-
-# Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable mostro-push
-sudo systemctl start mostro-push
-
-# Check status
-sudo systemctl status mostro-push
+sudo systemctl enable --now mostro-push
 sudo journalctl -u mostro-push -f
 ```
 
-## Reverse Proxy (Nginx)
+## Persistence
 
-For HTTPS termination, use nginx:
+The only on-disk state is `data/unifiedpush_endpoints.json`, written atomically (temp file + rename). The token store and FCM access-token cache are in-memory and cleared on restart. UnifiedPush endpoints survive restarts because they are external addresses owned by clients; tokens do not, because clients re-register them after each session.
 
-```nginx
-# /etc/nginx/sites-available/push.mostro.network
-server {
-    listen 80;
-    server_name push.mostro.network;
-    return 301 https://$server_name$request_uri;
-}
+## Backup
 
-server {
-    listen 443 ssl http2;
-    server_name push.mostro.network;
+There is no database to back up. Operationally important inputs are:
 
-    ssl_certificate /etc/letsencrypt/live/push.mostro.network/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/push.mostro.network/privkey.pem;
-
-    # Security headers
-    add_header X-Frame-Options DENY;
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Timeouts
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-```
-
-```bash
-# Enable site
-sudo ln -s /etc/nginx/sites-available/push.mostro.network /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-
-# Get SSL certificate
-sudo certbot --nginx -d push.mostro.network
-```
-
-## Docker Deployment
-
-### Dockerfile
-
-```dockerfile
-FROM rust:1.75-slim as builder
-
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /app/target/release/mostro-push-backend /usr/local/bin/
-
-EXPOSE 8080
-
-CMD ["mostro-push-backend"]
-```
-
-### docker-compose.yml
-
-```yaml
-version: '3.8'
-
-services:
-  mostro-push:
-    build: .
-    ports:
-      - "8080:8080"
-    environment:
-      - NOSTR_RELAYS=wss://relay.mostro.network
-      - MOSTRO_PUBKEY=${MOSTRO_PUBKEY}
-      - SERVER_PRIVATE_KEY=${SERVER_PRIVATE_KEY}
-      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
-      - FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/service-account.json
-      - FCM_ENABLED=true
-      - SERVER_HOST=0.0.0.0
-      - SERVER_PORT=8080
-      - RUST_LOG=info
-    volumes:
-      - ./secrets:/secrets:ro
-      - ./data:/app/data
-    restart: unless-stopped
-```
-
-```bash
-# Run with docker-compose
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-```
-
-## Monitoring
-
-### Health Check Endpoint
-
-```bash
-# Simple health check
-curl -f http://localhost:8080/api/health || exit 1
-```
-
-### Prometheus Metrics (TODO)
-
-Future versions will expose `/metrics` endpoint for Prometheus scraping.
-
-### Log Monitoring
-
-```bash
-# Watch logs in real-time
-journalctl -u mostro-push -f
-
-# Search for errors
-journalctl -u mostro-push --since "1 hour ago" | grep -i error
-```
-
-## Backup and Recovery
-
-### What to Backup
-
-1. **Server Private Key** - Critical! Without this, clients cannot register tokens
-2. **Firebase Service Account** - Required for FCM
-3. **Configuration** - `.env` file
-
-### Backup Script
-
-```bash
-#!/bin/bash
-BACKUP_DIR="/backup/mostro-push/$(date +%Y%m%d)"
-mkdir -p "$BACKUP_DIR"
-
-# Backup configuration
-cp /etc/mostro-push/.env "$BACKUP_DIR/"
-cp -r /etc/mostro-push/secrets "$BACKUP_DIR/"
-
-# Encrypt backup
-tar czf - "$BACKUP_DIR" | gpg -c > "$BACKUP_DIR.tar.gz.gpg"
-rm -rf "$BACKUP_DIR"
-
-echo "Backup created: $BACKUP_DIR.tar.gz.gpg"
-```
-
-### Recovery
-
-```bash
-# Decrypt and extract
-gpg -d backup.tar.gz.gpg | tar xzf -
-
-# Restore files
-cp .env /etc/mostro-push/
-cp -r secrets /etc/mostro-push/
-
-# Restart service
-systemctl restart mostro-push
-```
+- `FIREBASE_SERVICE_ACCOUNT_PATH` JSON file (regenerate via Firebase Console if lost)
+- The contents of `flyctl secrets list` (or the `.env` file on bare-metal)
+- `data/unifiedpush_endpoints.json` if you want UnifiedPush registrations to survive a host migration; clients will re-register on next use otherwise
 
 ## Troubleshooting
 
-### Server Won't Start
+### Server fails to start
+
+The most common cause is `NOSTR_RELAYS` unset. Check `flyctl logs` or the systemd journal for `Failed to load configuration`.
 
 ```bash
-# Check configuration
-cat /etc/mostro-push/.env
-
-# Verify Firebase credentials
-cat /etc/mostro-push/secrets/service-account.json | jq .client_email
-
-# Check logs
+flyctl logs
 journalctl -u mostro-push -n 100
 ```
 
-### FCM Not Working
+### FCM not delivering
 
 ```bash
-# Verify FCM is enabled
-grep FCM_ENABLED /etc/mostro-push/.env
-
-# Check service account path
-ls -la /etc/mostro-push/secrets/service-account.json
-
-# Test OAuth2 manually (check logs for token errors)
-RUST_LOG=debug systemctl restart mostro-push
+flyctl ssh console
+ls -la /secrets/                          # confirm the JSON is at the configured path
+flyctl secrets list | grep FIREBASE       # confirm path env var is set
+RUST_LOG=debug flyctl deploy              # redeploy with debug logging to see OAuth exchange
 ```
 
-### No Tokens Registered
+### `/api/notify` always 429s
 
-1. Check client can reach server: `curl https://push.mostro.network/api/health`
-2. Verify server pubkey matches client expectation
-3. Check firewall rules
-4. Review client logs for registration errors
+Either the per-IP or per-pubkey limiter is hitting. Check `Retry-After` and the response body — 429 bodies are byte-identical between the two paths, so distinguish by reproducing in isolation:
 
-### Nostr Connection Issues
+- Hit `/api/notify` once with a fresh `trade_pubkey` from a fresh client IP. Still 429? The per-IP limiter is hitting upstream of you (your egress IP is shared).
+- Hit `/api/notify` 11 times in 2 seconds with the same `trade_pubkey`. The 11th should 429 — that confirms the per-pubkey burst (10) is enforced.
 
-```bash
-# Check relay connectivity
-websocat wss://relay.mostro.network
+### Listener silently drops events
 
-# Verify MOSTRO_PUBKEY is correct
-grep MOSTRO_PUBKEY /etc/mostro-push/.env
-```
-
-## Security Checklist
-
-- [ ] Server private key stored securely (not in repo)
-- [ ] Firebase credentials have minimal permissions
-- [ ] HTTPS enabled via reverse proxy
-- [ ] Firewall configured (only 443 exposed)
-- [ ] Service runs as non-root user
-- [ ] Logs don't contain sensitive data
-- [ ] Regular backups of private key
-- [ ] Rate limiting configured
+Run the [dispute-chat verification runbook](./verification/dispute-chat.md). The most likely regression is a re-introduced `.authors(...)` filter on the Nostr `Filter`; the runbook includes a grep that fails if that line is present.
