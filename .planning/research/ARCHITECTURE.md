@@ -28,8 +28,8 @@ Per-IP gets rejected first (cheap, before body parsing); per-pubkey gets checked
 |-----------|----------|----------------|
 | `PushDispatcher` | `src/push/dispatcher.rs` (new file, re-exported via `src/push/mod.rs`) | Owns `Arc<[Arc<dyn PushService>]>`. Single method: `async fn dispatch(&self, token: &RegisteredToken) -> Result<DispatchOutcome, DispatchError>`. Encapsulates the "find first matching `supports_platform`, call `send_to_token`, break on first success" loop currently inlined in the listener. |
 | `DispatchOutcome` / `DispatchError` enum | same file | `Delivered { backend: &'static str }`, `NoBackendForPlatform`, `AllBackendsFailed { errors: Vec<String> }`. Lets the new HTTP handler return distinct status codes (`200` vs `502`) without leaking backend specifics. |
-| `notify_token` handler | `src/api/routes.rs` (added) | Validates `trade_pubkey` (reuse the 64-hex-char check pattern), per-pubkey rate-limit check, `TokenStore::get`, `PushDispatcher::dispatch`, return `200` / `404` / `429` / `502`. |
-| `NotifyRequest` / `NotifyResponse` DTOs | `src/api/routes.rs` | `{ "trade_pubkey": "<64-hex>" }` request, minimal `{ "success": bool, "message": "..." }` response (no per-backend leakage). |
+| `notify_token` handler | `src/api/notify.rs` (new file in shipped v1.1; this research draft expected it under `src/api/routes.rs`) | Validates `trade_pubkey` (reuse the 64-hex-char check pattern), per-pubkey rate-limit check, `TokenStore::get`, `PushDispatcher::dispatch_silent`, returns **always-202** for parse-valid input + `400` for malformed body + `429` for rate-limit. The earlier `200/404/429/502` differentiated contract sketched here was rejected during Phase 2 planning (anti-CRIT-2 enumeration oracle); see Phase 2 D-01..D-04 in CONTEXT.md. |
+| `NotifyRequest` / `NotifyResponse` DTOs | `src/api/notify.rs` | `{ "trade_pubkey": "<64-hex>" }` request, fixed `{ "accepted": true }` body on the always-202 path (no per-backend leakage, no echo of the pubkey). |
 | `PerPubkeyLimiter` | `src/api/rate_limit.rs` (new module under `api/`) | Wraps `governor::RateLimiter<String, DefaultKeyedStateStore<String>, ..>`. One method: `fn check(&self, pubkey: &str) -> Result<(), NotUntil<...>>`. Held in `AppState` as `Arc<PerPubkeyLimiter>`. |
 | `FlyClientIpKeyExtractor` | `src/api/rate_limit.rs` | Custom `actix_governor::KeyExtractor` that reads `Fly-Client-IP` header (Fly-Proxy-injected; see fly.io docs), falls back to `PeerIpKeyExtractor`. Used by the per-IP middleware on `/api/notify` only. |
 
@@ -90,12 +90,18 @@ PushDispatcher::dispatch (src/push/dispatcher.rs)
 Concrete backend (FcmPush or UnifiedPushService) — UNCHANGED
         |  outbound HTTPS to FCM v1 / UnifiedPush distributor
         v
-notify_token returns:
-        200 { "success": true }     on Delivered
-        404 { "success": false }    on token_store miss   (or 202 to hide existence)
-        429 + Retry-After           on rate-limit (IP or pubkey)
-        502 { "success": false }    on AllBackendsFailed
+notify_token returns (SHIPPED v1.1 contract — supersedes the 200/404/502 sketch above):
+        202 { "accepted": true }    on every parse-valid request (anti-CRIT-2 oracle, D-01..D-04)
+        400 { "success": false, "message": "..." }   on malformed body / pubkey
+        429 + Retry-After           on rate-limit (IP or pubkey, byte-identical body, D-13)
 ```
+
+The 200/404/502 sketch in the diagram above was the pre-Phase-2 working
+assumption; it was rejected during Phase 2 planning to close the
+registered-pubkey enumeration oracle and the FCM-state oracle. Dispatch
+errors are caught inside the spawned task post-202 and logged via
+`warn!` only — they never propagate to the response.
+
 
 The Nostr-driven path (current behaviour) flows through the same `PushDispatcher::dispatch`:
 

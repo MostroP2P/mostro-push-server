@@ -318,7 +318,16 @@ let mut salt_bytes = [0u8; 32];
 rand::thread_rng().fill_bytes(&mut salt_bytes);
 let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
 
-// D-09: semaphore — bounds spawn pile.
+// D-09: semaphore — bounds the spawn pile of detached dispatch tasks
+// (NOT incoming HTTP connections). The 50 permits are intentionally
+// distinct from `fly.toml` `hard_limit = 25` (concurrent inbound HTTP
+// connections to Actix): the handler returns 202 BEFORE spawning, so
+// the inbound connection is released back to Actix's pool while the
+// spawned task continues to dispatch FCM/UnifiedPush in the background.
+// At steady state the spawn pile bounds memory, not request throughput.
+// If the operator wants to align the two limits in a future revision,
+// 25 is also acceptable; 50 is the documented headroom for short bursts
+// where the FCM round-trip is in flight while new requests arrive.
 let notify_semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(50));
 
 let app_state = AppState {

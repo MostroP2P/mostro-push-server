@@ -37,14 +37,14 @@ Each feature is annotated with:
 | Dependencies | Existing `TokenStore::get`, existing `PushService::send_to_token`. No data-model change. |
 | Privacy implication | NEUTRAL. Reveals to the server only `(source IP, trade_pubkey, timestamp)` — same projection the server already has when dispatching from a relay event. No new sender↔recipient linkage because the request is unauthenticated by design. |
 
-**Behaviour:**
-- Validate body is `{ "trade_pubkey": "<64-char hex>" }`. Same validation as `/api/register`. Reject with `400` otherwise.
-- Lookup token in `TokenStore`. If absent, return `404` (no body leakage about which other pubkeys exist).
-- If present, dispatch a silent push exactly as the Nostr listener path does today (first matching `PushService::supports_platform`, `send_to_token`, break on first success).
-- Return `200` with `{ "success": true }`.
-- Return `429` if rate limit triggered (TS-2).
+**Behaviour (SUPERSEDED by Phase 2 D-01..D-04 — shipped v1.1 always-202 contract):**
+- Validate body is `{ "trade_pubkey": "<64-char hex>" }`. Same validation as `/api/register`. Reject with `400` only on malformed/invalid body.
+- ~~Lookup token in `TokenStore`. If absent, return `404`.~~ → Token lookup happens inside the spawned dispatch task post-202; absence is silent.
+- ~~Return `200` with `{ "success": true }`.~~ → Always return `202 { "accepted": true }` for parse-valid input (anti-CRIT-2 enumeration oracle).
+- Return `429 + Retry-After` on rate-limit (per-pubkey or per-IP, byte-identical body — D-13).
+- Dispatch happens in a `tokio::spawn` detached from the response, bounded by `Arc<Semaphore>(50)`; failures are logged via `warn!` only and never propagate to the client.
 
-**Anti-coupling note:** The dispatch path used by `/api/notify` MUST be the same code used by `nostr::listener` so future changes (batching, retries) apply uniformly. Recommend factoring `dispatch_silent_push(trade_pubkey)` into `src/push/mod.rs` and calling from both sites. (`ARCHITECTURE.md` lines 86-93 show the dispatch logic is currently inline in the listener closure.)
+**Anti-coupling note:** The dispatch path used by `/api/notify` MUST be the same code used by `nostr::listener` so future changes (batching, retries) apply uniformly. Shipped v1.1 factors this into `src/push/dispatcher.rs` (`PushDispatcher::dispatch` for the listener path, `PushDispatcher::dispatch_silent` for the notify path). The earlier sketch above suggested a single `dispatch_silent_push(trade_pubkey)` helper; the shipped split keeps both backend payload styles cleanly separated.
 
 ### TS-2. Rate limiting on `/api/notify`
 
@@ -55,12 +55,12 @@ Each feature is annotated with:
 | Dependencies | TS-1, existing `governor` dep. |
 | Privacy implication | POSITIVE. Without it the endpoint is a free notification-storm vector. Bucketing by `trade_pubkey` adds no server-side knowledge that wasn't already present. |
 
-**Behaviour:**
+**Behaviour (UPDATED to shipped v1.1 — see Phase 3 D-13):**
 - Two `governor` instances ANDed: a request is allowed only if BOTH the IP bucket AND the `trade_pubkey` bucket admit it.
-- On rejection, return `429` with `{ "success": false, "error": "rate_limited" }`. No `Retry-After` (would leak bucket internals).
-- In-memory only (consistent with `ARCHITECTURE.md` line 109). Lost on restart, acceptable for an anti-burst limit.
+- On rejection, return `429` with byte-identical body `{ "success": false, "message": "rate limited" }` and a `Retry-After` header (the earlier "no Retry-After to avoid leaking bucket internals" recommendation was reversed in Phase 3: the byte-identical body across per-IP and per-pubkey paths already neutralises the oracle, and `Retry-After` is needed by the mobile client for back-off).
+- In-memory only. Lost on restart, acceptable for an anti-burst limit.
 
-**Open for `/gsd-plan-phase`:** exact `Quota` expression, keyed extractor, middleware vs per-handler.
+**Resolved during `/gsd-plan-phase`:** per-pubkey 30/min burst 10, per-IP 120/min burst 30 (PITFALLS RL-3 numbers); hand-rolled `from_fn` middleware over `governor::DefaultKeyedRateLimiter` (`actix-governor` rejected as GPL-3.0); per-pubkey check in-handler, per-IP check in middleware.
 
 ### TS-3. Structured error responses on `/api/notify`
 
@@ -71,10 +71,10 @@ Each feature is annotated with:
 | Dependencies | TS-1, TS-2. |
 | Privacy implication | NEUTRAL/POSITIVE. Responses must not differentiate "pubkey unknown" from "pubkey known but no token" — `404` is the single bucket. Must not echo the `trade_pubkey` back in the body. |
 
-**Behaviour:**
+**Behaviour (SUPERSEDED by always-202 contract — Phase 2 D-01..D-04):**
 - All responses JSON, content-type `application/json`.
-- Bodies terse: `{ "success": true }`, `{ "success": false, "error": "not_registered" }`, `{ "success": false, "error": "rate_limited" }`, `{ "success": false, "error": "invalid_pubkey" }`.
-- No internal error details (stack traces, backend names, FCM error codes) exposed. Backend failures still return `200` to the client (silent push has been *attempted*); failure modes visible to the operator via logs (TS-4). **Alternative under discussion:** return `502` on backend failure. Recommendation: stay with `200` to avoid encouraging retry-storms on transient FCM/UP failures (mobile will eventually fetch via Nostr).
+- Shipped bodies: `{ "accepted": true }` on every parse-valid 202, `{ "success": false, "message": "..." }` on 400 malformed, `{ "success": false, "message": "rate limited" }` on 429 (byte-identical between per-IP and per-pubkey paths). The earlier `not_registered` / `invalid_pubkey` / `rate_limited` differentiated bodies were rejected because they enable registered-pubkey enumeration.
+- No internal error details (stack traces, backend names, FCM error codes) exposed. Backend failures are caught inside the spawned task post-202 and never propagate to the client (the 202 was already sent). The earlier `502 on backend failure` alternative was also rejected for the same enumeration-oracle reason.
 
 ### TS-4. Operator-facing observability for `/api/notify` and dispute-chat path
 

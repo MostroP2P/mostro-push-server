@@ -12,11 +12,11 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 - **Tech stack:** Rust + Actix-web + Tokio. The new endpoint is additive — must not introduce a different framework, async runtime, or HTTP client. Reuse `reqwest::Client` and the `PushService` trait wherever possible.
 - **Privacy:** Hard requirement that the server never learns `sharedKey`s, peer-to-peer relationships, or sender identity. Designs that would weaken this (e.g. signature auth on `/api/notify`, registering `sharedKey`s, forwarding plaintext) are rejected.
 - **Backwards compatibility:** Existing `/api/register`, `/api/unregister`, `/api/health`, `/api/info`, `/api/status` contracts must not change in this milestone. Mobile clients on the current API must keep working.
-- **Mobile contract:** The new endpoint must match what `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md` Phase 4 specifies (`POST /api/notify { "trade_pubkey": "<64-char hex>" }`, returns `200`/`404`/`429`). Detailed wire format (response body, error shape) is finalized in `/gsd-plan-phase`.
+- **Mobile contract (shipped v1.1):** `POST /api/notify { "trade_pubkey": "<64-char hex>" }` returns `202 { "accepted": true }` for every parse-valid request (always-202, anti-CRIT-2 enumeration oracle), `400 { "success": false, "message": "..." }` on malformed body, and `429 + Retry-After` (byte-identical body across per-IP and per-pubkey paths) on rate-limit. Dispatch happens in a `tokio::spawn` detached from the response. The earlier `200/404/429` sketch from `mobile/docs/plans/CHAT_NOTIFICATIONS_PLAN.md` Phase 4 was renegotiated during Phase 2 planning.
 - **Deployment:** Single Fly.io machine, 512MB RAM, hard connection cap of 25 (`fly.toml`). Rate limits and any new state structures must respect this.
 - **Anti-requirement:** No Mostro-daemon author filter on the Nostr listener. Dispute admin DMs are sent directly user-to-user; filtering by `mostro_pubkey` author would silently drop them.
 - **No new dependencies without explicit approval** (per global CLAUDE.md). The `governor` crate is already declared and counts as already-approved.
-- **Language:** Code, comments, commit messages, branch names, and documentation in English. Conversation in Spanish (per global CLAUDE.md).
+- **Language:** Code, comments, commit messages, branch names, and documentation in English. 
 <!-- GSD:project-end -->
 
 <!-- GSD:stack-start source:codebase/STACK.md -->
@@ -166,10 +166,10 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 - `src/utils/mod.rs` declares `batching` but no re-export (only used internally).
 - Each module's `mod.rs` acts as a small barrel exposing the public surface. No deep re-export hierarchies.
 ## Concurrency Patterns
-- `Arc<TokenStore>` and `Arc<Mutex<Vec<Box<dyn PushService>>>>` are passed into background tasks (`src/main.rs` lines 36, 79-89).
-- Internal state uses `tokio::sync::RwLock` for read-heavy maps (`TokenStore::tokens` in `src/store/mod.rs` line 31, `UnifiedPushService::endpoints` in `src/push/unifiedpush.rs` line 24, `FcmPush::cached_token` in `src/push/fcm.rs` line 47).
-- `tokio::sync::Mutex` is used for the dynamic dispatch push-service vector (`src/main.rs` line 79).
-- `Arc<T>` blanket impls of `PushService` are provided in `src/push/mod.rs` lines 27-63 to allow `Arc<UnifiedPushService>` and `Arc<FcmPush>` to be used as `Box<dyn PushService>` while keeping a separate `Arc` reference.
+- `Arc<TokenStore>` and `Arc<PushDispatcher>` are passed into background tasks. `PushDispatcher` (`src/push/dispatcher.rs`) owns the immutable `Arc<[Arc<dyn PushService>]>` slice — there is NO `Mutex` on the dispatch path (Phase 1 v1.1 refactor; reintroducing one here is a CONC-1 regression).
+- Internal state uses `tokio::sync::RwLock` for read-heavy maps (`TokenStore::tokens` in `src/store/mod.rs`, `UnifiedPushService::endpoints` in `src/push/unifiedpush.rs`, `FcmPush::cached_token` in `src/push/fcm.rs`).
+- The `/api/notify` handler bounds detached dispatch tasks with `Arc<Semaphore>(50)` (`src/main.rs:109`) — see PATTERNS.md for why this is intentionally distinct from `fly.toml` `hard_limit = 25`.
+- `Arc<T>` blanket impls of `PushService` (`src/push/mod.rs`) allow `Arc<UnifiedPushService>` and `Arc<FcmPush>` to be used as `Arc<dyn PushService>` inside the dispatcher's slice while keeping a separate typed `Arc` for FCM-specific calls (`send_silent_to_token`).
 ## Configuration & Env Vars
 - All configuration flows through `Config::from_env()` in `src/config.rs`, parsing `std::env` variables with sensible string defaults via `unwrap_or_else`.
 - `dotenv::dotenv().ok()` is called once at startup in `src/main.rs` line 26.
@@ -193,11 +193,11 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 
 ## Pattern Overview
 - Single-binary Tokio/Actix runtime (`#[actix_web::main]`) wiring all subsystems in `src/main.rs`.
-- Trait-based polymorphism (`PushService`) for FCM and UnifiedPush backends, registered as `Vec<Box<dyn PushService>>`.
-- Event-driven push delivery: Nostr `kind 1059` (Gift Wrap) events trigger lookups in the in-memory token store and dispatch to one matching backend.
-- Currently in **Phase 3** (token registration without encryption); the ECDH/ChaCha20 crypto module exists in `src/crypto/mod.rs` but is gated `#[allow(dead_code)]` in `src/main.rs:14-15` for a future Phase 4.
+- Trait-based polymorphism (`PushService`) for FCM and UnifiedPush backends, registered into a single `PushDispatcher` (`src/push/dispatcher.rs`) holding an immutable `Arc<[Arc<dyn PushService>]>` slice.
+- Two dispatch entry points: Nostr `kind 1059` (Gift Wrap) events via the relay listener, and `POST /api/notify` from Mostro Mobile (sender-triggered chat wake-ups). Both call into the same `PushDispatcher`.
+- Token registration is plaintext as of v1.1 (encryption deferred; the ECDH/ChaCha20 crypto module exists in `src/crypto/mod.rs` but is gated `#[allow(dead_code)]` in `src/main.rs:13-15` for a future encryption milestone).
 - Configuration entirely from environment variables via `dotenv` plus a typed `Config` struct.
-- Concurrency: `Arc<Mutex<Vec<Box<dyn PushService>>>>` for push services, `Arc<RwLock<...>>` for UnifiedPush endpoints and FCM token cache, `RwLock<HashMap<...>>` for the token store.
+- Concurrency: `Arc<[Arc<dyn PushService>]>` (lock-free) for the dispatch path; `Arc<RwLock<...>>` for UnifiedPush endpoints and FCM token cache; `RwLock<HashMap<...>>` for the token store; `Arc<Semaphore>(50)` to bound `/api/notify` detached dispatch tasks.
 ## Layers
 - Purpose: Boot the runtime, load config, instantiate services, spawn background tasks, start the HTTP server.
 - Location: `src/main.rs`
@@ -242,7 +242,7 @@ Privacy-preserving push notification backend for the Mostro P2P trading ecosyste
 ## Data Flow
 - `FcmPush::get_access_token` (`src/push/fcm.rs:95-158`) returns a cached token if `expires_at > now + 60`; otherwise it constructs `Claims { iss, scope, aud, iat, exp }`, signs with `RS256` from the service-account PEM, exchanges for an access token, and caches it under `RwLock<Option<CachedToken>>`.
 - Token map: `RwLock<HashMap<String, RegisteredToken>>` inside `TokenStore`; shared via `Arc<TokenStore>` to the HTTP server and Nostr listener.
-- Push services: `Arc<Mutex<Vec<Box<dyn PushService>>>>` shared between `main.rs` and the Nostr listener.
+- Push services: `Arc<PushDispatcher>` (lock-free, holds `Arc<[Arc<dyn PushService>]>`) shared between `main.rs`, the Nostr listener, and the `/api/notify` handler.
 - UnifiedPush endpoints: `RwLock<HashMap<String, UnifiedPushEndpoint>>` persisted atomically to `data/unifiedpush_endpoints.json` via temp-file rename (`src/push/unifiedpush.rs:73-83`).
 - FCM access token cache: `Arc<RwLock<Option<CachedToken>>>`.
 - No database, no external cache; restart clears all in-memory state except UnifiedPush endpoints loaded from disk.
