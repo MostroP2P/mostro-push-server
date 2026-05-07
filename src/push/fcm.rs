@@ -1,17 +1,17 @@
 use async_trait::async_trait;
-use log::{info, error, debug, warn};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use std::fs;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
+use super::PushService;
 use crate::config::Config;
 use crate::store::Platform;
-use super::PushService;
 
 #[derive(Debug, Deserialize)]
 struct ServiceAccount {
@@ -50,29 +50,26 @@ pub struct FcmPush {
 impl FcmPush {
     pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let service_account_path = std::env::var("FIREBASE_SERVICE_ACCOUNT_PATH").ok();
-        let project_id = std::env::var("FIREBASE_PROJECT_ID")
-            .unwrap_or_else(|_| "mostro".to_string());
+        let project_id =
+            std::env::var("FIREBASE_PROJECT_ID").unwrap_or_else(|_| "mostro".to_string());
 
-        let service_account = service_account_path.and_then(|path| {
-            match fs::read_to_string(&path) {
-                Ok(content) => {
-                    match serde_json::from_str::<ServiceAccount>(&content) {
-                        Ok(sa) => {
-                            info!("Loaded Firebase service account for {}", sa.client_email);
-                            Some(sa)
-                        }
-                        Err(e) => {
-                            error!("Failed to parse service account JSON: {}", e);
-                            None
-                        }
+        let service_account =
+            service_account_path.and_then(|path| match fs::read_to_string(&path) {
+                Ok(content) => match serde_json::from_str::<ServiceAccount>(&content) {
+                    Ok(sa) => {
+                        info!("Loaded Firebase service account for {}", sa.client_email);
+                        Some(sa)
                     }
-                }
+                    Err(e) => {
+                        error!("Failed to parse service account JSON: {}", e);
+                        None
+                    }
+                },
                 Err(e) => {
                     warn!("Could not read service account file {}: {}", path, e);
                     None
                 }
-            }
-        });
+            });
 
         Self {
             client,
@@ -97,9 +94,7 @@ impl FcmPush {
         {
             let cache = self.cached_token.read().await;
             if let Some(ref cached) = *cache {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_secs();
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
                 // Refresh 60 seconds before expiry
                 if cached.expires_at > now + 60 {
                     return Ok(cached.token.clone());
@@ -108,12 +103,12 @@ impl FcmPush {
         }
 
         // Need to refresh token
-        let sa = self.service_account.as_ref()
+        let sa = self
+            .service_account
+            .as_ref()
             .ok_or("No service account configured")?;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
         let claims = Claims {
             iss: sa.client_email.clone(),
@@ -128,7 +123,8 @@ impl FcmPush {
         let jwt = encode(&header, &claims, &key)?;
 
         // Exchange JWT for access token
-        let response = self.client
+        let response = self
+            .client
             .post("https://oauth2.googleapis.com/token")
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
@@ -143,7 +139,7 @@ impl FcmPush {
         }
 
         let token_response: TokenResponse = response.json().await?;
-        
+
         // Cache the token
         {
             let mut cache = self.cached_token.write().await;
@@ -153,7 +149,10 @@ impl FcmPush {
             });
         }
 
-        info!("Obtained new FCM access token, expires in {}s", token_response.expires_in);
+        info!(
+            "Obtained new FCM access token, expires in {}s",
+            token_response.expires_in
+        );
         Ok(token_response.access_token)
     }
 
@@ -267,9 +266,13 @@ impl PushService for FcmPush {
 
         let payload = Self::build_payload_for_token(device_token);
 
-        debug!("Sending FCM to token: {}...", &device_token[..20.min(device_token.len())]);
+        debug!(
+            "Sending FCM to token: {}...",
+            &device_token[..20.min(device_token.len())]
+        );
 
-        let response = self.client
+        let response = self
+            .client
             .post(&fcm_url)
             .bearer_auth(&auth_token)
             .json(&payload)
@@ -300,9 +303,13 @@ impl PushService for FcmPush {
 
         let payload = Self::build_silent_payload_for_notify(device_token);
 
-        debug!("Sending FCM silent to token: {}...", &device_token[..20.min(device_token.len())]);
+        debug!(
+            "Sending FCM silent to token: {}...",
+            &device_token[..20.min(device_token.len())]
+        );
 
-        let response = self.client
+        let response = self
+            .client
             .post(&fcm_url)
             .bearer_auth(&auth_token)
             .json(&payload)

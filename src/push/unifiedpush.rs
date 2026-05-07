@@ -1,16 +1,16 @@
 use async_trait::async_trait;
-use log::{info, error, debug, warn};
+use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tokio::fs;
+use tokio::sync::RwLock;
 
+use super::PushService;
 use crate::config::Config;
 use crate::store::Platform;
-use super::PushService;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedPushEndpoint {
@@ -118,7 +118,10 @@ impl UnifiedPushService {
         // Persist to disk
         self.save_endpoints().await?;
 
-        info!("Unregistered UnifiedPush endpoint for device: {}", device_id);
+        info!(
+            "Unregistered UnifiedPush endpoint for device: {}",
+            device_id
+        );
         Ok(())
     }
 }
@@ -136,13 +139,12 @@ impl PushService for UnifiedPushService {
             "timestamp": chrono::Utc::now().timestamp()
         });
 
-        debug!("Sending UnifiedPush to endpoint: {}...", &device_token[..30.min(device_token.len())]);
+        debug!(
+            "Sending UnifiedPush to endpoint: {}...",
+            &device_token[..30.min(device_token.len())]
+        );
 
-        let response = self.client
-            .post(device_token)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = self.client.post(device_token).json(&payload).send().await?;
 
         if response.status().is_success() {
             info!("UnifiedPush notification sent successfully");
