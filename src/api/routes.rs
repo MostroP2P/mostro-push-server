@@ -178,7 +178,15 @@ async fn register_token(
                         platform: None,
                     });
                 }
-                if !state.trusted_mostro_pubkeys.contains(mostro_pk) {
+                // Canonicalize at the HTTP boundary: hex::decode accepts mixed
+                // case but HashSet::contains is byte-exact, so an uppercase but
+                // otherwise valid pubkey would falsely 403. trusted_pubkeys::load
+                // also lowercases on the whitelist side; normalize here so the
+                // invariant holds in both directions.
+                if !state
+                    .trusted_mostro_pubkeys
+                    .contains(&mostro_pk.to_ascii_lowercase())
+                {
                     warn!("Register denied: untrusted Mostro instance");
                     return HttpResponse::Forbidden().json(RegisterResponse {
                         success: false,
@@ -510,6 +518,35 @@ mod tests {
             body_str,
             r#"{"success":true,"message":"Token registered successfully","platform":"android"}"#
         );
+    }
+
+    /// PR #23 review regression: an uppercase pubkey that lowercases to a
+    /// trusted entry must succeed. `hex::decode` accepts mixed case at the
+    /// 400 gate, and the handler must canonicalize to lowercase before the
+    /// 403 whitelist check so it agrees with `trusted_pubkeys::load`, which
+    /// stores entries in lowercase.
+    #[actix_web::test]
+    async fn register_with_uppercase_trusted_mostro_pubkey_succeeds() {
+        let c = make_test_components_with_trusted_whitelist();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let uppercase = TRUSTED_MOSTRO_PUBKEY.to_ascii_uppercase();
+        assert_ne!(
+            uppercase, TRUSTED_MOSTRO_PUBKEY,
+            "fixture must contain at least one hex letter for this test to be meaningful"
+        );
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "test_fcm_token",
+                "platform": "android",
+                "mostro_pubkey": uppercase
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// Whitelist active, declared mostro_pubkey NOT in the list -> 403.

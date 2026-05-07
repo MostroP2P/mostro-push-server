@@ -22,32 +22,34 @@ pub fn load() -> HashSet<String> {
             pk
         );
     }
-    raw.into_iter().collect()
+    // Normalize to lowercase so the byte-exact `HashSet::contains` lookup in
+    // `register_token` matches both `"82FA..."` and `"82fa..."` once the
+    // handler also lowercases the incoming `mostro_pubkey`. `hex::decode`
+    // already accepts mixed case at both boundaries, so without this
+    // normalization a syntactically valid uppercase key would pass the 400
+    // gate and falsely hit 403.
+    raw.into_iter().map(|pk| pk.to_ascii_lowercase()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// `load()` must succeed and yield only valid 64-hex entries. An empty
+    /// array is the documented permissive-mode configuration, so cardinality
+    /// is intentionally not asserted — operators who edit the embedded JSON
+    /// must not be forced to keep at least one entry just to satisfy tests.
     #[test]
-    fn embedded_json_parses_and_validates() {
+    fn embedded_json_parses_with_valid_entries() {
         let set = load();
-        assert!(
-            !set.is_empty(),
-            "embedded whitelist must not be empty in this build"
-        );
         for pk in &set {
             assert_eq!(pk.len(), 64);
             assert!(hex::decode(pk).is_ok());
+            assert!(
+                pk.chars().all(|c| !c.is_ascii_uppercase()),
+                "load() must canonicalize entries to lowercase: {}",
+                pk
+            );
         }
-    }
-
-    #[test]
-    fn default_main_instance_is_present() {
-        let set = load();
-        assert!(
-            set.contains("82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390"),
-            "default Mostro main-instance pubkey must be on the trusted list"
-        );
     }
 }
