@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,6 +19,9 @@ pub struct UnifiedPushEndpoint {
 }
 
 pub struct UnifiedPushService {
+    // Held for future settings (custom relays, retry policy) that the
+    // service does not yet read.
+    #[allow(dead_code)]
     config: Config,
     client: Arc<reqwest::Client>,
     endpoints: RwLock<HashMap<String, UnifiedPushEndpoint>>,
@@ -71,6 +73,7 @@ impl UnifiedPushService {
     }
 
     /// Save endpoints to disk
+    #[allow(dead_code)]
     async fn save_endpoints(&self) -> Result<(), Box<dyn std::error::Error>> {
         let endpoints = self.endpoints.read().await;
         let content = serde_json::to_string_pretty(&*endpoints)?;
@@ -83,6 +86,8 @@ impl UnifiedPushService {
         Ok(())
     }
 
+    // Reserved API: invoked once UnifiedPush registration endpoints land.
+    #[allow(dead_code)]
     pub async fn register_endpoint(
         &self,
         device_id: String,
@@ -106,6 +111,8 @@ impl UnifiedPushService {
         Ok(())
     }
 
+    // Reserved API: invoked once UnifiedPush registration endpoints land.
+    #[allow(dead_code)]
     pub async fn unregister_endpoint(
         &self,
         device_id: &str,

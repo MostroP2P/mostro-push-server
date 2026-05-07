@@ -273,7 +273,6 @@ async fn unregister_token(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::api::test_support::{
         build_test_actix_app, make_app_state_with_whitelist, make_test_components,
         make_test_components_with_trusted_whitelist, make_test_components_with_whitelist_disabled,

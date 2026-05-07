@@ -9,7 +9,12 @@ pub struct PushDispatcher {
 }
 
 pub enum DispatchOutcome {
-    Delivered { backend: &'static str },
+    // `backend` is populated for downstream telemetry/logging callers that
+    // are not yet wired up; the dispatcher already records the value.
+    Delivered {
+        #[allow(dead_code)]
+        backend: &'static str,
+    },
 }
 
 #[derive(Debug)]

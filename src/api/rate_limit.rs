@@ -39,9 +39,14 @@ pub const PUBKEY_BURST: u32 = 10;
 pub const IP_BURST: u32 = 30;
 
 /// Cleanup interval default in seconds (D-16). Override via NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS.
+/// Defaults are duplicated in `Config::from_env` so this constant is currently
+/// unused at runtime; kept as the canonical reference for D-16.
+#[allow(dead_code)]
 pub const RATE_LIMIT_CLEANUP_INTERVAL_DEFAULT_SECS: u64 = 60;
 
 /// Soft-cap default (D-17). Override via NOTIFY_PUBKEY_LIMITER_SOFT_CAP.
+/// See note above on RATE_LIMIT_CLEANUP_INTERVAL_DEFAULT_SECS.
+#[allow(dead_code)]
 pub const PUBKEY_LIMITER_SOFT_CAP_DEFAULT: usize = 100_000;
 
 /// 429 Too Many Requests response shared by both the per-IP middleware and
@@ -218,7 +223,7 @@ mod tests {
     use actix_web::{http::StatusCode, test as atest, web, App};
     use governor::{clock::FakeRelativeClock, state::keyed::HashMapStateStore, Quota, RateLimiter};
     use std::num::NonZeroU32;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     /// LIMIT-06: above the cap, the callback fires with the actual length.

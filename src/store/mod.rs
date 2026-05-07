@@ -107,6 +107,9 @@ impl TokenStore {
         removed
     }
 
+    // Exposed for diagnostics and future admin tooling; not yet wired into
+    // any handler.
+    #[allow(dead_code)]
     pub async fn count(&self) -> usize {
         self.tokens.read().await.len()
     }
