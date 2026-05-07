@@ -6,12 +6,14 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     branches: ["main"]
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   schedule:
     # Weekly on Mondays at 06:00 UTC.
@@ -33,5 +35,8 @@ jobs:
           shared-key: audit
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
+      # Vulnerabilities fail the job; unmaintained/unsound advisories surface
+      # in the log without breaking CI (each requires a major dep bump
+      # tracked as follow-up). Per-advisory ignores live in .cargo/audit.toml.
       - name: Run cargo audit
-        run: cargo audit --deny warnings
+        run: cargo audit

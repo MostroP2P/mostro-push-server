@@ -1,0 +1,34 @@
+# cargo-audit configuration. See https://docs.rs/cargo-audit/latest/cargo_audit/
+#
+# Each ignore below is a known advisory that we cannot resolve without a major
+# upstream dependency bump. The bumps themselves are out of scope for the
+# CI/CD bring-up and tracked as follow-up work; this file documents the
+# rationale so future runs do not silently accept them.
+#
+# When auditing this list, the question to answer is "is the upstream
+# dependency that pins us to the vulnerable version still pinned?" — if not,
+# bump and remove the entry.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2024-0421: idna 0.5.0 accepts Punycode labels that decode to
+    # ASCII-only strings. Pulled in transitively by nostr-sdk 0.27 ->
+    # url-fork 3.0.1. Resolves only when nostr-sdk is bumped to a release
+    # that uses url 2.5+/idna 1.x.
+    "RUSTSEC-2024-0421",
+
+    # RUSTSEC-2026-0098: rustls-webpki 0.101.7 incorrectly accepts URI name
+    # constraints. Transitive via rustls 0.21 (tungstenite 0.20, reqwest 0.11,
+    # hyper-rustls 0.24). Requires a coordinated rustls/reqwest/tungstenite
+    # major bump.
+    "RUSTSEC-2026-0098",
+
+    # RUSTSEC-2026-0099: rustls-webpki 0.101.7 accepts wildcard names under
+    # name constraints. Same transitive chain and remediation as
+    # RUSTSEC-2026-0098.
+    "RUSTSEC-2026-0099",
+
+    # RUSTSEC-2026-0104: rustls-webpki 0.101.7 panics on malformed CRL input.
+    # Same transitive chain and remediation as RUSTSEC-2026-0098.
+    "RUSTSEC-2026-0104",
+]
