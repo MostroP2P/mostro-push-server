@@ -18,7 +18,6 @@ pub struct NostrConfig {
     pub relays: Vec<String>,
     pub subscription_id: String,
     pub event_kinds: Vec<u64>,
-    pub mostro_pubkey: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,9 +41,9 @@ pub struct RateLimitConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotifyRateLimitConfig {
-    pub per_pubkey_per_min: u32,        // NOTIFY_RATE_PER_PUBKEY_PER_MIN, default 30 (D-01)
-    pub per_ip_per_min: u32,            // NOTIFY_RATE_PER_IP_PER_MIN, default 120 (D-02)
-    pub cleanup_interval_secs: u64,     // NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS, default 60 (D-16)
+    pub per_pubkey_per_min: u32, // NOTIFY_RATE_PER_PUBKEY_PER_MIN, default 30 (D-01)
+    pub per_ip_per_min: u32,     // NOTIFY_RATE_PER_IP_PER_MIN, default 120 (D-02)
+    pub cleanup_interval_secs: u64, // NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS, default 60 (D-16)
     pub pubkey_limiter_soft_cap: usize, // NOTIFY_PUBKEY_LIMITER_SOFT_CAP, default 100000 (D-17)
     // NOTIFY_TRUST_PROXY_HEADERS, default false. Set to true ONLY when the
     // server sits behind a proxy that overwrites Fly-Client-IP / X-Forwarded-For
@@ -71,19 +70,11 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect();
 
-        // Read Mostro instance public key from environment.
-        // Default to the main Mostro instance pubkey (matches deploy-fly.sh).
-        let mostro_pubkey = env::var("MOSTRO_PUBKEY")
-            .unwrap_or_else(|_| {
-                "82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390".to_string()
-            });
-
         Ok(Config {
             nostr: NostrConfig {
                 relays,
                 subscription_id: "mostro-push-listener".to_string(),
                 event_kinds: vec![1059],
-                mostro_pubkey,
             },
             push: PushConfig {
                 fcm_enabled: env::var("FCM_ENABLED")
@@ -100,8 +91,7 @@ impl Config {
                     .parse()?,
             },
             server: ServerConfig {
-                host: env::var("SERVER_HOST")
-                    .unwrap_or_else(|_| "0.0.0.0".to_string()),
+                host: env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
                 port: env::var("SERVER_PORT")
                     .unwrap_or_else(|_| "8080".to_string())
                     .parse()?,
@@ -114,8 +104,9 @@ impl Config {
             // Phase 3: Crypto config is optional (encryption disabled)
             // Phase 4 will require SERVER_PRIVATE_KEY
             crypto: CryptoConfig {
-                server_private_key: env::var("SERVER_PRIVATE_KEY")
-                    .unwrap_or_else(|_| "0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+                server_private_key: env::var("SERVER_PRIVATE_KEY").unwrap_or_else(|_| {
+                    "0000000000000000000000000000000000000000000000000000000000000001".to_string()
+                }),
             },
             store: StoreConfig {
                 token_ttl_hours: env::var("TOKEN_TTL_HOURS")
@@ -187,44 +178,20 @@ mod tests {
         std::env::set_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN", "0");
         std::env::set_var("NOTIFY_RATE_PER_IP_PER_MIN", "120");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
-        std::env::set_var("MOSTRO_PUBKEY", "0".repeat(64));
 
         let result = Config::from_env();
 
         std::env::remove_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN");
         std::env::remove_var("NOTIFY_RATE_PER_IP_PER_MIN");
         std::env::remove_var("NOSTR_RELAYS");
-        std::env::remove_var("MOSTRO_PUBKEY");
 
-        let err = result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_PUBKEY_PER_MIN=0");
+        let err =
+            result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_PUBKEY_PER_MIN=0");
         let msg = err.to_string();
         assert!(
             msg.contains("NOTIFY_RATE_PER_PUBKEY_PER_MIN must be > 0"),
             "expected D-04 error message, got: {}",
             msg
-        );
-    }
-
-    /// Regression: when MOSTRO_PUBKEY is unset, Config::from_env must use the
-    /// documented main Mostro instance pubkey (matches deploy-fly.sh) rather
-    /// than a stale fallback. Guards against the duplicate-read bug where the
-    /// first lookup (with the documented default) was discarded and a second
-    /// lookup with a different default populated NostrConfig::mostro_pubkey.
-    #[test]
-    fn defaults_mostro_pubkey_to_main_instance_when_unset() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var("MOSTRO_PUBKEY");
-        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
-
-        let result = Config::from_env();
-
-        std::env::remove_var("NOSTR_RELAYS");
-
-        let cfg = result.expect("Config::from_env must succeed with MOSTRO_PUBKEY unset");
-        assert_eq!(
-            cfg.nostr.mostro_pubkey,
-            "82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390",
-            "default MOSTRO_PUBKEY must match deploy-fly.sh and the comment in Config::from_env"
         );
     }
 
@@ -235,14 +202,12 @@ mod tests {
         std::env::set_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN", "30");
         std::env::set_var("NOTIFY_RATE_PER_IP_PER_MIN", "0");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
-        std::env::set_var("MOSTRO_PUBKEY", "0".repeat(64));
 
         let result = Config::from_env();
 
         std::env::remove_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN");
         std::env::remove_var("NOTIFY_RATE_PER_IP_PER_MIN");
         std::env::remove_var("NOSTR_RELAYS");
-        std::env::remove_var("MOSTRO_PUBKEY");
 
         let err = result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_IP_PER_MIN=0");
         let msg = err.to_string();

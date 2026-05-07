@@ -1,22 +1,31 @@
 use actix_web::middleware::from_fn;
 use actix_web::{web, HttpResponse, Responder};
-use serde::{Deserialize, Serialize};
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::api::rate_limit::{per_ip_rate_limit_mw, PerPubkeyLimiter};
 use crate::push::PushDispatcher;
-use crate::store::{TokenStore, TokenStoreStats, Platform};
+use crate::store::{Platform, TokenStore, TokenStoreStats};
 use crate::utils::log_pubkey::log_pubkey;
 
-/// Request for registering a plaintext token (Phase 3 - unencrypted)
+/// Request for registering a plaintext token (Phase 3 - unencrypted).
+///
+/// `mostro_pubkey` is the hex pubkey (64 chars) of the Mostro instance the
+/// client is using. It is optional on the wire to keep the JSON shape
+/// backward-compatible, but it is REQUIRED in practice when the trusted
+/// Mostro pubkey whitelist is non-empty (see `AppState::trusted_mostro_pubkeys`).
+/// When the whitelist is empty the field is ignored.
 #[derive(Deserialize)]
 pub struct RegisterTokenRequest {
     pub trade_pubkey: String,
     pub token: String,
     pub platform: String,
+    #[serde(default)]
+    pub mostro_pubkey: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -46,6 +55,10 @@ pub struct AppState {
     pub semaphore: Arc<Semaphore>,
     pub notify_log_salt: Arc<[u8; 32]>,
     pub per_pubkey_limiter: Arc<PerPubkeyLimiter>,
+    /// Whitelist of trusted Mostro instance pubkeys (hex, 64 chars).
+    /// Empty set disables the whitelist (permissive mode); a populated set
+    /// activates the filter on `/api/register`.
+    pub trusted_mostro_pubkeys: Arc<HashSet<String>>,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -73,9 +86,7 @@ async fn health_check() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({"status": "ok"}))
 }
 
-async fn status(
-    state: web::Data<AppState>,
-) -> impl Responder {
+async fn status(state: web::Data<AppState>) -> impl Responder {
     let stats = state.token_store.get_stats().await;
 
     HttpResponse::Ok().json(StatusResponse {
@@ -132,18 +143,62 @@ async fn register_token(
             warn!("Invalid platform: {}", req.platform);
             return HttpResponse::BadRequest().json(RegisterResponse {
                 success: false,
-                message: format!("Invalid platform '{}' (expected 'android' or 'ios')", req.platform),
+                message: format!(
+                    "Invalid platform '{}' (expected 'android' or 'ios')",
+                    req.platform
+                ),
                 platform: None,
             });
         }
     };
 
+    // Trusted Mostro instance whitelist. Empty set => permissive mode
+    // (mostro_pubkey ignored). Populated set => the client MUST declare a
+    // mostro_pubkey present in the list, otherwise registration is denied.
+    // Honor-system filter only: there is no cryptographic proof that the
+    // device actually uses the declared instance. This will be hardened in a
+    // future phase when registration carries a signature from the daemon.
+    if !state.trusted_mostro_pubkeys.is_empty() {
+        match req.mostro_pubkey.as_deref() {
+            None => {
+                warn!("Register denied: mostro_pubkey missing while whitelist active");
+                return HttpResponse::Forbidden().json(RegisterResponse {
+                    success: false,
+                    message: "Mostro instance not trusted".to_string(),
+                    platform: None,
+                });
+            }
+            Some(mostro_pk) => {
+                if mostro_pk.len() != 64 || hex::decode(mostro_pk).is_err() {
+                    warn!("Invalid mostro_pubkey format");
+                    return HttpResponse::BadRequest().json(RegisterResponse {
+                        success: false,
+                        message: "Invalid mostro_pubkey format (expected 64 hex characters)"
+                            .to_string(),
+                        platform: None,
+                    });
+                }
+                if !state.trusted_mostro_pubkeys.contains(mostro_pk) {
+                    warn!("Register denied: untrusted Mostro instance");
+                    return HttpResponse::Forbidden().json(RegisterResponse {
+                        success: false,
+                        message: "Mostro instance not trusted".to_string(),
+                        platform: None,
+                    });
+                }
+            }
+        }
+    }
+
     // Store the token directly (no decryption in Phase 3)
-    state.token_store.register(
-        req.trade_pubkey.clone(),
-        req.token.clone(),
-        platform.clone(),
-    ).await;
+    state
+        .token_store
+        .register(
+            req.trade_pubkey.clone(),
+            req.token.clone(),
+            platform.clone(),
+        )
+        .await;
 
     info!(
         "Successfully registered {} token pk={}",
@@ -194,8 +249,11 @@ async fn unregister_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::test_support::{
+        build_test_actix_app, make_test_components, make_test_components_with_trusted_whitelist,
+        TEST_PUBKEY, TEST_PUBKEY_2, TRUSTED_MOSTRO_PUBKEY, UNTRUSTED_MOSTRO_PUBKEY,
+    };
     use actix_web::{http::StatusCode, test as atest};
-    use crate::api::test_support::{make_test_components, build_test_actix_app, TEST_PUBKEY, TEST_PUBKEY_2};
 
     /// VERIFY-02 / D-24 #6: /api/register success body is BYTE-IDENTICAL to
     /// the pre-milestone fixture. RegisterResponse field order
@@ -388,7 +446,11 @@ mod tests {
                 .insert_header(("Fly-Client-IP", "8.8.8.8"))
                 .to_request();
             let resp = atest::call_service(&app, req).await;
-            assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "/api/info must not 429");
+            assert_ne!(
+                resp.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "/api/info must not 429"
+            );
         }
 
         for _ in 0..50 {
@@ -397,7 +459,11 @@ mod tests {
                 .insert_header(("Fly-Client-IP", "8.8.8.8"))
                 .to_request();
             let resp = atest::call_service(&app, req).await;
-            assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "/api/status must not 429");
+            assert_ne!(
+                resp.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "/api/status must not 429"
+            );
         }
 
         // /api/register: 50 distinct pubkeys to avoid TokenStore deduplication.
@@ -413,7 +479,131 @@ mod tests {
                 }))
                 .to_request();
             let resp = atest::call_service(&app, req).await;
-            assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "/api/register must not 429");
+            assert_ne!(
+                resp.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "/api/register must not 429"
+            );
         }
+    }
+
+    /// Whitelist active, declared mostro_pubkey is in the list -> 200.
+    #[actix_web::test]
+    async fn register_with_trusted_mostro_pubkey_succeeds() {
+        let c = make_test_components_with_trusted_whitelist();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "test_fcm_token",
+                "platform": "android",
+                "mostro_pubkey": TRUSTED_MOSTRO_PUBKEY
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = atest::read_body(resp).await;
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str,
+            r#"{"success":true,"message":"Token registered successfully","platform":"android"}"#
+        );
+    }
+
+    /// Whitelist active, declared mostro_pubkey NOT in the list -> 403.
+    #[actix_web::test]
+    async fn register_with_untrusted_mostro_pubkey_returns_403() {
+        let c = make_test_components_with_trusted_whitelist();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "test_fcm_token",
+                "platform": "android",
+                "mostro_pubkey": UNTRUSTED_MOSTRO_PUBKEY
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = atest::read_body(resp).await;
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str,
+            r#"{"success":false,"message":"Mostro instance not trusted"}"#
+        );
+    }
+
+    /// Whitelist active, mostro_pubkey field omitted -> 403 (same body as untrusted).
+    #[actix_web::test]
+    async fn register_without_mostro_pubkey_when_whitelist_active_returns_403() {
+        let c = make_test_components_with_trusted_whitelist();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "test_fcm_token",
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = atest::read_body(resp).await;
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str,
+            r#"{"success":false,"message":"Mostro instance not trusted"}"#
+        );
+    }
+
+    /// Whitelist active, mostro_pubkey malformed -> 400 (distinct from 403).
+    #[actix_web::test]
+    async fn register_with_malformed_mostro_pubkey_returns_400() {
+        let c = make_test_components_with_trusted_whitelist();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "test_fcm_token",
+                "platform": "android",
+                "mostro_pubkey": "tooshort"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = atest::read_body(resp).await;
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str,
+            r#"{"success":false,"message":"Invalid mostro_pubkey format (expected 64 hex characters)"}"#
+        );
+    }
+
+    /// Whitelist empty (default), mostro_pubkey field absent -> 200. Confirms
+    /// permissive mode does not require the new field. Distinct from
+    /// register_success_body_is_byte_identical: that test guards the response
+    /// fixture; this one guards the whitelist-disabled control flow.
+    #[actix_web::test]
+    async fn register_without_mostro_pubkey_when_whitelist_empty_succeeds() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY_2,
+                "token": "test_fcm_token",
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

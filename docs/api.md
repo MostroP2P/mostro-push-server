@@ -69,15 +69,17 @@ Request:
 {
   "trade_pubkey": "<64-char hex>",
   "token": "<fcm-or-unifiedpush-token>",
-  "platform": "android"
+  "platform": "android",
+  "mostro_pubkey": "<64-char hex of the Mostro instance>"
 }
 ```
 
-| Field          | Type   | Description                                              |
-|----------------|--------|----------------------------------------------------------|
-| `trade_pubkey` | string | 64 hex characters                                        |
-| `token`        | string | FCM device token, or UnifiedPush endpoint URL            |
-| `platform`     | string | `"android"` or `"ios"`                                   |
+| Field           | Type   | Description                                                                                                            |
+|-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
+| `trade_pubkey`  | string | 64 hex characters                                                                                                      |
+| `token`         | string | FCM device token, or UnifiedPush endpoint URL                                                                          |
+| `platform`      | string | `"android"` or `"ios"`                                                                                                 |
+| `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
 Success — `200 OK`:
 
@@ -103,6 +105,23 @@ Possible validation errors:
 - `trade_pubkey` not 64 hex characters
 - `token` empty
 - `platform` not `"android"` or `"ios"`
+- `mostro_pubkey` present but not 64 hex characters
+
+Trusted-instance filter — `403 Forbidden`:
+
+```json
+{
+  "success": false,
+  "message": "Mostro instance not trusted"
+}
+```
+
+Returned when the trusted Mostro instance whitelist is non-empty AND the
+client either omitted `mostro_pubkey` or sent a value that is not on the
+whitelist. The whitelist is compiled into the binary from
+`config/trusted_mostro_pubkeys.json`; see [configuration.md](./configuration.md).
+This filter is honour-system: there is no cryptographic proof binding the
+device to the declared instance.
 
 ## POST /api/unregister
 

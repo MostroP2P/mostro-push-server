@@ -18,9 +18,24 @@ cp .env.example .env
 
 ## Nostr listener
 
-| Variable        | Default                                                              | Description                                              |
-|-----------------|----------------------------------------------------------------------|----------------------------------------------------------|
-| `MOSTRO_PUBKEY` | `82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390`   | Hex pubkey of the Mostro daemon. Used for log context only — it is NOT applied as an `authors` filter on the listener (privacy invariant; see [architecture.md](./architecture.md)). |
+The listener has no instance-specific configuration. It does NOT filter
+events by `authors` (privacy invariant; see [architecture.md](./architecture.md)).
+
+## Trusted Mostro instance whitelist
+
+The set of Mostro instance pubkeys allowed to register devices is compiled
+into the binary from `config/trusted_mostro_pubkeys.json` at build time.
+
+- The file must contain a JSON array of 64-character hex pubkeys.
+- An empty array disables the whitelist (permissive mode); any client may
+  register without declaring a `mostro_pubkey`.
+- A non-empty array activates the filter on `/api/register`: clients must
+  send a `mostro_pubkey` field whose value matches one of the entries,
+  otherwise the request is rejected with `403 Forbidden`.
+- The file is parsed at startup; malformed JSON or any entry that is not
+  64 hex characters causes the process to panic immediately (fail-fast).
+
+To change the list, edit `config/trusted_mostro_pubkeys.json` and rebuild.
 
 ## HTTP server
 
@@ -87,7 +102,6 @@ RUST_LOG=mostro_push_backend=debug,actix_web=info
 ```bash
 # Nostr
 NOSTR_RELAYS=wss://relay.mostro.network
-MOSTRO_PUBKEY=82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390
 
 # Server
 SERVER_HOST=0.0.0.0

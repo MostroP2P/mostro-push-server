@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -7,7 +8,9 @@ use async_trait::async_trait;
 use governor::{Quota, RateLimiter};
 use rand::RngCore;
 
-use crate::api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST};
+use crate::api::rate_limit::{
+    PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
+};
 use crate::api::routes::{configure, AppState};
 use crate::push::{PushDispatcher, PushService};
 use crate::store::{Platform, TokenStore};
@@ -66,13 +69,25 @@ pub fn test_per_pubkey_quota() -> Quota {
 
 /// Per-IP quota for tests: 120/min burst IP_BURST (mirrors production D-02).
 pub fn test_per_ip_quota() -> Quota {
-    Quota::per_minute(NonZeroU32::new(120).unwrap())
-        .allow_burst(NonZeroU32::new(IP_BURST).unwrap())
+    Quota::per_minute(NonZeroU32::new(120).unwrap()).allow_burst(NonZeroU32::new(IP_BURST).unwrap())
 }
 
 /// Build a test AppState + per-IP limiter pair using fresh in-memory limiters.
 /// Returns (state, per_ip_limiter) so callers can assert against the stub.
+///
+/// Defaults `trusted_mostro_pubkeys` to an empty set (whitelist disabled —
+/// permissive mode). Tests that exercise the whitelist must override this via
+/// [`make_app_state_with_whitelist`].
 pub fn make_app_state(stub: Arc<StubPushService>) -> (AppState, Arc<PerIpLimiter>) {
+    make_app_state_with_whitelist(stub, Arc::new(HashSet::new()))
+}
+
+/// Variant of [`make_app_state`] that injects an explicit trusted-Mostro
+/// whitelist. A non-empty set activates the whitelist filter on /api/register.
+pub fn make_app_state_with_whitelist(
+    stub: Arc<StubPushService>,
+    trusted_mostro_pubkeys: Arc<HashSet<String>>,
+) -> (AppState, Arc<PerIpLimiter>) {
     let services: Vec<(Arc<dyn PushService>, &'static str)> =
         vec![(stub.clone() as Arc<dyn PushService>, "stub")];
     let dispatcher = Arc::new(PushDispatcher::new(services));
@@ -86,8 +101,7 @@ pub fn make_app_state(stub: Arc<StubPushService>) -> (AppState, Arc<PerIpLimiter
 
     let per_pubkey_limiter: Arc<PerPubkeyLimiter> =
         Arc::new(RateLimiter::keyed(test_per_pubkey_quota()));
-    let per_ip_limiter: Arc<PerIpLimiter> =
-        Arc::new(RateLimiter::keyed(test_per_ip_quota()));
+    let per_ip_limiter: Arc<PerIpLimiter> = Arc::new(RateLimiter::keyed(test_per_ip_quota()));
 
     let state = AppState {
         token_store,
@@ -95,6 +109,7 @@ pub fn make_app_state(stub: Arc<StubPushService>) -> (AppState, Arc<PerIpLimiter
         semaphore,
         notify_log_salt,
         per_pubkey_limiter,
+        trusted_mostro_pubkeys,
     };
 
     (state, per_ip_limiter)
@@ -117,22 +132,46 @@ pub struct TestAppComponents {
 /// Call `test::init_service(build_actix_app(&components))` in each test.
 ///
 /// Convenience for tests that don't need to register pubkeys ahead of time.
+/// Defaults to an empty trusted-Mostro whitelist (permissive mode).
 pub fn make_test_components() -> TestAppComponents {
     let stub = Arc::new(StubPushService::new(vec![Platform::Android]));
     let (state, per_ip_limiter) = make_app_state(stub.clone());
-    TestAppComponents { state, per_ip_limiter, stub }
+    TestAppComponents {
+        state,
+        per_ip_limiter,
+        stub,
+    }
+}
+
+/// Variant of [`make_test_components`] with the trusted-Mostro whitelist
+/// pre-populated with [`TRUSTED_MOSTRO_PUBKEY`]. Use for tests exercising the
+/// /api/register whitelist filter.
+pub fn make_test_components_with_trusted_whitelist() -> TestAppComponents {
+    let stub = Arc::new(StubPushService::new(vec![Platform::Android]));
+    let mut whitelist = HashSet::new();
+    whitelist.insert(TRUSTED_MOSTRO_PUBKEY.to_string());
+    let (state, per_ip_limiter) = make_app_state_with_whitelist(stub.clone(), Arc::new(whitelist));
+    TestAppComponents {
+        state,
+        per_ip_limiter,
+        stub,
+    }
 }
 
 /// Build an `App` from test components, ready for `test::init_service(...)`.
 /// Each test calls `test::init_service(build_test_actix_app(c))` to obtain
 /// the opaque `impl Service<Request, ...>` whose type is inferred by the compiler.
-pub fn build_test_actix_app(c: TestAppComponents) -> App<impl actix_web::dev::ServiceFactory<
-    actix_web::dev::ServiceRequest,
-    Config = (),
-    Response = actix_web::dev::ServiceResponse<actix_web::body::BoxBody>,
-    Error = actix_web::Error,
-    InitError = (),
->> {
+pub fn build_test_actix_app(
+    c: TestAppComponents,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<actix_web::body::BoxBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+> {
     App::new()
         .app_data(web::Data::new(c.state))
         .app_data(web::Data::new(c.per_ip_limiter))
@@ -154,20 +193,25 @@ macro_rules! make_test_app {
     () => {{
         let c = $crate::api::test_support::make_test_components();
         let stub = c.stub.clone();
-        let app = actix_web::test::init_service(
-            $crate::api::test_support::build_test_actix_app(c)
-        ).await;
+        let app =
+            actix_web::test::init_service($crate::api::test_support::build_test_actix_app(c)).await;
         (app, stub)
     }};
 }
 
 /// Deterministic 64-hex pubkey fixture used across tests.
-pub const TEST_PUBKEY: &str =
-    "1111111111111111111111111111111111111111111111111111111111111111";
+pub const TEST_PUBKEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 /// Second distinct 64-hex pubkey fixture (canonical "unregistered but format-valid").
-pub const TEST_PUBKEY_2: &str =
-    "2222222222222222222222222222222222222222222222222222222222222222";
+pub const TEST_PUBKEY_2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+/// 64-hex Mostro instance pubkey that whitelist-aware tests treat as trusted.
+pub const TRUSTED_MOSTRO_PUBKEY: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// 64-hex Mostro instance pubkey that whitelist-aware tests treat as untrusted.
+pub const UNTRUSTED_MOSTRO_PUBKEY: &str =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 /// Produce a deterministic 64-hex pubkey from an integer seed.
 /// Used by per-IP tests that rotate pubkeys to avoid the per-pubkey limiter

@@ -1,6 +1,5 @@
-use log::{info, error, warn, debug};
+use log::{debug, error, info, warn};
 use nostr_sdk::prelude::*;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -13,7 +12,6 @@ pub struct NostrListener {
     config: Config,
     dispatcher: Arc<PushDispatcher>,
     token_store: Arc<TokenStore>,
-    mostro_pubkey: String,
     log_salt: Arc<[u8; 32]>,
 }
 
@@ -24,20 +22,10 @@ impl NostrListener {
         token_store: Arc<TokenStore>,
         log_salt: Arc<[u8; 32]>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Validate the pubkey format
-        let mostro_pubkey = config.nostr.mostro_pubkey.clone();
-        if mostro_pubkey.len() != 64 {
-            return Err("Invalid MOSTRO_PUBKEY format (expected 64 hex characters)".into());
-        }
-        // Validate it's valid hex by trying to parse it
-        XOnlyPublicKey::from_str(&mostro_pubkey)
-            .map_err(|_| "Invalid MOSTRO_PUBKEY (not a valid public key)")?;
-
         Ok(Self {
             config,
             dispatcher,
             token_store,
-            mostro_pubkey,
             log_salt,
         })
     }
@@ -49,7 +37,10 @@ impl NostrListener {
                     warn!("Nostr connection closed, reconnecting in 5 seconds...");
                 }
                 Err(e) => {
-                    error!("Error in Nostr listener: {}, reconnecting in 10 seconds...", e);
+                    error!(
+                        "Error in Nostr listener: {}, reconnecting in 10 seconds...",
+                        e
+                    );
                     sleep(Duration::from_secs(10)).await;
                 }
             }
@@ -80,9 +71,7 @@ impl NostrListener {
         //     A mostro_pubkey author filter would silently drop every dispute notification.
         // See PROJECT.md anti-requirement OOS-19 / PITFALLS CRIT-1.
         let since = Timestamp::now() - Duration::from_secs(60);
-        let filter = Filter::new()
-            .kinds(vec![Kind::Custom(1059)])
-            .since(since);
+        let filter = Filter::new().kinds(vec![Kind::Custom(1059)]).since(since);
 
         // Subscribe to events
         client.subscribe(vec![filter]).await;
