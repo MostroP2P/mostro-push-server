@@ -34,7 +34,6 @@ Or do it by hand:
 ```bash
 flyctl secrets set \
   NOSTR_RELAYS="wss://relay.mostro.network" \
-  MOSTRO_PUBKEY="82fa8cb978b43c79b2156585bac2c011176a21d2aead6d9f7c575c005be88390" \
   FIREBASE_PROJECT_ID="your-project-id" \
   FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/firebase-service-account.json" \
   FCM_ENABLED="true" \

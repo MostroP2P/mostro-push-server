@@ -5,7 +5,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use log::{debug, error};
-use secp256k1::{PublicKey, SecretKey, Secp256k1};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::Serialize;
 use sha2::Sha256;
 
@@ -19,7 +19,8 @@ const PADDED_PAYLOAD_SIZE: usize = 220;
 const EPHEMERAL_PUBKEY_SIZE: usize = 33;
 const NONCE_SIZE: usize = 12;
 const AUTH_TAG_SIZE: usize = 16;
-pub const ENCRYPTED_TOKEN_SIZE: usize = EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE + PADDED_PAYLOAD_SIZE + AUTH_TAG_SIZE;
+pub const ENCRYPTED_TOKEN_SIZE: usize =
+    EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE + PADDED_PAYLOAD_SIZE + AUTH_TAG_SIZE;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Platform {
@@ -68,15 +69,15 @@ pub struct TokenCrypto {
 impl TokenCrypto {
     pub fn new(secret_key_hex: &str) -> Result<Self, CryptoError> {
         let secp = Secp256k1::new();
-        
-        let secret_key_bytes = hex::decode(secret_key_hex)
-            .map_err(|_| CryptoError::InvalidSecretKey)?;
-        
-        let secret_key = SecretKey::from_slice(&secret_key_bytes)
-            .map_err(|_| CryptoError::InvalidSecretKey)?;
-        
+
+        let secret_key_bytes =
+            hex::decode(secret_key_hex).map_err(|_| CryptoError::InvalidSecretKey)?;
+
+        let secret_key =
+            SecretKey::from_slice(&secret_key_bytes).map_err(|_| CryptoError::InvalidSecretKey)?;
+
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-        
+
         Ok(Self {
             secret_key,
             public_key,
@@ -100,7 +101,8 @@ impl TokenCrypto {
 
         // Extract components
         let ephemeral_pubkey_bytes = &encrypted_token[0..EPHEMERAL_PUBKEY_SIZE];
-        let nonce_bytes = &encrypted_token[EPHEMERAL_PUBKEY_SIZE..EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE];
+        let nonce_bytes =
+            &encrypted_token[EPHEMERAL_PUBKEY_SIZE..EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE];
         let ciphertext = &encrypted_token[EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE..];
 
         debug!("Ephemeral pubkey: {}", hex::encode(ephemeral_pubkey_bytes));
@@ -108,11 +110,10 @@ impl TokenCrypto {
         debug!("Ciphertext length: {}", ciphertext.len());
 
         // Parse ephemeral public key
-        let ephemeral_pubkey = PublicKey::from_slice(ephemeral_pubkey_bytes)
-            .map_err(|e| {
-                error!("Failed to parse ephemeral pubkey: {}", e);
-                CryptoError::InvalidEphemeralKey
-            })?;
+        let ephemeral_pubkey = PublicKey::from_slice(ephemeral_pubkey_bytes).map_err(|e| {
+            error!("Failed to parse ephemeral pubkey: {}", e);
+            CryptoError::InvalidEphemeralKey
+        })?;
 
         // Derive shared secret via ECDH
         let shared_point = secp256k1::ecdh::SharedSecret::new(&ephemeral_pubkey, &self.secret_key);
@@ -129,12 +130,10 @@ impl TokenCrypto {
             .map_err(|_| CryptoError::CipherError)?;
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let padded_payload = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| {
-                error!("Decryption failed: {}", e);
-                CryptoError::DecryptionFailed
-            })?;
+        let padded_payload = cipher.decrypt(nonce, ciphertext).map_err(|e| {
+            error!("Decryption failed: {}", e);
+            CryptoError::DecryptionFailed
+        })?;
 
         if padded_payload.len() != PADDED_PAYLOAD_SIZE {
             error!(
@@ -154,14 +153,16 @@ impl TokenCrypto {
             return Err(CryptoError::InvalidTokenLength);
         }
 
-        let platform = Platform::from_byte(platform_byte)
-            .ok_or(CryptoError::InvalidPlatform)?;
+        let platform = Platform::from_byte(platform_byte).ok_or(CryptoError::InvalidPlatform)?;
 
         let device_token_bytes = &padded_payload[3..3 + token_length];
         let device_token = String::from_utf8(device_token_bytes.to_vec())
             .map_err(|_| CryptoError::InvalidTokenEncoding)?;
 
-        debug!("Decrypted token for platform {:?}, length {}", platform, token_length);
+        debug!(
+            "Decrypted token for platform {:?}, length {}",
+            platform, token_length
+        );
 
         Ok(DecryptedToken {
             platform,
@@ -245,7 +246,8 @@ impl TokenCrypto {
 
         // Extract components
         let ephemeral_pubkey_bytes = &encrypted_token[0..EPHEMERAL_PUBKEY_SIZE];
-        let nonce_bytes = &encrypted_token[EPHEMERAL_PUBKEY_SIZE..EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE];
+        let nonce_bytes =
+            &encrypted_token[EPHEMERAL_PUBKEY_SIZE..EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE];
         let ciphertext = &encrypted_token[EPHEMERAL_PUBKEY_SIZE + NONCE_SIZE..];
 
         result.ephemeral_pubkey_hex = hex::encode(ephemeral_pubkey_bytes);
@@ -317,12 +319,14 @@ impl TokenCrypto {
         if let Some(platform) = Platform::from_byte(platform_byte) {
             result.platform = Some(platform.to_string());
         } else {
-            result.decryption_error = Some(format!("Invalid platform byte: 0x{:02x}", platform_byte));
+            result.decryption_error =
+                Some(format!("Invalid platform byte: 0x{:02x}", platform_byte));
             return result;
         }
 
         if token_length > PADDED_PAYLOAD_SIZE - 3 {
-            result.decryption_error = Some(format!("Token length {} exceeds maximum", token_length));
+            result.decryption_error =
+                Some(format!("Token length {} exceeds maximum", token_length));
             return result;
         }
 
@@ -374,7 +378,9 @@ pub fn encrypt_token_like_client(
     // ChaCha20-Poly1305 encrypt
     let cipher = ChaCha20Poly1305::new_from_slice(&encryption_key).unwrap();
     let nonce_obj = Nonce::from_slice(nonce);
-    let ciphertext = cipher.encrypt(nonce_obj, padded_payload.as_slice()).unwrap();
+    let ciphertext = cipher
+        .encrypt(nonce_obj, padded_payload.as_slice())
+        .unwrap();
 
     // Format: ephemeral_pubkey(33) || nonce(12) || ciphertext(236)
     let mut encrypted_token = Vec::with_capacity(ENCRYPTED_TOKEN_SIZE);
@@ -429,7 +435,9 @@ pub fn encrypt_token_with_debug(
     // Encrypt
     let cipher = ChaCha20Poly1305::new_from_slice(&encryption_key).unwrap();
     let nonce_obj = Nonce::from_slice(nonce);
-    let ciphertext = cipher.encrypt(nonce_obj, padded_payload.as_slice()).unwrap();
+    let ciphertext = cipher
+        .encrypt(nonce_obj, padded_payload.as_slice())
+        .unwrap();
 
     // Combine
     let mut encrypted_token = Vec::with_capacity(ENCRYPTED_TOKEN_SIZE);
@@ -514,7 +522,8 @@ mod tests {
         let crypto = TokenCrypto::new(&hex::encode(server_secret.secret_bytes())).unwrap();
 
         let device_token = "test_fcm_token_12345";
-        let encrypted = create_test_encrypted_token(&server_pubkey, Platform::Android, device_token);
+        let encrypted =
+            create_test_encrypted_token(&server_pubkey, Platform::Android, device_token);
 
         let decrypted = crypto.decrypt_token(&encrypted).unwrap();
         assert_eq!(decrypted.platform, Platform::Android);
@@ -532,17 +541,21 @@ mod tests {
         println!("\n=== HKDF Isolated Test ===");
 
         // Known test vector: 32 bytes of shared_x
-        let shared_x = hex::decode(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        ).unwrap();
+        let shared_x =
+            hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap();
 
         println!("Input shared_x: {}", hex::encode(&shared_x));
-        println!("HKDF salt: {:?} ({})",
+        println!(
+            "HKDF salt: {:?} ({})",
             String::from_utf8_lossy(HKDF_SALT),
-            hex::encode(HKDF_SALT));
-        println!("HKDF info: {:?} ({})",
+            hex::encode(HKDF_SALT)
+        );
+        println!(
+            "HKDF info: {:?} ({})",
             String::from_utf8_lossy(HKDF_INFO),
-            hex::encode(HKDF_INFO));
+            hex::encode(HKDF_INFO)
+        );
 
         let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &shared_x);
         let mut encryption_key = [0u8; 32];
@@ -556,7 +569,10 @@ mod tests {
 
         // Store expected value for reference
         let expected_key = hex::encode(&encryption_key);
-        println!("\n>>> Flutter client should produce this encryption_key: {}", expected_key);
+        println!(
+            "\n>>> Flutter client should produce this encryption_key: {}",
+            expected_key
+        );
         println!(">>> If it differs, the HKDF parameters or implementation differ");
     }
 
@@ -569,15 +585,20 @@ mod tests {
 
         // Fixed server keypair
         let server_secret_hex = "1111111111111111111111111111111111111111111111111111111111111111";
-        let server_secret = SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
+        let server_secret =
+            SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
         let server_pubkey = PublicKey::from_secret_key(&secp, &server_secret);
 
         // Fixed ephemeral keypair (simulating client)
-        let ephemeral_secret_hex = "2222222222222222222222222222222222222222222222222222222222222222";
-        let ephemeral_secret = SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
+        let ephemeral_secret_hex =
+            "2222222222222222222222222222222222222222222222222222222222222222";
+        let ephemeral_secret =
+            SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
 
         // Fixed nonce
-        let nonce: [u8; 12] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c];
+        let nonce: [u8; 12] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        ];
 
         let device_token = "fcm_test_token_abc123";
         let platform = Platform::Android;
@@ -592,8 +613,10 @@ mod tests {
         );
 
         println!("Encrypted token length: {}", encrypted.len());
-        println!("Encrypted token (base64): {}",
-            base64::engine::general_purpose::STANDARD.encode(&encrypted));
+        println!(
+            "Encrypted token (base64): {}",
+            base64::engine::general_purpose::STANDARD.encode(&encrypted)
+        );
 
         // Decrypt with server
         let crypto = TokenCrypto::new(server_secret_hex).unwrap();
@@ -617,22 +640,33 @@ mod tests {
 
         // Fixed server keypair - SHARE WITH FLUTTER FOR TESTING
         let server_secret_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let server_secret = SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
+        let server_secret =
+            SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
         let server_pubkey = PublicKey::from_secret_key(&secp, &server_secret);
 
         println!("SERVER_PRIVATE_KEY: {}", server_secret_hex);
-        println!("SERVER_PUBLIC_KEY:  {}", hex::encode(server_pubkey.serialize()));
+        println!(
+            "SERVER_PUBLIC_KEY:  {}",
+            hex::encode(server_pubkey.serialize())
+        );
 
         // Fixed ephemeral keypair - FLUTTER CLIENT SHOULD USE THIS
-        let ephemeral_secret_hex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let ephemeral_secret = SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
+        let ephemeral_secret_hex =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let ephemeral_secret =
+            SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
         let ephemeral_pubkey = PublicKey::from_secret_key(&secp, &ephemeral_secret);
 
         println!("\nEPHEMERAL_PRIVATE_KEY: {}", ephemeral_secret_hex);
-        println!("EPHEMERAL_PUBLIC_KEY:  {}", hex::encode(ephemeral_pubkey.serialize()));
+        println!(
+            "EPHEMERAL_PUBLIC_KEY:  {}",
+            hex::encode(ephemeral_pubkey.serialize())
+        );
 
         // Fixed nonce
-        let nonce: [u8; 12] = [0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x12, 0x34, 0x56, 0x78];
+        let nonce: [u8; 12] = [
+            0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x12, 0x34, 0x56, 0x78,
+        ];
         println!("\nNONCE: {}", hex::encode(&nonce));
 
         // Test token
@@ -658,7 +692,10 @@ mod tests {
 
         println!("\n=== FINAL OUTPUT ===");
         println!("encrypted_token (hex):    {}", debug_info.final_token_hex);
-        println!("encrypted_token (base64): {}", debug_info.final_token_base64);
+        println!(
+            "encrypted_token (base64): {}",
+            debug_info.final_token_base64
+        );
 
         // Now verify server can decrypt
         let crypto = TokenCrypto::new(server_secret_hex).unwrap();
@@ -709,11 +746,20 @@ mod tests {
         let shared_ab_bytes = shared_ab.secret_bytes();
         let shared_ba_bytes = shared_ba.secret_bytes();
 
-        println!("\nshared_secret(A_priv * B_pub): {}", hex::encode(&shared_ab_bytes));
-        println!("shared_secret(B_priv * A_pub): {}", hex::encode(&shared_ba_bytes));
+        println!(
+            "\nshared_secret(A_priv * B_pub): {}",
+            hex::encode(&shared_ab_bytes)
+        );
+        println!(
+            "shared_secret(B_priv * A_pub): {}",
+            hex::encode(&shared_ba_bytes)
+        );
 
         // They should be equal (ECDH property)
-        assert_eq!(shared_ab_bytes, shared_ba_bytes, "ECDH shared secrets should match");
+        assert_eq!(
+            shared_ab_bytes, shared_ba_bytes,
+            "ECDH shared secrets should match"
+        );
         println!("\n✓ Shared secrets match (ECDH working correctly)");
 
         // Check if this looks like raw X coordinate or SHA256
@@ -731,7 +777,10 @@ mod tests {
         // Compute what SHA256 would give for comparison
         use sha2::Digest;
         let sha256_of_shared = sha2::Sha256::digest(&shared_ab_bytes);
-        println!("\nFor reference - SHA256(shared_x): {}", hex::encode(&sha256_of_shared));
+        println!(
+            "\nFor reference - SHA256(shared_x): {}",
+            hex::encode(&sha256_of_shared)
+        );
         println!("If Flutter produces this ^^^, they're incorrectly applying SHA256");
     }
 
@@ -742,13 +791,18 @@ mod tests {
 
         let secp = Secp256k1::new();
         let server_secret_hex = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-        let server_secret = SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
+        let server_secret =
+            SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
         let server_pubkey = PublicKey::from_secret_key(&secp, &server_secret);
 
-        let ephemeral_secret_hex = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-        let ephemeral_secret = SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
+        let ephemeral_secret_hex =
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let ephemeral_secret =
+            SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
 
-        let nonce: [u8; 12] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc];
+        let nonce: [u8; 12] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+        ];
 
         // iOS APNs token format (64 hex chars typically)
         let device_token = "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd";
@@ -764,7 +818,10 @@ mod tests {
 
         println!("iOS token encrypted successfully");
         println!("Platform byte: 0x01 (iOS)");
-        println!("encrypted_token (base64): {}", debug_info.final_token_base64);
+        println!(
+            "encrypted_token (base64): {}",
+            debug_info.final_token_base64
+        );
 
         let crypto = TokenCrypto::new(server_secret_hex).unwrap();
         let encrypted = hex::decode(&debug_info.final_token_hex).unwrap();
@@ -782,12 +839,15 @@ mod tests {
 
         let secp = Secp256k1::new();
         let server_secret_hex = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        let server_secret = SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
+        let server_secret =
+            SecretKey::from_slice(&hex::decode(server_secret_hex).unwrap()).unwrap();
         let server_pubkey = PublicKey::from_secret_key(&secp, &server_secret);
 
         // Note: 0xfff...fff is invalid for secp256k1, using a different valid key
-        let ephemeral_secret_hex = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
-        let ephemeral_secret = SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
+        let ephemeral_secret_hex =
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+        let ephemeral_secret =
+            SecretKey::from_slice(&hex::decode(ephemeral_secret_hex).unwrap()).unwrap();
 
         let nonce: [u8; 12] = [0x00; 12];
         let device_token = "test_debug_token";
@@ -804,7 +864,10 @@ mod tests {
         let debug_result = crypto.debug_decrypt_token(&encrypted);
 
         println!("Debug decrypt result:");
-        println!("  ephemeral_pubkey_valid: {}", debug_result.ephemeral_pubkey_valid);
+        println!(
+            "  ephemeral_pubkey_valid: {}",
+            debug_result.ephemeral_pubkey_valid
+        );
         println!("  ephemeral_pubkey: {}", debug_result.ephemeral_pubkey_hex);
         println!("  nonce: {}", debug_result.nonce_hex);
         println!("  ciphertext_len: {}", debug_result.ciphertext_len);

@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use governor::clock::Clock;
 use crate::api::rate_limit::rate_limited_response;
 use crate::api::routes::AppState;
 use crate::utils::log_pubkey::log_pubkey;
+use governor::clock::Clock;
 
 /// Request body for POST /api/notify.
 ///
@@ -57,8 +57,7 @@ pub async fn notify_token(
         warn!("notify: invalid trade_pubkey format");
         return HttpResponse::BadRequest().json(NotifyError {
             success: false,
-            message: "Invalid trade_pubkey format (expected 64 hex characters)"
-                .to_string(),
+            message: "Invalid trade_pubkey format (expected 64 hex characters)".to_string(),
         });
     }
 
@@ -96,14 +95,8 @@ pub async fn notify_token(
                 // CONC-2-safe: get() drops the RwLock before returning.
                 if let Some(token) = token_store.get(&pubkey).await {
                     match dispatcher.dispatch_silent(&token).await {
-                        Ok(_outcome) => info!(
-                            "notify: dispatched pk={}",
-                            task_log_pk
-                        ),
-                        Err(e) => warn!(
-                            "notify: dispatch failed pk={} err={}",
-                            task_log_pk, e
-                        ),
+                        Ok(_outcome) => info!("notify: dispatched pk={}", task_log_pk),
+                        Err(e) => warn!("notify: dispatch failed pk={} err={}", task_log_pk, e),
                     }
                 }
                 // None case (pubkey not registered): silently no-op.
@@ -138,8 +131,7 @@ pub async fn request_id_mw(
 
     res.headers_mut().insert(
         HeaderName::from_static("x-request-id"),
-        HeaderValue::from_str(&id)
-            .expect("uuid string is always valid header value"),
+        HeaderValue::from_str(&id).expect("uuid string is always valid header value"),
     );
     Ok(res)
 }
@@ -147,14 +139,14 @@ pub async fn request_id_mw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{http::StatusCode, test, web, App};
-    use crate::api::routes::configure;
     use crate::api::rate_limit::TrustProxyHeaders;
+    use crate::api::routes::configure;
     use crate::api::test_support::{
-        make_app_state, make_test_components, build_test_actix_app,
-        register_test_pubkey, StubPushService, TEST_PUBKEY, TEST_PUBKEY_2,
+        build_test_actix_app, make_app_state, make_test_components, register_test_pubkey,
+        StubPushService, TEST_PUBKEY, TEST_PUBKEY_2,
     };
     use crate::store::Platform;
+    use actix_web::{http::StatusCode, test, web, App};
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -215,7 +207,11 @@ mod tests {
             .to_request();
 
         let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::ACCEPTED, "anti-CRIT-2 always-202");
+        assert_eq!(
+            resp.status(),
+            StatusCode::ACCEPTED,
+            "anti-CRIT-2 always-202"
+        );
 
         for _ in 0..20 {
             tokio::task::yield_now().await;
@@ -283,8 +279,14 @@ mod tests {
             .expect("x-request-id header MUST be present on every /notify response")
             .to_str()
             .unwrap();
-        assert_ne!(id_value, "spoofed-by-client-12345", "client value must be overwritten");
-        assert!(Uuid::parse_str(id_value).is_ok(), "x-request-id must be UUIDv4 parseable");
+        assert_ne!(
+            id_value, "spoofed-by-client-12345",
+            "client value must be overwritten"
+        );
+        assert!(
+            Uuid::parse_str(id_value).is_ok(),
+            "x-request-id must be UUIDv4 parseable"
+        );
 
         // 400 path — header MUST also be present.
         let req = test::TestRequest::post()

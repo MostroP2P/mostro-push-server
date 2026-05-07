@@ -29,7 +29,9 @@ These are the privacy and compatibility invariants of the project. Reintroducing
    - Inbound `X-Request-Id` is stripped; server generates UUIDv4 per request.
    - Dispatch happens in a `tokio::spawn` task detached from the response, bounded by `Arc<Semaphore>(50)`.
 
-3. **Backwards compatibility of the existing endpoints.** `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` response bodies are byte-identical to fixtures captured before v1.1. Field order on `RegisterResponse` is `success, message, platform`.
+3. **Backwards compatibility of the existing endpoints.** `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` response bodies are byte-identical to fixtures captured before v1.1. Field order on `RegisterResponse` is `success, message, platform`. The `mostro_pubkey` field added to `RegisterTokenRequest` is request-only and does not change response shapes.
+
+   **Exception (off by default):** when `TRUSTED_WHITELIST_ENABLED=true` AND the embedded whitelist is non-empty, `/api/register` MAY return a new `403 Forbidden` with one of two distinct bodies — `{"success":false,"message":"Mostro instance pubkey required"}` (missing field) or `{"success":false,"message":"Mostro instance not trusted"}` (untrusted value). The flag defaults to `false` precisely so the byte-identical fixture set continues to hold for clients that pre-date the feature; only flip it after the mobile rollout.
 
 4. **Token store is in-memory only.** No persistence to disk for `trade_pubkey -> device_token`. UnifiedPush endpoints are the only on-disk state (atomic JSON write to `data/unifiedpush_endpoints.json`).
 
@@ -60,6 +62,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 src/
 ├── main.rs              # Boot + wiring
 ├── config.rs            # Config::from_env (typed env-var loader)
+├── trusted_pubkeys.rs   # Compile-time whitelist (include_str! the JSON below)
 ├── api/
 │   ├── routes.rs        # /health, /info, /status, /register, /unregister + AppState
 │   ├── notify.rs        # /api/notify handler + request_id_mw
@@ -76,7 +79,32 @@ src/
 └── utils/
     ├── log_pubkey.rs    # Salted BLAKE3 keyed hash
     └── batching.rs      # Reserved (unused at runtime)
+
+config/
+└── trusted_mostro_pubkeys.json  # JSON array of 64-hex pubkeys; mirrors mobile/lib/core/config/communities.dart
 ```
+
+## Trusted Mostro instance whitelist
+
+`/api/register` filters registrations against a compile-time whitelist of
+trusted Mostro instance pubkeys, embedded into the binary via
+`include_str!("../config/trusted_mostro_pubkeys.json")`. The mobile client is
+expected to send the pubkey of the selected Mostro instance in the
+`mostro_pubkey` field of the registration body.
+
+- An empty JSON array disables the whitelist (permissive mode); the field
+  is then ignored.
+- A non-empty array activates the filter; missing or unknown
+  `mostro_pubkey` values are rejected with `403 Forbidden`. Malformed
+  values (length or hex) return `400 Bad Request`.
+- This filter is honour-system only — the device cryptographically proves
+  nothing about which Mostro instance it actually uses. It will be hardened
+  in a future phase. Do NOT remove the whitelist code on the basis that it
+  "isn't really enforcing anything"; it deliberately blocks well-behaved
+  clients from arbitrary instances and the harder protocol depends on this
+  field staying in the request shape.
+- The previous `MOSTRO_PUBKEY` environment variable has been removed; it
+  was only used as log context and was never an authors filter.
 
 ## Common commands
 

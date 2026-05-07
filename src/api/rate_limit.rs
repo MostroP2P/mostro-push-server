@@ -108,9 +108,7 @@ pub async fn per_ip_rate_limit_mw(
     req: ServiceRequest,
     next: Next<impl MessageBody + 'static>,
 ) -> Result<ServiceResponse<BoxBody>, Error> {
-    let limiter = req
-        .app_data::<web::Data<Arc<PerIpLimiter>>>()
-        .cloned();
+    let limiter = req.app_data::<web::Data<Arc<PerIpLimiter>>>().cloned();
 
     let limiter = match limiter {
         Some(l) => l,
@@ -214,18 +212,14 @@ pub fn start_keyed_limiter_cleanup_task<K>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use std::num::NonZeroU32;
-    use std::time::Duration;
-    use actix_web::{http::StatusCode, test as atest, web, App};
-    use governor::{
-        clock::FakeRelativeClock,
-        state::keyed::HashMapStateStore,
-        Quota, RateLimiter,
-    };
     use crate::api::test_support::{
-        make_test_components, build_test_actix_app, seed_hex_pubkey, TEST_PUBKEY,
+        build_test_actix_app, make_test_components, seed_hex_pubkey, TEST_PUBKEY,
     };
+    use actix_web::{http::StatusCode, test as atest, web, App};
+    use governor::{clock::FakeRelativeClock, state::keyed::HashMapStateStore, Quota, RateLimiter};
+    use std::num::NonZeroU32;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     /// LIMIT-06: above the cap, the callback fires with the actual length.
     #[test]
@@ -233,7 +227,11 @@ mod tests {
         let calls: Mutex<Vec<usize>> = Mutex::new(Vec::new());
         check_soft_cap(5, 2, |n| calls.lock().unwrap().push(n));
         let captured = calls.lock().unwrap().clone();
-        assert_eq!(captured, vec![5], "callback must fire exactly once with len=5");
+        assert_eq!(
+            captured,
+            vec![5],
+            "callback must fire exactly once with len=5"
+        );
     }
 
     /// LIMIT-06 boundary: at the cap (strict >), the callback does NOT fire.
@@ -244,7 +242,11 @@ mod tests {
         check_soft_cap(2, 2, |n| calls.lock().unwrap().push(n));
         check_soft_cap(1, 2, |n| calls.lock().unwrap().push(n));
         let captured = calls.lock().unwrap().clone();
-        assert!(captured.is_empty(), "boundary: len <= soft_cap MUST NOT fire (got {:?})", captured);
+        assert!(
+            captured.is_empty(),
+            "boundary: len <= soft_cap MUST NOT fire (got {:?})",
+            captured
+        );
     }
 
     /// D-24 #5: Per-IP 429 boundary.
@@ -531,11 +533,7 @@ mod tests {
             HashMapStateStore<String>,
             FakeRelativeClock,
             governor::middleware::NoOpMiddleware<<FakeRelativeClock as Clock>::Instant>,
-        > = RateLimiter::new(
-            quota,
-            HashMapStateStore::default(),
-            &clock,
-        );
+        > = RateLimiter::new(quota, HashMapStateStore::default(), &clock);
 
         for i in 0..10 {
             let _ = limiter.check_key(&format!("key-{}", i));
@@ -672,8 +670,9 @@ mod tests {
                 break;
             }
         }
-        let iter = first_429_iter
-            .expect("rightmost-XFF (3.3.3.3) MUST be the rate-limit key — 31+ reqs hit per-IP burst");
+        let iter = first_429_iter.expect(
+            "rightmost-XFF (3.3.3.3) MUST be the rate-limit key — 31+ reqs hit per-IP burst",
+        );
         assert!(
             iter >= IP_BURST as usize,
             "rightmost-XFF guard exercised: iter={} must be >= IP_BURST={} (otherwise per-pubkey fired first or leftmost was read)",

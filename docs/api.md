@@ -69,15 +69,17 @@ Request:
 {
   "trade_pubkey": "<64-char hex>",
   "token": "<fcm-or-unifiedpush-token>",
-  "platform": "android"
+  "platform": "android",
+  "mostro_pubkey": "<64-char hex of the Mostro instance>"
 }
 ```
 
-| Field          | Type   | Description                                              |
-|----------------|--------|----------------------------------------------------------|
-| `trade_pubkey` | string | 64 hex characters                                        |
-| `token`        | string | FCM device token, or UnifiedPush endpoint URL            |
-| `platform`     | string | `"android"` or `"ios"`                                   |
+| Field           | Type   | Description                                                                                                            |
+|-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
+| `trade_pubkey`  | string | 64 hex characters                                                                                                      |
+| `token`         | string | FCM device token, or UnifiedPush endpoint URL                                                                          |
+| `platform`      | string | `"android"` or `"ios"`                                                                                                 |
+| `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
 Success — `200 OK`:
 
@@ -103,6 +105,47 @@ Possible validation errors:
 - `trade_pubkey` not 64 hex characters
 - `token` empty
 - `platform` not `"android"` or `"ios"`
+- `mostro_pubkey` present but not 64 hex characters
+
+Trusted-instance filter — `403 Forbidden`:
+
+The filter is gated by `TRUSTED_WHITELIST_ENABLED` (default `false`) and
+only fires when the runtime flag is `true` AND the embedded whitelist is
+non-empty (see [configuration.md](./configuration.md)). When it does
+fire, the response body distinguishes two cases so clients can react
+without parsing logs:
+
+```json
+{
+  "success": false,
+  "message": "Mostro instance pubkey required"
+}
+```
+
+Returned when the `mostro_pubkey` field is absent. Typical for clients
+that pre-date the feature.
+
+```json
+{
+  "success": false,
+  "message": "Mostro instance not trusted"
+}
+```
+
+Returned when the field is present, hex-valid, but the value is not on
+the whitelist.
+
+The whitelist is compiled into the binary from
+`config/trusted_mostro_pubkeys.json`. The filter is honour-system: there
+is no cryptographic proof binding the device to the declared instance.
+
+**Mobile client compatibility.** The `mostro_pubkey` field is supported
+by mobile client `vX.Y.Z` and later (TODO: pin the released version once
+the mobile-side change merges). Clients older than that release will
+receive `403 "Mostro instance pubkey required"` whenever
+`TRUSTED_WHITELIST_ENABLED=true`. Operators should keep the flag at
+`false` during the rollout window and flip it on after the mobile
+release is in users' hands.
 
 ## POST /api/unregister
 

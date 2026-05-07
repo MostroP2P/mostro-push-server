@@ -45,12 +45,7 @@ impl TokenStore {
         }
     }
 
-    pub async fn register(
-        &self,
-        trade_pubkey: String,
-        device_token: String,
-        platform: Platform,
-    ) {
+    pub async fn register(&self, trade_pubkey: String, device_token: String, platform: Platform) {
         let token = RegisteredToken {
             device_token,
             platform,
@@ -98,13 +93,15 @@ impl TokenStore {
         let ttl = chrono::Duration::hours(self.ttl_hours as i64);
 
         let initial_count = tokens.len();
-        tokens.retain(|_, token| {
-            now.signed_duration_since(token.registered_at) < ttl
-        });
+        tokens.retain(|_, token| now.signed_duration_since(token.registered_at) < ttl);
 
         let removed = initial_count - tokens.len();
         if removed > 0 {
-            info!("Cleaned up {} expired tokens (remaining: {})", removed, tokens.len());
+            info!(
+                "Cleaned up {} expired tokens (remaining: {})",
+                removed,
+                tokens.len()
+            );
         }
 
         removed
@@ -143,9 +140,8 @@ pub struct TokenStoreStats {
 
 pub fn start_cleanup_task(store: std::sync::Arc<TokenStore>, interval_hours: u64) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(
-            tokio::time::Duration::from_secs(interval_hours * 3600)
-        );
+        let mut interval =
+            tokio::time::interval(tokio::time::Duration::from_secs(interval_hours * 3600));
 
         loop {
             interval.tick().await;

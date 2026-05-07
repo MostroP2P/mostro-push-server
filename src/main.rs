@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
+mod api;
 mod config;
 mod nostr;
 mod push;
-mod api;
 mod store;
+mod trusted_pubkeys;
 mod utils;
 
 // Keep crypto module for future Phase 4 implementation
@@ -28,7 +29,10 @@ async fn main() -> std::io::Result<()> {
     env_logger::init();
     dotenv::dotenv().ok();
 
-    info!("Starting Mostro Push Backend v{}...", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting Mostro Push Backend v{}...",
+        env!("CARGO_PKG_VERSION")
+    );
     info!("Phase 3: Token registration without encryption");
     info!("Encryption will be enabled in Phase 4");
 
@@ -51,9 +55,9 @@ async fn main() -> std::io::Result<()> {
 
     // Start cleanup task
     store::start_cleanup_task(token_store.clone(), config.store.cleanup_interval_hours);
-    info!("Token store initialized (TTL: {}h, cleanup interval: {}h)",
-        config.store.token_ttl_hours,
-        config.store.cleanup_interval_hours
+    info!(
+        "Token store initialized (TTL: {}h, cleanup interval: {}h)",
+        config.store.token_ttl_hours, config.store.cleanup_interval_hours
     );
 
     // Single shared reqwest::Client with explicit timeouts. Bounds outbound
@@ -72,7 +76,10 @@ async fn main() -> std::io::Result<()> {
     let mut push_services: Vec<(Arc<dyn PushService>, &'static str)> = Vec::new();
 
     // Keep UnifiedPush service separate for endpoint management
-    let unifiedpush_service = Arc::new(UnifiedPushService::new(config.clone(), Arc::clone(&http_client)));
+    let unifiedpush_service = Arc::new(UnifiedPushService::new(
+        config.clone(),
+        Arc::clone(&http_client),
+    ));
 
     // Load existing endpoints from disk
     if let Err(e) = unifiedpush_service.load_endpoints().await {
@@ -99,7 +106,10 @@ async fn main() -> std::io::Result<()> {
 
     if config.push.unifiedpush_enabled {
         info!("Initializing UnifiedPush service");
-        push_services.push((Arc::clone(&unifiedpush_service) as Arc<dyn PushService>, "unifiedpush"));
+        push_services.push((
+            Arc::clone(&unifiedpush_service) as Arc<dyn PushService>,
+            "unifiedpush",
+        ));
     }
 
     let dispatcher = Arc::new(PushDispatcher::new(push_services));
@@ -139,8 +149,7 @@ async fn main() -> std::io::Result<()> {
     // per-IP cleanup, every distinct client IP the server has ever seen
     // sticks in the keyed map for the lifetime of the process — a slow
     // memory leak on long-running instances with diverse client populations.
-    let cleanup_interval =
-        Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs);
+    let cleanup_interval = Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs);
     let cleanup_soft_cap = config.notify_rate_limit.pubkey_limiter_soft_cap;
     api::rate_limit::start_keyed_limiter_cleanup_task(
         per_pubkey_limiter.clone(),
@@ -170,11 +179,25 @@ async fn main() -> std::io::Result<()> {
         dispatcher.clone(),
         token_store.clone(),
         notify_log_salt.clone(),
-    ).expect("Failed to initialize Nostr listener - check MOSTRO_PUBKEY");
+    )
+    .expect("Failed to initialize Nostr listener");
 
     tokio::spawn(async move {
         nostr_listener.start().await;
     });
+
+    // Trusted Mostro instance whitelist embedded at compile time.
+    // The /api/register filter activates only when BOTH the runtime feature
+    // flag (`TRUSTED_WHITELIST_ENABLED`) is true AND the embedded list is
+    // non-empty; otherwise `mostro_pubkey` is ignored. Logging both the
+    // count and the flag at boot lets operators tell apart "shipped without
+    // entries" from "flag forgotten" without grepping config.
+    let trusted_mostro_pubkeys = Arc::new(trusted_pubkeys::load());
+    info!(
+        "Loaded trusted-Mostro whitelist with {} pubkeys (enabled: {})",
+        trusted_mostro_pubkeys.len(),
+        config.trusted_whitelist_enabled
+    );
 
     // Create app state for HTTP handlers
     let app_state = AppState {
@@ -183,6 +206,8 @@ async fn main() -> std::io::Result<()> {
         semaphore: notify_semaphore.clone(),
         notify_log_salt: notify_log_salt.clone(),
         per_pubkey_limiter: per_pubkey_limiter.clone(),
+        trusted_mostro_pubkeys: trusted_mostro_pubkeys.clone(),
+        trusted_whitelist_enabled: config.trusted_whitelist_enabled,
     };
 
     // Start HTTP API server
