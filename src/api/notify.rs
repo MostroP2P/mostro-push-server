@@ -138,7 +138,6 @@ pub async fn request_id_mw(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::api::rate_limit::TrustProxyHeaders;
     use crate::api::routes::configure;
     use crate::api::test_support::{

@@ -1,3 +1,9 @@
+// `Nonce::from_slice` is deprecated upstream in favour of generic-array 1.x,
+// but `chacha20poly1305 0.10` (currently pinned) still re-exports the 0.14
+// path. The fix is a coordinated chacha20poly1305 + generic-array bump,
+// which is deferred until the encrypted-token registration phase lands.
+#![allow(deprecated)]
+
 use base64::Engine;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -269,16 +275,16 @@ impl TokenCrypto {
         // Derive shared secret via ECDH
         let shared_point = secp256k1::ecdh::SharedSecret::new(&ephemeral_pubkey, &self.secret_key);
         let shared_x = shared_point.secret_bytes();
-        result.shared_x_hex = Some(hex::encode(&shared_x));
+        result.shared_x_hex = Some(hex::encode(shared_x));
 
         // Derive encryption key using HKDF
         let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &shared_x);
         let mut encryption_key = [0u8; 32];
-        if let Err(_) = hk.expand(HKDF_INFO, &mut encryption_key) {
+        if hk.expand(HKDF_INFO, &mut encryption_key).is_err() {
             result.decryption_error = Some("HKDF expansion failed".to_string());
             return result;
         }
-        result.encryption_key_hex = Some(hex::encode(&encryption_key));
+        result.encryption_key_hex = Some(hex::encode(encryption_key));
 
         // Decrypt with ChaCha20-Poly1305
         let cipher = match ChaCha20Poly1305::new_from_slice(&encryption_key) {
@@ -448,8 +454,8 @@ pub fn encrypt_token_with_debug(
     EncryptionDebugInfo {
         ephemeral_pubkey_hex: hex::encode(ephemeral_pubkey.serialize()),
         server_pubkey_hex: hex::encode(server_pubkey.serialize()),
-        shared_x_hex: hex::encode(&shared_x),
-        encryption_key_hex: hex::encode(&encryption_key),
+        shared_x_hex: hex::encode(shared_x),
+        encryption_key_hex: hex::encode(encryption_key),
         nonce_hex: hex::encode(nonce),
         padded_payload_hex: hex::encode(&padded_payload),
         ciphertext_hex: hex::encode(&ciphertext),
@@ -561,14 +567,14 @@ mod tests {
         let mut encryption_key = [0u8; 32];
         hk.expand(HKDF_INFO, &mut encryption_key).unwrap();
 
-        println!("Output encryption_key: {}", hex::encode(&encryption_key));
+        println!("Output encryption_key: {}", hex::encode(encryption_key));
 
         // The encryption key should be deterministic
         // Flutter client should produce the same key given the same shared_x
         assert_eq!(encryption_key.len(), 32);
 
         // Store expected value for reference
-        let expected_key = hex::encode(&encryption_key);
+        let expected_key = hex::encode(encryption_key);
         println!(
             "\n>>> Flutter client should produce this encryption_key: {}",
             expected_key
@@ -667,7 +673,7 @@ mod tests {
         let nonce: [u8; 12] = [
             0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x12, 0x34, 0x56, 0x78,
         ];
-        println!("\nNONCE: {}", hex::encode(&nonce));
+        println!("\nNONCE: {}", hex::encode(nonce));
 
         // Test token
         let device_token = "dMw5ABC123:APA91bHtest-token-for-debugging";
@@ -748,11 +754,11 @@ mod tests {
 
         println!(
             "\nshared_secret(A_priv * B_pub): {}",
-            hex::encode(&shared_ab_bytes)
+            hex::encode(shared_ab_bytes)
         );
         println!(
             "shared_secret(B_priv * A_pub): {}",
-            hex::encode(&shared_ba_bytes)
+            hex::encode(shared_ba_bytes)
         );
 
         // They should be equal (ECDH property)
@@ -776,10 +782,10 @@ mod tests {
 
         // Compute what SHA256 would give for comparison
         use sha2::Digest;
-        let sha256_of_shared = sha2::Sha256::digest(&shared_ab_bytes);
+        let sha256_of_shared = sha2::Sha256::digest(shared_ab_bytes);
         println!(
             "\nFor reference - SHA256(shared_x): {}",
-            hex::encode(&sha256_of_shared)
+            hex::encode(sha256_of_shared)
         );
         println!("If Flutter produces this ^^^, they're incorrectly applying SHA256");
     }

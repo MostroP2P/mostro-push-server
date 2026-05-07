@@ -7,7 +7,12 @@ pub struct Config {
     pub nostr: NostrConfig,
     pub push: PushConfig,
     pub server: ServerConfig,
+    // Loaded for env symmetry; superseded by `notify_rate_limit` on the hot
+    // path. Kept so the legacy RATE_LIMIT_PER_MINUTE knob still parses.
+    #[allow(dead_code)]
     pub rate_limit: RateLimitConfig,
+    // Reserved for the encrypted-token registration phase (see src/crypto).
+    #[allow(dead_code)]
     pub crypto: CryptoConfig,
     pub store: StoreConfig,
     pub notify_rate_limit: NotifyRateLimitConfig,
@@ -24,7 +29,11 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NostrConfig {
     pub relays: Vec<String>,
+    // Carried in the typed config for parity with the Nostr listener wiring;
+    // the listener currently hardcodes its own subscription id and event kinds.
+    #[allow(dead_code)]
     pub subscription_id: String,
+    #[allow(dead_code)]
     pub event_kinds: Vec<u64>,
 }
 
@@ -32,7 +41,10 @@ pub struct NostrConfig {
 pub struct PushConfig {
     pub fcm_enabled: bool,
     pub unifiedpush_enabled: bool,
+    // Reserved for the dispatcher batching/cooldown work (see utils/batching).
+    #[allow(dead_code)]
     pub batch_delay_ms: u64,
+    #[allow(dead_code)]
     pub cooldown_ms: u64,
 }
 
@@ -43,6 +55,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct RateLimitConfig {
     pub max_per_minute: u32,
 }
@@ -61,6 +74,7 @@ pub struct NotifyRateLimitConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct CryptoConfig {
     pub server_private_key: String,
 }

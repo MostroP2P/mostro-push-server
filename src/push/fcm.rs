@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use log::{debug, error, info, warn};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -17,6 +16,9 @@ use crate::store::Platform;
 struct ServiceAccount {
     client_email: String,
     private_key: String,
+    // Deserialized for fixture validation and future logging; the runtime
+    // project id comes from the FIREBASE_PROJECT_ID env var below.
+    #[allow(dead_code)]
     project_id: String,
 }
 
@@ -48,6 +50,9 @@ pub struct FcmPush {
 }
 
 impl FcmPush {
+    // `config` is accepted for symmetry with `UnifiedPushService::new` and to
+    // keep call sites stable; FCM currently sources its settings from env vars.
+    #[allow(unused_variables)]
     pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let service_account_path = std::env::var("FIREBASE_SERVICE_ACCOUNT_PATH").ok();
         let project_id =
