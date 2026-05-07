@@ -75,18 +75,21 @@ pub fn test_per_ip_quota() -> Quota {
 /// Build a test AppState + per-IP limiter pair using fresh in-memory limiters.
 /// Returns (state, per_ip_limiter) so callers can assert against the stub.
 ///
-/// Defaults `trusted_mostro_pubkeys` to an empty set (whitelist disabled —
-/// permissive mode). Tests that exercise the whitelist must override this via
-/// [`make_app_state_with_whitelist`].
+/// Defaults `trusted_mostro_pubkeys` to an empty set and
+/// `trusted_whitelist_enabled` to `false` (permissive mode). Tests exercising
+/// the whitelist must override this via [`make_app_state_with_whitelist`].
 pub fn make_app_state(stub: Arc<StubPushService>) -> (AppState, Arc<PerIpLimiter>) {
-    make_app_state_with_whitelist(stub, Arc::new(HashSet::new()))
+    make_app_state_with_whitelist(stub, Arc::new(HashSet::new()), false)
 }
 
 /// Variant of [`make_app_state`] that injects an explicit trusted-Mostro
-/// whitelist. A non-empty set activates the whitelist filter on /api/register.
+/// whitelist and feature-flag value. The filter on /api/register only fires
+/// when `trusted_whitelist_enabled` is `true` AND `trusted_mostro_pubkeys`
+/// is non-empty.
 pub fn make_app_state_with_whitelist(
     stub: Arc<StubPushService>,
     trusted_mostro_pubkeys: Arc<HashSet<String>>,
+    trusted_whitelist_enabled: bool,
 ) -> (AppState, Arc<PerIpLimiter>) {
     let services: Vec<(Arc<dyn PushService>, &'static str)> =
         vec![(stub.clone() as Arc<dyn PushService>, "stub")];
@@ -110,6 +113,7 @@ pub fn make_app_state_with_whitelist(
         notify_log_salt,
         per_pubkey_limiter,
         trusted_mostro_pubkeys,
+        trusted_whitelist_enabled,
     };
 
     (state, per_ip_limiter)
@@ -144,13 +148,33 @@ pub fn make_test_components() -> TestAppComponents {
 }
 
 /// Variant of [`make_test_components`] with the trusted-Mostro whitelist
-/// pre-populated with [`TRUSTED_MOSTRO_PUBKEY`]. Use for tests exercising the
-/// /api/register whitelist filter.
+/// pre-populated with [`TRUSTED_MOSTRO_PUBKEY`] AND the runtime feature flag
+/// turned on. Use for tests exercising the active /api/register whitelist
+/// filter. For tests that exercise the flag-disabled path with a non-empty
+/// whitelist, use [`make_test_components_with_whitelist_disabled`].
 pub fn make_test_components_with_trusted_whitelist() -> TestAppComponents {
     let stub = Arc::new(StubPushService::new(vec![Platform::Android]));
     let mut whitelist = HashSet::new();
     whitelist.insert(TRUSTED_MOSTRO_PUBKEY.to_string());
-    let (state, per_ip_limiter) = make_app_state_with_whitelist(stub.clone(), Arc::new(whitelist));
+    let (state, per_ip_limiter) =
+        make_app_state_with_whitelist(stub.clone(), Arc::new(whitelist), true);
+    TestAppComponents {
+        state,
+        per_ip_limiter,
+        stub,
+    }
+}
+
+/// Variant with the trusted-Mostro whitelist populated but the runtime
+/// feature flag turned OFF. Used to assert that the filter is genuinely
+/// inert when the flag is false even when the embedded JSON ships with
+/// entries — i.e. that the rollout safety property holds.
+pub fn make_test_components_with_whitelist_disabled() -> TestAppComponents {
+    let stub = Arc::new(StubPushService::new(vec![Platform::Android]));
+    let mut whitelist = HashSet::new();
+    whitelist.insert(TRUSTED_MOSTRO_PUBKEY.to_string());
+    let (state, per_ip_limiter) =
+        make_app_state_with_whitelist(stub.clone(), Arc::new(whitelist), false);
     TestAppComponents {
         state,
         per_ip_limiter,

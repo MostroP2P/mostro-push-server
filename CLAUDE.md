@@ -31,6 +31,8 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 
 3. **Backwards compatibility of the existing endpoints.** `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` response bodies are byte-identical to fixtures captured before v1.1. Field order on `RegisterResponse` is `success, message, platform`. The `mostro_pubkey` field added to `RegisterTokenRequest` is request-only and does not change response shapes.
 
+   **Exception (off by default):** when `TRUSTED_WHITELIST_ENABLED=true` AND the embedded whitelist is non-empty, `/api/register` MAY return a new `403 Forbidden` with one of two distinct bodies — `{"success":false,"message":"Mostro instance pubkey required"}` (missing field) or `{"success":false,"message":"Mostro instance not trusted"}` (untrusted value). The flag defaults to `false` precisely so the byte-identical fixture set continues to hold for clients that pre-date the feature; only flip it after the mobile rollout.
+
 4. **Token store is in-memory only.** No persistence to disk for `trade_pubkey -> device_token`. UnifiedPush endpoints are the only on-disk state (atomic JSON write to `data/unifiedpush_endpoints.json`).
 
 5. **Logs never carry raw pubkeys.** Every log site that touches a `trade_pubkey` goes through `crate::utils::log_pubkey::log_pubkey(salt, pubkey)`. The salt is a 32-byte random value generated once per process and never persisted.

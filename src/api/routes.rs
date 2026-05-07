@@ -55,10 +55,15 @@ pub struct AppState {
     pub semaphore: Arc<Semaphore>,
     pub notify_log_salt: Arc<[u8; 32]>,
     pub per_pubkey_limiter: Arc<PerPubkeyLimiter>,
-    /// Whitelist of trusted Mostro instance pubkeys (hex, 64 chars).
-    /// Empty set disables the whitelist (permissive mode); a populated set
-    /// activates the filter on `/api/register`.
+    /// Whitelist of trusted Mostro instance pubkeys (hex, 64 chars), kept
+    /// in lowercase by `trusted_pubkeys::load`.
     pub trusted_mostro_pubkeys: Arc<HashSet<String>>,
+    /// Runtime feature flag from `TRUSTED_WHITELIST_ENABLED`. The filter on
+    /// `/api/register` only activates when this is `true` AND
+    /// `trusted_mostro_pubkeys` is non-empty. With the flag off (the
+    /// default), `mostro_pubkey` is ignored even if the embedded JSON has
+    /// entries, which keeps rollout staged with the mobile client.
+    pub trusted_whitelist_enabled: bool,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -152,19 +157,31 @@ async fn register_token(
         }
     };
 
-    // Trusted Mostro instance whitelist. Empty set => permissive mode
-    // (mostro_pubkey ignored). Populated set => the client MUST declare a
-    // mostro_pubkey present in the list, otherwise registration is denied.
-    // Honor-system filter only: there is no cryptographic proof that the
-    // device actually uses the declared instance. This will be hardened in a
-    // future phase when registration carries a signature from the daemon.
-    if !state.trusted_mostro_pubkeys.is_empty() {
+    // Trusted Mostro instance whitelist filter.
+    //
+    // Activation requires BOTH the runtime feature flag
+    // (`TRUSTED_WHITELIST_ENABLED`, default false) AND a non-empty embedded
+    // whitelist. Either side off => permissive mode and `mostro_pubkey` is
+    // ignored. The flag is what allows the JSON to be shipped populated
+    // while keeping the new 403 path off until the mobile client supports
+    // sending the field.
+    //
+    // Honor-system filter: there is no cryptographic proof that the device
+    // actually uses the declared instance. This will be hardened in a
+    // future phase when registration carries a daemon-issued signature.
+    //
+    // 403 messages distinguish two cases so the mobile client can tell
+    // "you didn't send the field" from "the value you sent isn't on the
+    // list" without parsing logs:
+    //   - missing field    -> "Mostro instance pubkey required"
+    //   - untrusted value  -> "Mostro instance not trusted"
+    if state.trusted_whitelist_enabled && !state.trusted_mostro_pubkeys.is_empty() {
         match req.mostro_pubkey.as_deref() {
             None => {
                 warn!("Register denied: mostro_pubkey missing while whitelist active");
                 return HttpResponse::Forbidden().json(RegisterResponse {
                     success: false,
-                    message: "Mostro instance not trusted".to_string(),
+                    message: "Mostro instance pubkey required".to_string(),
                     platform: None,
                 });
             }
@@ -258,9 +275,12 @@ async fn unregister_token(
 mod tests {
     use super::*;
     use crate::api::test_support::{
-        build_test_actix_app, make_test_components, make_test_components_with_trusted_whitelist,
-        TEST_PUBKEY, TEST_PUBKEY_2, TRUSTED_MOSTRO_PUBKEY, UNTRUSTED_MOSTRO_PUBKEY,
+        build_test_actix_app, make_app_state_with_whitelist, make_test_components,
+        make_test_components_with_trusted_whitelist, make_test_components_with_whitelist_disabled,
+        StubPushService, TestAppComponents, TEST_PUBKEY, TEST_PUBKEY_2, TRUSTED_MOSTRO_PUBKEY,
+        UNTRUSTED_MOSTRO_PUBKEY,
     };
+    use crate::store::Platform;
     use actix_web::{http::StatusCode, test as atest};
 
     /// VERIFY-02 / D-24 #6: /api/register success body is BYTE-IDENTICAL to
@@ -574,9 +594,13 @@ mod tests {
         );
     }
 
-    /// Whitelist active, mostro_pubkey field omitted -> 403 (same body as untrusted).
+    /// Whitelist active, mostro_pubkey field omitted -> 403 with the
+    /// distinct "required" message (vs. "not trusted" for unknown values).
+    /// Splitting the messages lets the mobile client tell apart "you didn't
+    /// send the field" from "the value you sent isn't whitelisted" without
+    /// parsing logs.
     #[actix_web::test]
-    async fn register_without_mostro_pubkey_when_whitelist_active_returns_403() {
+    async fn register_without_mostro_pubkey_when_flag_enabled_returns_403_with_required_message() {
         let c = make_test_components_with_trusted_whitelist();
         let app = atest::init_service(build_test_actix_app(c)).await;
 
@@ -594,7 +618,7 @@ mod tests {
         let body_str = std::str::from_utf8(&body).unwrap();
         assert_eq!(
             body_str,
-            r#"{"success":false,"message":"Mostro instance not trusted"}"#
+            r#"{"success":false,"message":"Mostro instance pubkey required"}"#
         );
     }
 
@@ -642,5 +666,157 @@ mod tests {
             .to_request();
         let resp = atest::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Rollout-safety regression: even with a populated whitelist, when the
+    /// runtime feature flag (`TRUSTED_WHITELIST_ENABLED`) is OFF the filter
+    /// must NOT reject a client that sends an untrusted `mostro_pubkey`. The
+    /// field is ignored end-to-end. This is what allows the binary to ship
+    /// with the JSON populated before the mobile client knows how to send
+    /// the field.
+    #[actix_web::test]
+    async fn register_with_trusted_pubkey_but_flag_disabled_ignores_field() {
+        let c = make_test_components_with_whitelist_disabled();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "test_fcm_token",
+                "platform": "android",
+                "mostro_pubkey": UNTRUSTED_MOSTRO_PUBKEY
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "filter must be inert when TRUSTED_WHITELIST_ENABLED is false"
+        );
+    }
+
+    /// Same as above but with the field absent. Permissive when the flag is
+    /// off, even if the embedded list has entries.
+    #[actix_web::test]
+    async fn register_without_mostro_pubkey_when_flag_disabled_succeeds() {
+        let c = make_test_components_with_whitelist_disabled();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY_2,
+                "token": "test_fcm_token",
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Activation-matrix coverage. The filter must reject ONLY in the
+    /// (flag=true, list=non-empty) cell and only when the field is missing
+    /// or untrusted; every other combination must succeed. Encodes the
+    /// activation rule directly: filter ⇔ flag ∧ list ∧ (missing ∨ untrusted).
+    #[actix_web::test]
+    async fn whitelist_activation_matrix() {
+        struct Case {
+            label: &'static str,
+            flag_enabled: bool,
+            whitelist_populated: bool,
+            field: Option<&'static str>, // None => omit, Some => send
+            expected: StatusCode,
+        }
+
+        // Distinct trade pubkeys per case so the in-memory store doesn't
+        // dedupe registrations and confuse a later case.
+        let cases = [
+            Case {
+                label: "flag=off, list=empty, no field",
+                flag_enabled: false,
+                whitelist_populated: false,
+                field: None,
+                expected: StatusCode::OK,
+            },
+            Case {
+                label: "flag=off, list=non-empty, no field",
+                flag_enabled: false,
+                whitelist_populated: true,
+                field: None,
+                expected: StatusCode::OK,
+            },
+            Case {
+                label: "flag=on, list=empty, no field",
+                flag_enabled: true,
+                whitelist_populated: false,
+                field: None,
+                expected: StatusCode::OK,
+            },
+            Case {
+                label: "flag=on, list=non-empty, trusted field",
+                flag_enabled: true,
+                whitelist_populated: true,
+                field: Some(TRUSTED_MOSTRO_PUBKEY),
+                expected: StatusCode::OK,
+            },
+            Case {
+                label: "flag=on, list=non-empty, untrusted field",
+                flag_enabled: true,
+                whitelist_populated: true,
+                field: Some(UNTRUSTED_MOSTRO_PUBKEY),
+                expected: StatusCode::FORBIDDEN,
+            },
+            Case {
+                label: "flag=on, list=non-empty, missing field",
+                flag_enabled: true,
+                whitelist_populated: true,
+                field: None,
+                expected: StatusCode::FORBIDDEN,
+            },
+        ];
+
+        for (i, case) in cases.iter().enumerate() {
+            let stub = std::sync::Arc::new(StubPushService::new(vec![Platform::Android]));
+            let mut whitelist = std::collections::HashSet::new();
+            if case.whitelist_populated {
+                whitelist.insert(TRUSTED_MOSTRO_PUBKEY.to_string());
+            }
+            let (state, per_ip_limiter) = make_app_state_with_whitelist(
+                stub.clone(),
+                std::sync::Arc::new(whitelist),
+                case.flag_enabled,
+            );
+            let components = TestAppComponents {
+                state,
+                per_ip_limiter,
+                stub,
+            };
+            let app = atest::init_service(build_test_actix_app(components)).await;
+
+            let trade_pk = format!("{:0>64x}", i + 100);
+            let mut body = serde_json::json!({
+                "trade_pubkey": trade_pk,
+                "token": "test_fcm_token",
+                "platform": "android",
+            });
+            if let Some(pk) = case.field {
+                body["mostro_pubkey"] = serde_json::Value::String(pk.to_string());
+            }
+            let req = atest::TestRequest::post()
+                .uri("/api/register")
+                .set_json(&body)
+                .to_request();
+            let resp = atest::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                case.expected,
+                "matrix case {} ({}) expected {} got {}",
+                i,
+                case.label,
+                case.expected,
+                resp.status()
+            );
+        }
     }
 }

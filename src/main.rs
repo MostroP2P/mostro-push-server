@@ -187,22 +187,16 @@ async fn main() -> std::io::Result<()> {
     });
 
     // Trusted Mostro instance whitelist embedded at compile time.
-    // Empty list => permissive mode; populated => /api/register filters
-    // registrations whose declared mostro_pubkey is not on the list.
+    // The /api/register filter activates only when BOTH the runtime feature
+    // flag (`TRUSTED_WHITELIST_ENABLED`) is true AND the embedded list is
+    // non-empty; otherwise `mostro_pubkey` is ignored. Logging both the
+    // count and the flag at boot lets operators tell apart "shipped without
+    // entries" from "flag forgotten" without grepping config.
     let trusted_mostro_pubkeys = Arc::new(trusted_pubkeys::load());
     info!(
-        "Trusted Mostro pubkey whitelist: {} entr{} ({})",
+        "Loaded trusted-Mostro whitelist with {} pubkeys (enabled: {})",
         trusted_mostro_pubkeys.len(),
-        if trusted_mostro_pubkeys.len() == 1 {
-            "y"
-        } else {
-            "ies"
-        },
-        if trusted_mostro_pubkeys.is_empty() {
-            "permissive mode"
-        } else {
-            "filter active"
-        }
+        config.trusted_whitelist_enabled
     );
 
     // Create app state for HTTP handlers
@@ -213,6 +207,7 @@ async fn main() -> std::io::Result<()> {
         notify_log_salt: notify_log_salt.clone(),
         per_pubkey_limiter: per_pubkey_limiter.clone(),
         trusted_mostro_pubkeys: trusted_mostro_pubkeys.clone(),
+        trusted_whitelist_enabled: config.trusted_whitelist_enabled,
     };
 
     // Start HTTP API server

@@ -25,17 +25,40 @@ events by `authors` (privacy invariant; see [architecture.md](./architecture.md)
 
 The set of Mostro instance pubkeys allowed to register devices is compiled
 into the binary from `config/trusted_mostro_pubkeys.json` at build time.
+Activation is gated by a runtime feature flag, so the JSON can ship
+populated while the filter stays inert until the mobile rollout is ready.
 
-- The file must contain a JSON array of 64-character hex pubkeys.
-- An empty array disables the whitelist (permissive mode); any client may
-  register without declaring a `mostro_pubkey`.
-- A non-empty array activates the filter on `/api/register`: clients must
-  send a `mostro_pubkey` field whose value matches one of the entries,
-  otherwise the request is rejected with `403 Forbidden`.
+| Variable                     | Default | Description                                                                                                                |
+|------------------------------|---------|----------------------------------------------------------------------------------------------------------------------------|
+| `TRUSTED_WHITELIST_ENABLED`  | `false` | When `true`, `/api/register` rejects requests whose declared `mostro_pubkey` is missing or not on the embedded whitelist.  |
+
+Activation rule: the filter on `/api/register` only fires when **both**
+`TRUSTED_WHITELIST_ENABLED=true` **and** the embedded whitelist is
+non-empty. Either side off => permissive mode and the `mostro_pubkey`
+field is ignored.
+
+About the embedded JSON:
+
+- The file must contain a JSON array of 64-character hex pubkeys
+  (lowercase preferred; `load()` canonicalizes to lowercase regardless).
+- An empty array keeps the filter permissive even when the flag is on.
 - The file is parsed at startup; malformed JSON or any entry that is not
   64 hex characters causes the process to panic immediately (fail-fast).
+- Editing the list requires a rebuild because the JSON is embedded at
+  compile time via `include_str!`. Toggling the flag does not.
+
+When the filter rejects, the response is `403 Forbidden` with one of two
+distinct bodies (see [api.md](./api.md) for the wire details):
+
+- `{"success":false,"message":"Mostro instance pubkey required"}` when the
+  field is absent — typical for an old mobile client that pre-dates the
+  feature.
+- `{"success":false,"message":"Mostro instance not trusted"}` when the
+  field is present but its value is not on the whitelist.
 
 To change the list, edit `config/trusted_mostro_pubkeys.json` and rebuild.
+To turn the filter on/off without rebuilding, flip
+`TRUSTED_WHITELIST_ENABLED`.
 
 ## HTTP server
 

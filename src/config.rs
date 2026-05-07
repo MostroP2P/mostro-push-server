@@ -11,6 +11,14 @@ pub struct Config {
     pub crypto: CryptoConfig,
     pub store: StoreConfig,
     pub notify_rate_limit: NotifyRateLimitConfig,
+    /// Runtime feature flag for the trusted-Mostro-instance whitelist on
+    /// `/api/register`. Sourced from `TRUSTED_WHITELIST_ENABLED`, default
+    /// `false`. The filter only activates when this is `true` AND the
+    /// embedded whitelist (`config/trusted_mostro_pubkeys.json`) is
+    /// non-empty; otherwise the `mostro_pubkey` field is ignored. This
+    /// indirection lets the binary ship with the JSON populated while
+    /// keeping the new 403 path off until the mobile client is rolled out.
+    pub trusted_whitelist_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +165,13 @@ impl Config {
                     .unwrap_or_else(|_| "false".to_string())
                     .parse()?,
             },
+            // Default false: ship the binary with the embedded whitelist
+            // populated but the 403 path off, so the mobile client can be
+            // rolled out before the filter starts rejecting clients that
+            // still don't send `mostro_pubkey`.
+            trusted_whitelist_enabled: env::var("TRUSTED_WHITELIST_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()?,
         })
     }
 }
