@@ -85,9 +85,11 @@ To turn the filter on/off without rebuilding, flip
 | `TOKEN_TTL_HOURS`         | `48`    | Tokens older than this are evicted by the cleanup task                       |
 | `CLEANUP_INTERVAL_HOURS`  | `1`     | How often the cleanup task runs                                              |
 
-## `/api/notify` rate limiter
+## HTTP rate limiters
 
-The dual-keyed rate limiter is documented in detail in [architecture.md](./architecture.md). Defaults are tuned for the Fly.io single-machine deployment.
+The `/api/notify` dual-keyed rate limiter is documented in detail in
+[architecture.md](./architecture.md). Defaults are tuned for the Fly.io
+single-machine deployment.
 
 | Variable                                      | Default  | Description                                                                                          |
 |-----------------------------------------------|----------|------------------------------------------------------------------------------------------------------|
@@ -98,6 +100,11 @@ The dual-keyed rate limiter is documented in detail in [architecture.md](./archi
 | `NOTIFY_TRUST_PROXY_HEADERS`                  | `false`  | When `true`, trust `Fly-Client-IP` then rightmost `X-Forwarded-For` for the per-IP key. **Set to `true` only behind a trusted proxy** (e.g. the Fly.io edge). On a directly reachable server an attacker can rotate these headers per request and defeat the per-IP limiter. |
 
 Setting either of `NOTIFY_RATE_PER_PUBKEY_PER_MIN` or `NOTIFY_RATE_PER_IP_PER_MIN` to `0` causes startup to fail with a chained error message; both must be greater than zero.
+
+`/api/register` and `/api/unregister` also share a fixed per-IP limiter:
+`120/min`, burst `100`. It is intentionally separate from `/api/notify` so
+registration churn cannot consume the notify per-IP bucket, and notify traffic
+cannot disable client re-registration.
 
 ## Legacy / reserved
 

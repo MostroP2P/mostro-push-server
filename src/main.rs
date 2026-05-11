@@ -17,7 +17,10 @@ mod utils;
 #[allow(dead_code)]
 mod crypto;
 
-use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST};
+use api::rate_limit::{
+    PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
+    REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
+};
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
@@ -144,11 +147,21 @@ async fn main() -> std::io::Result<()> {
         ),
     ));
 
+    let register_ip_limiter: Arc<PerIpLimiter> = Arc::new(governor::RateLimiter::keyed(
+        governor::Quota::per_minute(
+            std::num::NonZeroU32::new(REGISTER_IP_RATE_PER_MIN)
+                .expect("REGISTER_IP_RATE_PER_MIN is a non-zero compile-time constant"),
+        )
+        .allow_burst(
+            std::num::NonZeroU32::new(REGISTER_IP_BURST)
+                .expect("REGISTER_IP_BURST is a non-zero compile-time constant"),
+        ),
+    ));
+
     // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.
-    // Run for BOTH keyed limiters (per-pubkey and per-IP). Without the
-    // per-IP cleanup, every distinct client IP the server has ever seen
-    // sticks in the keyed map for the lifetime of the process — a slow
-    // memory leak on long-running instances with diverse client populations.
+    // Run for all keyed limiters. Without per-IP cleanup, every distinct
+    // client IP the server has ever seen sticks in keyed maps for the
+    // lifetime of the process.
     let cleanup_interval = Duration::from_secs(config.notify_rate_limit.cleanup_interval_secs);
     let cleanup_soft_cap = config.notify_rate_limit.pubkey_limiter_soft_cap;
     api::rate_limit::start_keyed_limiter_cleanup_task(
@@ -163,12 +176,20 @@ async fn main() -> std::io::Result<()> {
         cleanup_soft_cap,
         "ip",
     );
+    api::rate_limit::start_keyed_limiter_cleanup_task(
+        register_ip_limiter.clone(),
+        cleanup_interval,
+        cleanup_soft_cap,
+        "register-ip",
+    );
     info!(
-        "Rate limiters initialized (per-pubkey {}/min burst {}; per-IP {}/min burst {}; cleanup {}s; soft cap {})",
+        "Rate limiters initialized (notify per-pubkey {}/min burst {}; notify per-IP {}/min burst {}; register per-IP {}/min burst {}; cleanup {}s; soft cap {})",
         config.notify_rate_limit.per_pubkey_per_min,
         PUBKEY_BURST,
         config.notify_rate_limit.per_ip_per_min,
         IP_BURST,
+        REGISTER_IP_RATE_PER_MIN,
+        REGISTER_IP_BURST,
         config.notify_rate_limit.cleanup_interval_secs,
         config.notify_rate_limit.pubkey_limiter_soft_cap,
     );
@@ -231,6 +252,9 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(per_ip_limiter.clone()))
+            .app_data(web::Data::new(RegisterIpLimiter(
+                register_ip_limiter.clone(),
+            )))
             .app_data(web::Data::new(trust_proxy_headers))
             .configure(api::routes::configure)
     })
