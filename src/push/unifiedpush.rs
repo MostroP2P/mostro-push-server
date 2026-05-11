@@ -11,6 +11,8 @@ use super::PushService;
 use crate::config::Config;
 use crate::store::Platform;
 
+pub const UNIFIEDPUSH_ENDPOINTS_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedPushEndpoint {
     pub device_id: String,
@@ -47,9 +49,25 @@ impl UnifiedPushService {
             fs::create_dir_all(parent).await?;
         }
 
-        // Check if file exists
-        if !self.storage_path.exists() {
-            info!("No existing endpoints file found, starting fresh");
+        let metadata = match fs::metadata(&self.storage_path).await {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("No existing endpoints file found, starting fresh");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Failed to stat endpoints file: {}", e);
+                return Ok(());
+            }
+        };
+
+        if metadata.len() > UNIFIEDPUSH_ENDPOINTS_MAX_BYTES {
+            error!(
+                "UnifiedPush endpoints file too large ({} bytes > {} bytes), starting with empty store",
+                metadata.len(),
+                UNIFIEDPUSH_ENDPOINTS_MAX_BYTES
+            );
+            self.endpoints.write().await.clear();
             return Ok(());
         }
 
@@ -167,5 +185,133 @@ impl PushService for UnifiedPushService {
     fn supports_platform(&self, platform: &Platform) -> bool {
         // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.)
         matches!(platform, Platform::Android)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UnifiedPushEndpoint, UnifiedPushService, UNIFIEDPUSH_ENDPOINTS_MAX_BYTES};
+    use crate::config::{
+        Config, CryptoConfig, NostrConfig, NotifyRateLimitConfig, PushConfig, RateLimitConfig,
+        ServerConfig, StoreConfig,
+    };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn test_config() -> Config {
+        Config {
+            nostr: NostrConfig {
+                relays: vec!["wss://relay.example.com".to_string()],
+                subscription_id: "test".to_string(),
+                event_kinds: vec![1059],
+            },
+            push: PushConfig {
+                fcm_enabled: false,
+                unifiedpush_enabled: true,
+                batch_delay_ms: 5000,
+                cooldown_ms: 60000,
+            },
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+            },
+            rate_limit: RateLimitConfig { max_per_minute: 60 },
+            crypto: CryptoConfig {
+                server_private_key: "1".repeat(64),
+            },
+            store: StoreConfig {
+                token_ttl_hours: 48,
+                cleanup_interval_hours: 1,
+            },
+            notify_rate_limit: NotifyRateLimitConfig {
+                per_pubkey_per_min: 30,
+                per_ip_per_min: 120,
+                cleanup_interval_secs: 60,
+                pubkey_limiter_soft_cap: 100_000,
+                trust_proxy_headers: false,
+            },
+            trusted_whitelist_enabled: false,
+        }
+    }
+
+    fn temp_storage_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mostro-push-unifiedpush-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    fn service_with_storage_path(path: PathBuf) -> UnifiedPushService {
+        UnifiedPushService {
+            config: test_config(),
+            client: Arc::new(reqwest::Client::new()),
+            endpoints: tokio::sync::RwLock::new(HashMap::new()),
+            storage_path: path,
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_endpoint_file_starts_with_empty_store() {
+        let path = temp_storage_path("oversized.json");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(100 * 1024 * 1024)
+            .unwrap();
+
+        let service = service_with_storage_path(path.clone());
+        service.endpoints.write().await.insert(
+            "preexisting".to_string(),
+            UnifiedPushEndpoint {
+                device_id: "preexisting".to_string(),
+                endpoint_url: "https://push.example.com/preexisting".to_string(),
+                registered_at: chrono::Utc::now(),
+            },
+        );
+        assert!(
+            service.endpoints.read().await.contains_key("preexisting"),
+            "test setup must start with an in-memory endpoint"
+        );
+
+        service.load_endpoints().await.unwrap();
+
+        assert!(
+            service.endpoints.read().await.is_empty(),
+            "oversized endpoint file must not be read into memory"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn one_megabyte_endpoint_file_loads_normally() {
+        let path = temp_storage_path("valid.json");
+        let large_url = format!(
+            "https://push.example.com/{}",
+            "a".repeat((1024 * 1024) - 512)
+        );
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "device-1".to_string(),
+            UnifiedPushEndpoint {
+                device_id: "device-1".to_string(),
+                endpoint_url: large_url.clone(),
+                registered_at: chrono::Utc::now(),
+            },
+        );
+        let content = serde_json::to_string(&endpoints).unwrap();
+        assert!(content.len() > 1024 * 1024 - 1024);
+        assert!(content.len() < UNIFIEDPUSH_ENDPOINTS_MAX_BYTES as usize);
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let service = service_with_storage_path(path.clone());
+        service.load_endpoints().await.unwrap();
+
+        let loaded = service.endpoints.read().await;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get("device-1").unwrap().endpoint_url, large_url);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

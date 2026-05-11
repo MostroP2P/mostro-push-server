@@ -85,6 +85,14 @@ To turn the filter on/off without rebuilding, flip
 | `TOKEN_TTL_HOURS`         | `48`    | Tokens older than this are evicted by the cleanup task                       |
 | `CLEANUP_INTERVAL_HOURS`  | `1`     | How often the cleanup task runs                                              |
 
+## UnifiedPush endpoint store
+
+UnifiedPush endpoint registrations are mirrored to
+`data/unifiedpush_endpoints.json`. On startup the server checks the file size
+before reading it. Files larger than 2 MiB are treated as unsafe to load: the
+server logs an error, starts with an empty UnifiedPush endpoint map, and keeps
+running. A valid file up to the limit is loaded normally.
+
 ## `/api/notify` rate limiter
 
 The dual-keyed rate limiter is documented in detail in [architecture.md](./architecture.md). Defaults are tuned for the Fly.io single-machine deployment.
