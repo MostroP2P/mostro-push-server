@@ -18,6 +18,7 @@ serde_json = "1.0"
 
 # HTTP client for FCM and UnifiedPush
 reqwest = { version = "0.11", features = ["json"] }
+hyper = "0.14"
 
 # Nostr
 nostr-sdk = "0.27"
@@ -29,6 +30,7 @@ log = "0.4"
 # Configuration
 config = "0.14"
 dotenv = "0.15"
+regex = "1"
 
 # Async utilities
 futures = "0.3"

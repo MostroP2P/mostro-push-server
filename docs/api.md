@@ -104,6 +104,7 @@ Possible validation errors:
 
 - `trade_pubkey` not 64 hex characters
 - `token` empty
+- URL-shaped Android `token` is not a valid public HTTPS UnifiedPush endpoint URL
 - `platform` not `"android"` or `"ios"`
 - `mostro_pubkey` present but not 64 hex characters
 

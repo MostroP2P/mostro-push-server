@@ -21,7 +21,7 @@ use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURS
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
-use push::{FcmPush, PushDispatcher, PushService, UnifiedPushService};
+use push::{FcmPush, PublicDnsResolver, PushDispatcher, PushService, UnifiedPushService};
 use store::TokenStore;
 
 #[actix_web::main]
@@ -68,6 +68,7 @@ async fn main() -> std::io::Result<()> {
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(5))
             .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .dns_resolver(Arc::new(PublicDnsResolver))
             .build()
             .expect("reqwest::Client build never fails on default config"),
     );
@@ -198,6 +199,16 @@ async fn main() -> std::io::Result<()> {
         trusted_mostro_pubkeys.len(),
         config.trusted_whitelist_enabled
     );
+    let unifiedpush_allowed_hosts_regex = config
+        .push
+        .unifiedpush_allowed_hosts_regex
+        .as_deref()
+        .map(|pattern| {
+            Arc::new(
+                regex::Regex::new(pattern)
+                    .expect("UNIFIEDPUSH_ALLOWED_HOSTS_REGEX was validated during config load"),
+            )
+        });
 
     // Create app state for HTTP handlers
     let app_state = AppState {
@@ -208,6 +219,7 @@ async fn main() -> std::io::Result<()> {
         per_pubkey_limiter: per_pubkey_limiter.clone(),
         trusted_mostro_pubkeys: trusted_mostro_pubkeys.clone(),
         trusted_whitelist_enabled: config.trusted_whitelist_enabled,
+        unifiedpush_allowed_hosts_regex,
     };
 
     // Start HTTP API server

@@ -11,6 +11,26 @@ The server treats UnifiedPush as a peer of FCM behind the same `PushService` tra
 3. On dispatch, `UnifiedPushService::send_to_token` POSTs a small JSON payload to the URL.
 4. The distributor delivers a wake-up to the client app, which then fetches the relevant Nostr events itself.
 
+## Endpoint URL policy
+
+UnifiedPush endpoint URLs are attacker-controlled input. The server validates
+them before storing URL-shaped Android tokens and revalidates them immediately
+before dispatch.
+
+Allowed endpoints must:
+
+- parse as a URL
+- use `https`
+- include a host
+- not use localhost-style names such as `localhost`, `.localhost`, `.local`, or `.internal`
+- not use private, loopback, link-local, multicast, documentation, benchmark, carrier-grade NAT, or otherwise reserved IP literals
+- match `UNIFIEDPUSH_ALLOWED_HOSTS_REGEX` when that optional allowlist is set
+
+The shared outbound `reqwest::Client` also uses a DNS resolver that filters the
+actual connection-time DNS result and rejects hosts that resolve only to
+non-public addresses. This keeps stale stored endpoints and DNS rebinding from
+turning dispatch into an internal-network POST.
+
 ## Wire format
 
 The server posts:
@@ -42,7 +62,7 @@ If `UNIFIEDPUSH_ENABLED=false`, the service is not added to the dispatcher slice
 
 - UnifiedPush has no per-payload distinction between silent and visible push. `send_silent_to_token` falls back to `send_to_token`, which is the same code path the Nostr listener uses.
 - There is no rate limiting on outbound UnifiedPush calls beyond what the server-wide `reqwest::Client` timeouts provide (2 s connect, 5 s total).
-- The endpoint URL is fully attacker-controlled in the sense that the distributor can be any HTTP server. The shared `reqwest::Client` enforces TLS and the timeouts; the server does not pin certificates or restrict hostnames.
+- The endpoint URL is fully attacker-controlled in the sense that the distributor can be any public HTTPS server, unless `UNIFIEDPUSH_ALLOWED_HOSTS_REGEX` narrows allowed hostnames. The shared `reqwest::Client` enforces TLS, timeouts, and public-address DNS filtering; the server does not pin certificates.
 
 ## Reference
 
