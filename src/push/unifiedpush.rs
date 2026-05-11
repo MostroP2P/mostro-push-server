@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use tokio::sync::RwLock;
 use super::PushService;
 use crate::config::Config;
 use crate::store::Platform;
+use crate::utils::log_pubkey::log_pubkey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedPushEndpoint {
@@ -26,18 +28,26 @@ pub struct UnifiedPushService {
     client: Arc<reqwest::Client>,
     endpoints: RwLock<HashMap<String, UnifiedPushEndpoint>>,
     storage_path: PathBuf,
+    log_salt: Arc<[u8; 32]>,
 }
 
 impl UnifiedPushService {
     pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let storage_path = PathBuf::from("data/unifiedpush_endpoints.json");
+        let mut salt_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut salt_bytes);
 
         Self {
             config,
             client,
             endpoints: RwLock::new(HashMap::new()),
             storage_path,
+            log_salt: Arc::new(salt_bytes),
         }
+    }
+
+    fn log_device_id(&self, device_id: &str) -> String {
+        log_unifiedpush_identifier(self.log_salt.as_ref(), device_id)
     }
 
     /// Load endpoints from disk on startup
@@ -107,7 +117,10 @@ impl UnifiedPushService {
         // Persist to disk
         self.save_endpoints().await?;
 
-        info!("Registered UnifiedPush endpoint for device: {}", device_id);
+        info!(
+            "Registered UnifiedPush endpoint device={}",
+            self.log_device_id(&device_id)
+        );
         Ok(())
     }
 
@@ -126,11 +139,15 @@ impl UnifiedPushService {
         self.save_endpoints().await?;
 
         info!(
-            "Unregistered UnifiedPush endpoint for device: {}",
-            device_id
+            "Unregistered UnifiedPush endpoint device={}",
+            self.log_device_id(device_id)
         );
         Ok(())
     }
+}
+
+fn log_unifiedpush_identifier(salt: &[u8; 32], value: &str) -> String {
+    log_pubkey(salt, value)
 }
 
 #[async_trait]
@@ -146,10 +163,7 @@ impl PushService for UnifiedPushService {
             "timestamp": chrono::Utc::now().timestamp()
         });
 
-        debug!(
-            "Sending UnifiedPush to endpoint: {}...",
-            &device_token[..30.min(device_token.len())]
-        );
+        debug!("Sending UnifiedPush notification");
 
         let response = self.client.post(device_token).json(&payload).send().await?;
 
@@ -167,5 +181,27 @@ impl PushService for UnifiedPushService {
     fn supports_platform(&self, platform: &Platform) -> bool {
         // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.)
         matches!(platform, Platform::Android)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_unifiedpush_identifier;
+
+    #[test]
+    fn unifiedpush_log_identifier_is_stable_and_redacted() {
+        let salt = [7u8; 32];
+        let device_id = "device-secret-123";
+
+        let first = log_unifiedpush_identifier(&salt, device_id);
+        let second = log_unifiedpush_identifier(&salt, device_id);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 8);
+        assert_ne!(first, device_id);
+        assert!(
+            !device_id.contains(&first),
+            "hashed log identifier must not be a raw device_id substring"
+        );
     }
 }
