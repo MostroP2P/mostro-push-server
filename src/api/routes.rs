@@ -12,6 +12,18 @@ use crate::push::PushDispatcher;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
 use crate::utils::log_pubkey::log_pubkey;
 
+pub const JSON_PAYLOAD_LIMIT_BYTES: usize = 8 * 1024;
+pub const REGISTER_JSON_PAYLOAD_LIMIT_BYTES: usize = 128 * 1024;
+pub const REGISTER_TOKEN_MAX_BYTES: usize = 4096;
+
+pub fn json_config() -> web::JsonConfig {
+    web::JsonConfig::default().limit(JSON_PAYLOAD_LIMIT_BYTES)
+}
+
+fn register_json_config() -> web::JsonConfig {
+    web::JsonConfig::default().limit(REGISTER_JSON_PAYLOAD_LIMIT_BYTES)
+}
+
 /// Request for registering a plaintext token (Phase 3 - unencrypted).
 ///
 /// `mostro_pubkey` is the hex pubkey (64 chars) of the Mostro instance the
@@ -71,7 +83,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .route("/health", web::get().to(health_check))
             .route("/status", web::get().to(status))
-            .route("/register", web::post().to(register_token))
+            .service(
+                web::resource("/register")
+                    .app_data(register_json_config())
+                    .route(web::post().to(register_token)),
+            )
             .route("/unregister", web::post().to(unregister_token))
             .route("/info", web::get().to(server_info))
             .service(
@@ -136,6 +152,15 @@ async fn register_token(
         return HttpResponse::BadRequest().json(RegisterResponse {
             success: false,
             message: "Token cannot be empty".to_string(),
+            platform: None,
+        });
+    }
+
+    if req.token.len() > REGISTER_TOKEN_MAX_BYTES {
+        warn!("Token too long");
+        return HttpResponse::BadRequest().json(RegisterResponse {
+            success: false,
+            message: format!("Token too long (maximum {REGISTER_TOKEN_MAX_BYTES} bytes)"),
             platform: None,
         });
     }
@@ -273,6 +298,7 @@ async fn unregister_token(
 
 #[cfg(test)]
 mod tests {
+    use super::JSON_PAYLOAD_LIMIT_BYTES;
     use crate::api::test_support::{
         build_test_actix_app, make_app_state_with_whitelist, make_test_components,
         make_test_components_with_trusted_whitelist, make_test_components_with_whitelist_disabled,
@@ -332,6 +358,70 @@ mod tests {
             body_str,
             r#"{"success":false,"message":"Invalid trade_pubkey format (expected 64 hex characters)"}"#
         );
+    }
+
+    #[actix_web::test]
+    async fn register_one_megabyte_payload_returns_413() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let body = serde_json::json!({
+            "trade_pubkey": TEST_PUBKEY,
+            "token": "t".repeat(1024 * 1024),
+            "platform": "android"
+        })
+        .to_string();
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(body)
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[actix_web::test]
+    async fn register_hundred_kb_token_returns_400() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let body = serde_json::json!({
+            "trade_pubkey": TEST_PUBKEY,
+            "token": "t".repeat(100 * 1024),
+            "platform": "android"
+        })
+        .to_string();
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(body)
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = atest::read_body(resp).await;
+        let body_str = std::str::from_utf8(&body).unwrap();
+        assert_eq!(
+            body_str,
+            r#"{"success":false,"message":"Token too long (maximum 4096 bytes)"}"#
+        );
+    }
+
+    #[actix_web::test]
+    async fn json_payload_limit_applies_to_non_register_routes() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let body = serde_json::json!({
+            "trade_pubkey": "1".repeat(JSON_PAYLOAD_LIMIT_BYTES)
+        })
+        .to_string();
+
+        let req = atest::TestRequest::post()
+            .uri("/api/unregister")
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(body)
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     /// VERIFY-02: /api/unregister "not found" body is BYTE-IDENTICAL.

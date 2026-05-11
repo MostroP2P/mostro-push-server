@@ -2,6 +2,11 @@
 
 All endpoints are mounted under `/api`. Bodies and responses are JSON unless noted otherwise.
 
+JSON request bodies are capped at 8 KiB by default. `/api/register` accepts up
+to 128 KiB so oversized token values can return field-level validation errors,
+but the stored `token` field is still capped at 4096 bytes. Requests over the
+active body cap return `413 Payload Too Large`.
+
 | Method | Path             | Purpose                                                |
 |--------|------------------|--------------------------------------------------------|
 | GET    | `/api/health`    | Liveness probe                                         |
@@ -77,7 +82,7 @@ Request:
 | Field           | Type   | Description                                                                                                            |
 |-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
 | `trade_pubkey`  | string | 64 hex characters                                                                                                      |
-| `token`         | string | FCM device token, or UnifiedPush endpoint URL                                                                          |
+| `token`         | string | FCM device token, or UnifiedPush endpoint URL; 1 to 4096 bytes                                                         |
 | `platform`      | string | `"android"` or `"ios"`                                                                                                 |
 | `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
@@ -104,6 +109,7 @@ Possible validation errors:
 
 - `trade_pubkey` not 64 hex characters
 - `token` empty
+- `token` longer than 4096 bytes
 - `platform` not `"android"` or `"ios"`
 - `mostro_pubkey` present but not 64 hex characters
 
