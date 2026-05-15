@@ -21,18 +21,20 @@ flyctl auth login
 flyctl launch --no-deploy   # reads fly.toml, creates the app, no deploy yet
 ```
 
-### Configure secrets and deploy
+### Configure secrets
 
-`deploy-fly.sh` is an idempotent wrapper that sets all secrets and runs `flyctl deploy`. Inspect it before running and replace any placeholder values with your own — in particular `FIREBASE_PROJECT_ID`, `FIREBASE_SERVICE_ACCOUNT_PATH`, and the secret values you want in production.
+`deploy-fly.sh` verifies required Fly secrets and runs `flyctl deploy`. It
+does not set secret values, and it exits before deploying if a required
+secret is missing. Provision secrets out-of-band and never commit production
+values to the repo.
+
+Generate a fresh server key for every production deployment:
 
 ```bash
-./deploy-fly.sh
-```
+server_private_key="$(openssl rand -hex 32)"
 
-Or do it by hand:
-
-```bash
-flyctl secrets set \
+flyctl secrets set -a mostro-push-server \
+  SERVER_PRIVATE_KEY="${server_private_key}" \
   NOSTR_RELAYS="wss://relay.mostro.network" \
   FIREBASE_PROJECT_ID="your-project-id" \
   FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/firebase-service-account.json" \
@@ -45,17 +47,52 @@ flyctl secrets set \
   NOTIFY_TRUST_PROXY_HEADERS="true" \
   RUST_LOG="info"
 
-flyctl deploy
+unset server_private_key
+```
+
+`deploy-fly.sh` requires these secret names to exist before deploy:
+
+- `NOSTR_RELAYS`
+- `SERVER_PRIVATE_KEY`
+- `FIREBASE_PROJECT_ID`
+- `FIREBASE_SERVICE_ACCOUNT_PATH`
+
+Deploy after the secrets exist:
+
+```bash
+./deploy-fly.sh
 ```
 
 `NOTIFY_TRUST_PROXY_HEADERS=true` is correct on Fly because requests reach the app behind the Fly edge proxy, which sets `Fly-Client-IP`. On any deployment where the app is reachable directly, leave this `false`; otherwise an attacker can rotate that header per request and defeat the per-IP limiter.
 
 The Firebase service account JSON is bundled into the Docker image at the path specified by `FIREBASE_SERVICE_ACCOUNT_PATH`. Provision it before the build (the `Dockerfile` copies the `secrets/` directory).
 
+### Rotate `SERVER_PRIVATE_KEY`
+
+If a `SERVER_PRIVATE_KEY` value has ever been committed, pasted into issue
+trackers, sent in chat, or printed in logs, treat it as compromised. The old
+key that was previously present in `deploy-fly.sh` is public and must never
+be reused.
+
+Rotate it by generating a new value and replacing only the Fly secret:
+
+```bash
+server_private_key="$(openssl rand -hex 32)"
+flyctl secrets set -a mostro-push-server SERVER_PRIVATE_KEY="${server_private_key}"
+unset server_private_key
+```
+
+After rotation, redeploy and confirm the app starts:
+
+```bash
+./deploy-fly.sh
+curl https://mostro-push-server.fly.dev/api/health
+```
+
 ### Subsequent deploys
 
 ```bash
-flyctl deploy
+./deploy-fly.sh
 ```
 
 Secrets persist; only re-run `flyctl secrets set` when a value changes.
