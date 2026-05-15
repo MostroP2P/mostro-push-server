@@ -6,7 +6,7 @@ For deeper context (data flow, components, ops): [docs/architecture.md](docs/arc
 
 ## Tech stack
 
-- **Language**: Rust, edition 2021. MSRV 1.75 (Docker builder pinned to 1.83).
+- **Language**: Rust, edition 2021. MSRV 1.75 (Docker builder pinned to 1.90).
 - **Async runtime**: Tokio 1.35 (`full`).
 - **HTTP**: `actix-web 4.9`, `actix-rt 2.9`.
 - **Nostr**: `nostr-sdk 0.27`.
