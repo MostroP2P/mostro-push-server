@@ -227,16 +227,23 @@ curl -i -X POST http://localhost:8080/api/notify \
 | 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
 | 202    | `/api/notify` on parse-valid input                                            |
 | 400    | Malformed body, invalid `trade_pubkey`, invalid `platform`, empty `token`     |
-| 429    | `/api/notify` only — per-IP or per-pubkey rate limit                          |
-| 500    | `/api/notify` only — fail-closed when the per-IP key cannot be extracted      |
+| 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits                 |
+| 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
 
 ## Rate limiting
 
-Only `/api/notify` is rate-limited. Limits are per-IP and per-`trade_pubkey`; both must allow the request to pass. Defaults:
+`/api/register` and `/api/unregister` share a per-IP limit to protect the
+in-memory token store from registration churn:
+
+- Per-IP: `120/min`, burst `100`
+
+`/api/notify` has separate per-IP and per-`trade_pubkey` limits; both must allow the request to pass. Defaults:
 
 - Per-pubkey: `30/min`, burst `10` (env `NOTIFY_RATE_PER_PUBKEY_PER_MIN`)
 - Per-IP: `120/min`, burst `30` (env `NOTIFY_RATE_PER_IP_PER_MIN`)
 
-The other endpoints are intentionally not rate-limited at the HTTP layer; capacity at the edge is governed by `fly.toml` `hard_limit = 25`.
+`/api/health`, `/api/info`, and `/api/status` are intentionally not
+rate-limited at the HTTP layer; capacity at the edge is governed by
+`fly.toml` `hard_limit = 25`.
 
 See [configuration.md](./configuration.md) for the full rate-limit knob list and the `NOTIFY_TRUST_PROXY_HEADERS` flag governing trust of `Fly-Client-IP` / `X-Forwarded-For`.

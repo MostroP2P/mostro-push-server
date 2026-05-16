@@ -21,6 +21,13 @@ pub type PerPubkeyLimiter = DefaultKeyedRateLimiter<String>;
 /// Per-IP keyed rate limiter type alias (D-20).
 pub type PerIpLimiter = DefaultKeyedRateLimiter<IpAddr>;
 
+/// Separate per-IP limiter for /api/register and /api/unregister.
+///
+/// Kept as a newtype so it can live next to the /api/notify per-IP limiter
+/// in Actix app_data without type collision.
+#[derive(Clone)]
+pub struct RegisterIpLimiter(pub Arc<PerIpLimiter>);
+
 /// Newtype injected into `web::Data` to gate trust of `Fly-Client-IP` and
 /// `X-Forwarded-For`. When `false`, both proxy headers are ignored and the
 /// per-IP limiter keys exclusively on `req.peer_addr()`. Default is `false`
@@ -37,6 +44,11 @@ pub const PUBKEY_BURST: u32 = 10;
 
 /// Per-IP burst (D-02). Not env-overridable in this phase per D-29.
 pub const IP_BURST: u32 = 30;
+
+/// Register/unregister per-IP limiter. Higher than /api/notify because normal
+/// clients can re-register on app/session churn, but still caps store spam.
+pub const REGISTER_IP_RATE_PER_MIN: u32 = 120;
+pub const REGISTER_IP_BURST: u32 = 100;
 
 /// Cleanup interval default in seconds (D-16). Override via NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS.
 /// Defaults are duplicated in `Config::from_env` so this constant is currently
@@ -160,6 +172,60 @@ pub async fn per_ip_rate_limit_mw(
                 .max(1);
             let resp = rate_limited_response(retry_after_secs);
             log::debug!("per-ip 429 retry_after={}s", retry_after_secs);
+            Ok(req.into_response(resp).map_into_boxed_body())
+        }
+    }
+}
+
+/// Per-IP middleware for /api/register and /api/unregister.
+pub async fn register_ip_rate_limit_mw(
+    req: ServiceRequest,
+    next: Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    let limiter = req
+        .app_data::<web::Data<RegisterIpLimiter>>()
+        .map(|d| d.0.clone());
+
+    let limiter = match limiter {
+        Some(l) => l,
+        None => {
+            warn!("register per-ip rate-limit middleware: limiter not in app_data (wiring bug)");
+            let resp = HttpResponse::InternalServerError().json(json!({
+                "success": false,
+                "message": "internal error"
+            }));
+            return Ok(req.into_response(resp).map_into_boxed_body());
+        }
+    };
+
+    let trust_proxy_headers = req
+        .app_data::<web::Data<TrustProxyHeaders>>()
+        .map(|d| d.0)
+        .unwrap_or(false);
+
+    let ip = match extract_client_ip(&req, trust_proxy_headers) {
+        Some(ip) => ip,
+        None => {
+            let resp = HttpResponse::InternalServerError().json(json!({
+                "success": false,
+                "message": "internal error"
+            }));
+            return Ok(req.into_response(resp).map_into_boxed_body());
+        }
+    };
+
+    match limiter.check_key(&ip) {
+        Ok(()) => {
+            let res = next.call(req).await?;
+            Ok(res.map_into_boxed_body())
+        }
+        Err(not_until) => {
+            let retry_after_secs = not_until
+                .wait_time_from(DefaultClock::default().now())
+                .as_secs()
+                .max(1);
+            let resp = rate_limited_response(retry_after_secs);
+            log::debug!("register per-ip 429 retry_after={}s", retry_after_secs);
             Ok(req.into_response(resp).map_into_boxed_body())
         }
     }

@@ -33,7 +33,7 @@ src/
 
 ### HTTP server (`actix-web`)
 
-Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister`) plus the rate-limited `/api/notify` resource. The `/api/notify` resource is the only endpoint wrapped by middleware: `request_id_mw` (outermost) and `per_ip_rate_limit_mw`.
+Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister`) plus `/api/notify`. `/api/register` and `/api/unregister` share a per-IP middleware to bound token-store churn. `/api/notify` has its own middleware stack: `request_id_mw` (outermost) and `per_ip_rate_limit_mw`.
 
 ### Nostr listener (`nostr-sdk`)
 
