@@ -32,6 +32,11 @@ A `2xx` response is treated as success. Any other response is logged at `error!`
 
 The endpoint store is loaded once at startup. Failures to read or parse the file are logged and the service starts with an empty map.
 
+Logs never include raw UnifiedPush `device_id` values or endpoint URL prefixes.
+Device IDs are represented by the same salted, truncated BLAKE3 correlator used
+for other privacy-sensitive identifiers, with a random in-memory salt per
+process.
+
 ## Platform support
 
 `UnifiedPushService::supports_platform` returns `true` only for `Platform::Android`. iOS clients are FCM-only.
