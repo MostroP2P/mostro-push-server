@@ -114,6 +114,7 @@ pub fn make_app_state_with_whitelist(
         per_pubkey_limiter,
         trusted_mostro_pubkeys,
         trusted_whitelist_enabled,
+        unifiedpush_allowed_hosts_regex: None,
     };
 
     (state, per_ip_limiter)

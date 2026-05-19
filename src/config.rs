@@ -41,6 +41,7 @@ pub struct NostrConfig {
 pub struct PushConfig {
     pub fcm_enabled: bool,
     pub unifiedpush_enabled: bool,
+    pub unifiedpush_allowed_hosts_regex: Option<String>,
     // Reserved for the dispatcher batching/cooldown work (see utils/batching).
     #[allow(dead_code)]
     pub batch_delay_ms: u64,
@@ -105,6 +106,16 @@ impl Config {
                 unifiedpush_enabled: env::var("UNIFIEDPUSH_ENABLED")
                     .unwrap_or_else(|_| "true".to_string())
                     .parse()?,
+                unifiedpush_allowed_hosts_regex: {
+                    let value = env::var("UNIFIEDPUSH_ALLOWED_HOSTS_REGEX")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    if let Some(pattern) = value.as_deref() {
+                        regex::Regex::new(pattern)?;
+                    }
+                    value
+                },
                 batch_delay_ms: env::var("BATCH_DELAY_MS")
                     .unwrap_or_else(|_| "5000".to_string())
                     .parse()?,
@@ -244,6 +255,25 @@ mod tests {
             msg.contains("NOTIFY_RATE_PER_IP_PER_MIN must be > 0"),
             "expected D-04 error message, got: {}",
             msg
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_unifiedpush_allowed_hosts_regex() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::set_var("UNIFIEDPUSH_ALLOWED_HOSTS_REGEX", "[");
+
+        let result = Config::from_env();
+
+        std::env::remove_var("NOSTR_RELAYS");
+        std::env::remove_var("UNIFIEDPUSH_ALLOWED_HOSTS_REGEX");
+
+        let err = result.expect_err("invalid UnifiedPush host allowlist regex must fail startup");
+        assert!(
+            err.to_string().contains("regex parse error"),
+            "expected regex parse error, got: {}",
+            err
         );
     }
 }

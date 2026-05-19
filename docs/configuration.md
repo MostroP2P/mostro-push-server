@@ -73,6 +73,7 @@ To turn the filter on/off without rebuilding, flip
 |---------------------------------|---------|--------------------------------------------------------------------------------------------|
 | `FCM_ENABLED`                   | `true`  | Enable Firebase Cloud Messaging backend                                                    |
 | `UNIFIEDPUSH_ENABLED`           | `true`  | Enable UnifiedPush backend                                                                 |
+| `UNIFIEDPUSH_ALLOWED_HOSTS_REGEX` | unset | Optional regex allowlist for UnifiedPush endpoint hostnames. Matched against the lowercase parsed host, not the full URL. Invalid regex fails startup. |
 | `FIREBASE_PROJECT_ID`           | -       | Firebase project ID, required when `FCM_ENABLED=true`                                      |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | -       | Absolute path to the Firebase service-account JSON. If missing or unreadable, FCM is disabled at startup with a warning; the server keeps running. |
 | `BATCH_DELAY_MS`                | `5000`  | Reserved (declared on `PushConfig`; not currently consumed)                                |
@@ -133,6 +134,8 @@ SERVER_PORT=8080
 # Push backends
 FCM_ENABLED=true
 UNIFIEDPUSH_ENABLED=false
+# Optional host allowlist for UnifiedPush endpoint URLs
+# UNIFIEDPUSH_ALLOWED_HOSTS_REGEX=(^|\.)example\.com$
 FIREBASE_PROJECT_ID=mostro-mobile
 FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/mostro-mobile-firebase-adminsdk.json
 

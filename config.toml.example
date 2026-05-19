@@ -6,6 +6,7 @@ event_kinds = [1059]
 [push]
 fcm_enabled = true
 unifiedpush_enabled = true
+unifiedpush_allowed_hosts_regex = ""
 batch_delay_ms = 5000
 cooldown_ms = 60000
 

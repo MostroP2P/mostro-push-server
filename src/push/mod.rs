@@ -7,7 +7,7 @@ pub mod unifiedpush;
 
 pub use dispatcher::{DispatchError, DispatchOutcome, PushDispatcher};
 pub use fcm::FcmPush;
-pub use unifiedpush::UnifiedPushService;
+pub use unifiedpush::{PublicDnsResolver, UnifiedPushService};
 
 use crate::store::Platform;
 

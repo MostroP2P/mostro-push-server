@@ -8,6 +8,7 @@ use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::api::rate_limit::{per_ip_rate_limit_mw, PerPubkeyLimiter};
+use crate::push::unifiedpush::{token_looks_like_unifiedpush_url, validate_endpoint_url};
 use crate::push::PushDispatcher;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
 use crate::utils::log_pubkey::log_pubkey;
@@ -64,6 +65,7 @@ pub struct AppState {
     /// default), `mostro_pubkey` is ignored even if the embedded JSON has
     /// entries, which keeps rollout staged with the mobile client.
     pub trusted_whitelist_enabled: bool,
+    pub unifiedpush_allowed_hosts_regex: Option<Arc<regex::Regex>>,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -156,6 +158,19 @@ async fn register_token(
             });
         }
     };
+
+    if platform == Platform::Android && token_looks_like_unifiedpush_url(&req.token) {
+        if let Err(e) =
+            validate_endpoint_url(&req.token, state.unifiedpush_allowed_hosts_regex.as_deref())
+        {
+            warn!("Invalid UnifiedPush endpoint URL: {}", e);
+            return HttpResponse::BadRequest().json(RegisterResponse {
+                success: false,
+                message: "Invalid UnifiedPush endpoint URL".to_string(),
+                platform: None,
+            });
+        }
+    }
 
     // Trusted Mostro instance whitelist filter.
     //
@@ -660,6 +675,68 @@ mod tests {
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY_2,
                 "token": "test_fcm_token",
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn register_rejects_private_unifiedpush_url_and_does_not_store_it() {
+        let c = make_test_components();
+        let store = c.state.token_store.clone();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "https://169.254.169.254/latest/meta-data",
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = atest::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"Invalid UnifiedPush endpoint URL"}"#
+        );
+        assert!(store.get(TEST_PUBKEY).await.is_none());
+    }
+
+    #[actix_web::test]
+    async fn register_rejects_non_https_unifiedpush_url() {
+        let c = make_test_components();
+        let store = c.state.token_store.clone();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        for token in ["http://up.example.com/push", "file:///etc/passwd"] {
+            let req = atest::TestRequest::post()
+                .uri("/api/register")
+                .set_json(serde_json::json!({
+                    "trade_pubkey": TEST_PUBKEY,
+                    "token": token,
+                    "platform": "android"
+                }))
+                .to_request();
+            let resp = atest::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(store.get(TEST_PUBKEY).await.is_none());
+        }
+    }
+
+    #[actix_web::test]
+    async fn register_accepts_public_https_unifiedpush_url() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "https://up.example.com/push",
                 "platform": "android"
             }))
             .to_request();
