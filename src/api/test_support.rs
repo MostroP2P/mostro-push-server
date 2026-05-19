@@ -11,7 +11,7 @@ use rand::RngCore;
 use crate::api::rate_limit::{
     PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
 };
-use crate::api::routes::{configure, AppState};
+use crate::api::routes::{configure, json_config, AppState};
 use crate::push::{PushDispatcher, PushService};
 use crate::store::{Platform, TokenStore};
 
@@ -199,6 +199,7 @@ pub fn build_test_actix_app(
     App::new()
         .app_data(web::Data::new(c.state))
         .app_data(web::Data::new(c.per_ip_limiter))
+        .app_data(json_config())
         // Existing rate-limit tests inject Fly-Client-IP / X-Forwarded-For
         // and expect the middleware to honour them; mirror that by enabling
         // the proxy-trust flag here. Tests covering the default-false bypass

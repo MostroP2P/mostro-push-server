@@ -18,7 +18,7 @@ mod utils;
 mod crypto;
 
 use api::rate_limit::{PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST};
-use api::routes::AppState;
+use api::routes::{json_config, AppState};
 use config::Config;
 use nostr::NostrListener;
 use push::{FcmPush, PushDispatcher, PushService, UnifiedPushService};
@@ -232,6 +232,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(app_state.clone()))
             .app_data(web::Data::new(per_ip_limiter.clone()))
             .app_data(web::Data::new(trust_proxy_headers))
+            .app_data(json_config())
             .configure(api::routes::configure)
     })
     .bind(server_addr)?
