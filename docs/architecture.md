@@ -37,7 +37,7 @@ Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/regis
 
 ### Nostr listener (`nostr-sdk`)
 
-Connects to all configured relays, subscribes to `kind 1059` events with no author filter, and reconnects automatically on close (5 s) or error (10 s). For each event it extracts the `p` tag and looks up the corresponding token in the store; on hit it calls `PushDispatcher::dispatch`.
+Connects to all configured relays, subscribes to `kind 1059` (Mostro protocol v1 Gift Wrap) and `kind 14` (Mostro protocol v2 NIP-44 direct) events with no author filter, and reconnects automatically on close (5 s) or error (10 s). For each event it extracts the `p` tag and looks up the corresponding token in the store; on hit it calls `PushDispatcher::dispatch`.
 
 The listener generates an ephemeral `Keys::generate()` for the connection itself; this key only signs subscriptions, it never identifies a user.
 
@@ -68,12 +68,12 @@ A salted truncated BLAKE3 keyed hash. The salt is a 32-byte random value generat
 
 ## Data flow
 
-### Listener path (`kind 1059` from a relay)
+### Listener path (`kind 1059` / `kind 14` from a relay)
 
 ```
 Sender (any Nostr client)
     │
-    │  publish kind 1059 (p tag = trade_pubkey)
+    │  publish kind 1059 or kind 14 (p tag = trade_pubkey)
     ▼
 Nostr relay
     │

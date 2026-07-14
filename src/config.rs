@@ -96,7 +96,7 @@ impl Config {
             nostr: NostrConfig {
                 relays,
                 subscription_id: "mostro-push-listener".to_string(),
-                event_kinds: vec![1059],
+                event_kinds: vec![1059, 14],
             },
             push: PushConfig {
                 fcm_enabled: env::var("FCM_ENABLED")

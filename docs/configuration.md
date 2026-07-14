@@ -12,7 +12,7 @@ cp .env.example .env
 
 | Variable        | Description                                                                                  |
 |-----------------|----------------------------------------------------------------------------------------------|
-| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kind 1059. |
+| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kinds 1059 and 14. |
 
 `NOSTR_RELAYS` is the only variable without a default; the server fails to boot if it is unset.
 

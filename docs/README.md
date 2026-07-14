@@ -13,7 +13,7 @@ Operator and integrator documentation for the Mostro Push Server, a privacy-pres
 
 ## What this server does
 
-- Subscribes to Nostr relays and observes Gift Wrap events (`kind 1059`).
+- Subscribes to Nostr relays and observes Gift Wrap events (`kind 1059`, Mostro protocol v1) and NIP-44 direct messages (`kind 14`, Mostro protocol v2).
 - Maintains an in-memory map of `trade_pubkey -> device_token` populated by mobile clients via `POST /api/register`.
 - On a matching event, dispatches a silent push via Firebase Cloud Messaging (FCM) and/or UnifiedPush.
 - Exposes `POST /api/notify` for the mobile client to trigger a sender-side wake-up (silent push) when peer-to-peer chat events are sent without going through the Mostro daemon.

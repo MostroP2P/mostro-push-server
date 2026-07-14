@@ -1,6 +1,6 @@
 # Mostro Push Server
 
-Privacy-preserving push notification backend for the Mostro P2P trading ecosystem. Rust + Actix-web + Tokio. The server observes Nostr Gift Wrap events (`kind 1059`) on configured relays, looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
+Privacy-preserving push notification backend for the Mostro P2P trading ecosystem. Rust + Actix-web + Tokio. The server observes Nostr Gift Wrap events (`kind 1059`, Mostro protocol v1) and NIP-44 direct messages (`kind 14`, Mostro protocol v2) on configured relays, looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
 
 For deeper context (data flow, components, ops): [docs/architecture.md](docs/architecture.md), [docs/api.md](docs/api.md), [docs/configuration.md](docs/configuration.md).
 
@@ -68,7 +68,7 @@ src/
 │   ├── notify.rs        # /api/notify handler + request_id_mw
 │   ├── rate_limit.rs    # per-IP / per-pubkey limiter middleware (governor)
 │   └── test_support.rs  # In-process test fixtures
-├── nostr/listener.rs    # Persistent subscription, kind 1059 dispatch
+├── nostr/listener.rs    # Persistent subscription, kind 1059 / kind 14 dispatch
 ├── push/
 │   ├── mod.rs           # PushService trait
 │   ├── dispatcher.rs    # PushDispatcher (lock-free)

@@ -1,7 +1,7 @@
 [nostr]
 relays = ["wss://relay.mostro.network"]
 subscription_id = "mostro-push-listener"
-event_kinds = [1059]
+event_kinds = [1059, 14]
 
 [push]
 fcm_enabled = true
