@@ -2,7 +2,7 @@
 
 Privacy-preserving push notification backend for the [Mostro](https://mostro.network/) P2P trading ecosystem.
 
-The server observes Nostr Gift Wrap events (`kind 1059`), looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush so Mostro Mobile clients can wake up and process trade events. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
+The server observes Nostr Gift Wrap events (`kind 1059`, Mostro protocol v1) and NIP-44 direct messages (`kind 14`, Mostro protocol v2), looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush so Mostro Mobile clients can wake up and process trade events. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
 
 ## How it works
 
@@ -17,7 +17,7 @@ The server observes Nostr Gift Wrap events (`kind 1059`), looks up registered de
 │                 │       trade_pubkey                 │                  │
 └─────────────────┘                                    └────────┬─────────┘
                                                                 │
-┌─────────────────┐    2. Publishes kind 1059          ┌────────▼─────────┐
+┌─────────────────┐    2. Publishes kind 1059 / 14     ┌────────▼─────────┐
 │  Mostro Daemon  │ ──────────────────────────────────▶│  Nostr Relay     │
 │  / dispute      │       p: trade_pubkey              │                  │
 │  admin / peer   │                                    └────────┬─────────┘
@@ -41,7 +41,7 @@ The server observes Nostr Gift Wrap events (`kind 1059`), looks up registered de
 
 Two ingress paths feed the same dispatcher:
 
-1. **Listener path** — the Nostr listener subscribes to `kind 1059` on configured relays and dispatches when a `p` tag matches a registered `trade_pubkey`.
+1. **Listener path** — the Nostr listener subscribes to `kind 1059` (protocol v1 Gift Wrap) and `kind 14` (protocol v2 NIP-44 direct) on configured relays and dispatches when a `p` tag matches a registered `trade_pubkey`.
 2. **Sender-triggered path** — `POST /api/notify` lets a sender ask the server to wake the recipient when an event was sent peer-to-peer without going through the Mostro daemon (e.g. dispute admin DMs).
 
 ## Privacy properties
