@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
-use crate::api::rate_limit::{per_ip_rate_limit_mw, PerPubkeyLimiter};
+use crate::api::rate_limit::{per_ip_rate_limit_mw, register_ip_rate_limit_mw, PerPubkeyLimiter};
 use crate::push::PushDispatcher;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
 use crate::utils::log_pubkey::log_pubkey;
@@ -71,8 +71,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .route("/health", web::get().to(health_check))
             .route("/status", web::get().to(status))
-            .route("/register", web::post().to(register_token))
-            .route("/unregister", web::post().to(unregister_token))
+            .service(
+                web::resource("/register")
+                    .wrap(from_fn(register_ip_rate_limit_mw))
+                    .route(web::post().to(register_token)),
+            )
+            .service(
+                web::resource("/unregister")
+                    .wrap(from_fn(register_ip_rate_limit_mw))
+                    .route(web::post().to(unregister_token)),
+            )
             .route("/info", web::get().to(server_info))
             .service(
                 web::resource("/notify")
@@ -273,11 +281,12 @@ async fn unregister_token(
 
 #[cfg(test)]
 mod tests {
+    use crate::api::rate_limit::REGISTER_IP_BURST;
     use crate::api::test_support::{
         build_test_actix_app, make_app_state_with_whitelist, make_test_components,
         make_test_components_with_trusted_whitelist, make_test_components_with_whitelist_disabled,
-        StubPushService, TestAppComponents, TEST_PUBKEY, TEST_PUBKEY_2, TRUSTED_MOSTRO_PUBKEY,
-        UNTRUSTED_MOSTRO_PUBKEY,
+        test_register_ip_quota, StubPushService, TestAppComponents, TEST_PUBKEY, TEST_PUBKEY_2,
+        TRUSTED_MOSTRO_PUBKEY, UNTRUSTED_MOSTRO_PUBKEY,
     };
     use crate::store::Platform;
     use actix_web::{http::StatusCode, test as atest};
@@ -292,6 +301,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -318,6 +328,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": "tooshort",
                 "token": "test_fcm_token",
@@ -342,6 +353,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/unregister")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({"trade_pubkey": TEST_PUBKEY_2}))
             .to_request();
         let resp = atest::call_service(&app, req).await;
@@ -363,6 +375,7 @@ mod tests {
         // Register first so we have something to unregister.
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -373,6 +386,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/unregister")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({"trade_pubkey": TEST_PUBKEY}))
             .to_request();
         let resp = atest::call_service(&app, req).await;
@@ -438,8 +452,8 @@ mod tests {
 
     /// D-25 anti-DEPLOY-3 / LIMIT-03 structural lock:
     /// 1000 GETs against /api/health from a single fixed Fly-Client-IP must
-    /// return 1000x 200. /api/health is NOT wrapped by per_ip_rate_limit_mw —
-    /// only /api/notify is (see configure()). Any 429 here means a regression.
+    /// return 1000x 200. /api/health is not wrapped by any rate-limit
+    /// middleware. Any 429 here means a regression.
     #[actix_web::test]
     async fn health_endpoint_not_rate_limited_1000_burst() {
         let c = make_test_components();
@@ -459,8 +473,8 @@ mod tests {
         }
     }
 
-    /// LIMIT-03 structural lock: /api/register, /api/unregister, /api/info,
-    /// /api/status must also bypass the per-IP middleware. 50-request burst
+    /// LIMIT-03 structural lock: /api/info and /api/status must bypass the
+    /// register/unregister and notify per-IP middleware. 50-request burst
     /// against each; any 429 fails the test.
     #[actix_web::test]
     async fn other_endpoints_not_rate_limited_under_burst() {
@@ -492,9 +506,15 @@ mod tests {
                 "/api/status must not 429"
             );
         }
+    }
 
-        // /api/register: 50 distinct pubkeys to avoid TokenStore deduplication.
-        for i in 0..50usize {
+    #[actix_web::test]
+    async fn register_rate_limited_after_hundred_request_burst() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let mut first_429_iter: Option<usize> = None;
+        for i in 0..(REGISTER_IP_BURST as usize + 5) {
             let pk = format!("{:0>64}", format!("{:x}", i + 1));
             let req = atest::TestRequest::post()
                 .uri("/api/register")
@@ -506,12 +526,48 @@ mod tests {
                 }))
                 .to_request();
             let resp = atest::call_service(&app, req).await;
-            assert_ne!(
-                resp.status(),
-                StatusCode::TOO_MANY_REQUESTS,
-                "/api/register must not 429"
-            );
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                first_429_iter = Some(i);
+                break;
+            }
         }
+
+        let iter = first_429_iter.expect("register burst >100 from one IP must produce 429");
+        assert!(
+            iter >= REGISTER_IP_BURST as usize,
+            "register first 429 should happen after burst is exhausted: iter={} burst={}",
+            iter,
+            REGISTER_IP_BURST
+        );
+    }
+
+    #[actix_web::test]
+    async fn unregister_rate_limited_after_hundred_request_burst() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let mut first_429_iter: Option<usize> = None;
+        for i in 0..(REGISTER_IP_BURST as usize + 5) {
+            let pk = format!("{:0>64}", format!("{:x}", i + 1));
+            let req = atest::TestRequest::post()
+                .uri("/api/unregister")
+                .insert_header(("Fly-Client-IP", "8.8.4.4"))
+                .set_json(serde_json::json!({"trade_pubkey": pk}))
+                .to_request();
+            let resp = atest::call_service(&app, req).await;
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                first_429_iter = Some(i);
+                break;
+            }
+        }
+
+        let iter = first_429_iter.expect("unregister burst >100 from one IP must produce 429");
+        assert!(
+            iter >= REGISTER_IP_BURST as usize,
+            "unregister first 429 should happen after burst is exhausted: iter={} burst={}",
+            iter,
+            REGISTER_IP_BURST
+        );
     }
 
     /// Whitelist active, declared mostro_pubkey is in the list -> 200.
@@ -522,6 +578,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -557,6 +614,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -576,6 +634,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -605,6 +664,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -629,6 +689,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -657,6 +718,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY_2,
                 "token": "test_fcm_token",
@@ -680,6 +742,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY,
                 "token": "test_fcm_token",
@@ -704,6 +767,7 @@ mod tests {
 
         let req = atest::TestRequest::post()
             .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
             .set_json(serde_json::json!({
                 "trade_pubkey": TEST_PUBKEY_2,
                 "token": "test_fcm_token",
@@ -789,6 +853,9 @@ mod tests {
             let components = TestAppComponents {
                 state,
                 per_ip_limiter,
+                register_ip_limiter: std::sync::Arc::new(governor::RateLimiter::keyed(
+                    test_register_ip_quota(),
+                )),
                 stub,
             };
             let app = atest::init_service(build_test_actix_app(components)).await;
@@ -804,6 +871,7 @@ mod tests {
             }
             let req = atest::TestRequest::post()
                 .uri("/api/register")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
                 .set_json(&body)
                 .to_request();
             let resp = atest::call_service(&app, req).await;

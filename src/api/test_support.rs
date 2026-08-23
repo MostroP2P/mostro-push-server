@@ -9,7 +9,8 @@ use governor::{Quota, RateLimiter};
 use rand::RngCore;
 
 use crate::api::rate_limit::{
-    PerIpLimiter, PerPubkeyLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
+    PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
+    REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
 };
 use crate::api::routes::{configure, AppState};
 use crate::push::{PushDispatcher, PushService};
@@ -72,6 +73,11 @@ pub fn test_per_ip_quota() -> Quota {
     Quota::per_minute(NonZeroU32::new(120).unwrap()).allow_burst(NonZeroU32::new(IP_BURST).unwrap())
 }
 
+pub fn test_register_ip_quota() -> Quota {
+    Quota::per_minute(NonZeroU32::new(REGISTER_IP_RATE_PER_MIN).unwrap())
+        .allow_burst(NonZeroU32::new(REGISTER_IP_BURST).unwrap())
+}
+
 /// Build a test AppState + per-IP limiter pair using fresh in-memory limiters.
 /// Returns (state, per_ip_limiter) so callers can assert against the stub.
 ///
@@ -129,6 +135,7 @@ pub fn make_app_state_with_whitelist(
 pub struct TestAppComponents {
     pub state: AppState,
     pub per_ip_limiter: Arc<PerIpLimiter>,
+    pub register_ip_limiter: Arc<PerIpLimiter>,
     pub stub: Arc<StubPushService>,
 }
 
@@ -140,9 +147,11 @@ pub struct TestAppComponents {
 pub fn make_test_components() -> TestAppComponents {
     let stub = Arc::new(StubPushService::new(vec![Platform::Android]));
     let (state, per_ip_limiter) = make_app_state(stub.clone());
+    let register_ip_limiter = Arc::new(RateLimiter::keyed(test_register_ip_quota()));
     TestAppComponents {
         state,
         per_ip_limiter,
+        register_ip_limiter,
         stub,
     }
 }
@@ -158,9 +167,11 @@ pub fn make_test_components_with_trusted_whitelist() -> TestAppComponents {
     whitelist.insert(TRUSTED_MOSTRO_PUBKEY.to_string());
     let (state, per_ip_limiter) =
         make_app_state_with_whitelist(stub.clone(), Arc::new(whitelist), true);
+    let register_ip_limiter = Arc::new(RateLimiter::keyed(test_register_ip_quota()));
     TestAppComponents {
         state,
         per_ip_limiter,
+        register_ip_limiter,
         stub,
     }
 }
@@ -175,9 +186,11 @@ pub fn make_test_components_with_whitelist_disabled() -> TestAppComponents {
     whitelist.insert(TRUSTED_MOSTRO_PUBKEY.to_string());
     let (state, per_ip_limiter) =
         make_app_state_with_whitelist(stub.clone(), Arc::new(whitelist), false);
+    let register_ip_limiter = Arc::new(RateLimiter::keyed(test_register_ip_quota()));
     TestAppComponents {
         state,
         per_ip_limiter,
+        register_ip_limiter,
         stub,
     }
 }
@@ -199,6 +212,7 @@ pub fn build_test_actix_app(
     App::new()
         .app_data(web::Data::new(c.state))
         .app_data(web::Data::new(c.per_ip_limiter))
+        .app_data(web::Data::new(RegisterIpLimiter(c.register_ip_limiter)))
         // Existing rate-limit tests inject Fly-Client-IP / X-Forwarded-For
         // and expect the middleware to honour them; mirror that by enabling
         // the proxy-trust flag here. Tests covering the default-false bypass
