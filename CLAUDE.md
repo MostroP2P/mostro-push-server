@@ -33,6 +33,8 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 
    **Exception (off by default):** when `TRUSTED_WHITELIST_ENABLED=true` AND the embedded whitelist is non-empty, `/api/register` MAY return a new `403 Forbidden` with one of two distinct bodies — `{"success":false,"message":"Mostro instance pubkey required"}` (missing field) or `{"success":false,"message":"Mostro instance not trusted"}` (untrusted value). The flag defaults to `false` precisely so the byte-identical fixture set continues to hold for clients that pre-date the feature; only flip it after the mobile rollout.
 
+   **Exception (always on):** `/api/register` and `/api/unregister` are wrapped by `register_ip_rate_limit_mw` and MAY return `429 Too Many Requests` with the shared `rate_limited_response` body — `{"success":false,"message":"rate limited"}` plus a `Retry-After` header in whole seconds, `.max(1)` — or `500 Internal Server Error` with `{"success":false,"message":"internal error"}` when the per-IP key cannot be extracted (fail-closed, same rule as `/api/notify`). Both bodies keep the `success, message` field order. The `200` and `400` bodies are unchanged, so the pre-1.1 fixture set still holds for every request that is not rate-limited.
+
 4. **Token store is in-memory only.** No persistence to disk for `trade_pubkey -> device_token`. UnifiedPush endpoints are the only on-disk state (atomic JSON write to `data/unifiedpush_endpoints.json`).
 
 5. **Logs never carry raw pubkeys.** Every log site that touches a `trade_pubkey` goes through `crate::utils::log_pubkey::log_pubkey(salt, pubkey)`. The salt is a 32-byte random value generated once per process and never persisted.
