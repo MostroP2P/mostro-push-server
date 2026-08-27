@@ -58,6 +58,10 @@ Two entry points:
 
 Builds an RS256 JWT from the Firebase service-account JSON, exchanges it for a short-lived access token, and caches the token under an `RwLock<Option<CachedToken>>` until 60 seconds before expiry. Sends to `fcm.googleapis.com/v1/projects/{project}/messages:send`. Supports both `Platform::Android` and `Platform::Ios`.
 
+The token exchange is serialised by a `Mutex` so only one refresh runs at a time; concurrent dispatches that miss the cache wait for that result instead of each calling Google. It retries transient failures (5xx, 429, network errors) up to three times with exponential backoff and jitter, and fails fast on 4xx, which signal wrong credentials, clock or scope and cannot be fixed by repeating the request.
+
+Both are bounded on purpose. The sequence runs while the caller holds one of the 50 `/api/notify` semaphore permits, and that handler drops the dispatch silently once the pool saturates, so an unbounded retry would convert a Google outage into a much larger loss of notifications than no retry at all. A unit test pins the worst-case budget.
+
 ### UnifiedPush backend
 
 Treats the `device_token` as the UnifiedPush distributor endpoint URL. POSTs a small JSON payload (`{"type":"silent_wake","timestamp":<unix>}`). Endpoints are mirrored to `data/unifiedpush_endpoints.json` via temp-file + atomic rename. Supports `Platform::Android` only.
