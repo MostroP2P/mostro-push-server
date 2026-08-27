@@ -176,3 +176,103 @@ impl PushService for UnifiedPushService {
         matches!(platform, Platform::Android)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        Config, CryptoConfig, NostrConfig, NotifyRateLimitConfig, PushConfig, RateLimitConfig,
+        ServerConfig, StoreConfig,
+    };
+
+    /// Minimal config built by hand rather than through `Config::from_env`,
+    /// which would race with the env-mutating tests in `src/config.rs`.
+    fn test_config() -> Config {
+        Config {
+            nostr: NostrConfig {
+                relays: vec!["wss://relay.example.com".to_string()],
+                subscription_id: "test".to_string(),
+                event_kinds: vec![1059, 14],
+            },
+            push: PushConfig {
+                fcm_enabled: false,
+                unifiedpush_enabled: true,
+                batch_delay_ms: 5000,
+                cooldown_ms: 60000,
+            },
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+            },
+            rate_limit: RateLimitConfig { max_per_minute: 60 },
+            crypto: CryptoConfig {
+                server_private_key: "00".repeat(32),
+            },
+            store: StoreConfig {
+                token_ttl_hours: 48,
+                cleanup_interval_hours: 1,
+            },
+            notify_rate_limit: NotifyRateLimitConfig {
+                per_pubkey_per_min: 30,
+                per_ip_per_min: 120,
+                cleanup_interval_secs: 60,
+                pubkey_limiter_soft_cap: 100_000,
+                trust_proxy_headers: false,
+            },
+            trusted_whitelist_enabled: false,
+        }
+    }
+
+    fn test_service() -> UnifiedPushService {
+        UnifiedPushService::new(test_config(), Arc::new(reqwest::Client::new()))
+    }
+
+    /// The guard living in `endpoint_guard` is only useful if the dispatch path
+    /// actually calls it. The unit tests over `validate_endpoint` would all
+    /// still pass if this call site were deleted, so assert on the refusal
+    /// message: a missing guard would surface as a reqwest connection error
+    /// instead, which reads very differently.
+    #[tokio::test]
+    async fn send_to_token_refuses_non_public_endpoints() {
+        let service = test_service();
+
+        for token in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1:8080/",
+            "https://[::ffff:169.254.169.254]/",
+            "https://10.0.0.1/push",
+            "https://localhost/push",
+        ] {
+            let err = service
+                .send_to_token(token, &Platform::Android)
+                .await
+                .expect_err("dispatch MUST refuse a non-public endpoint");
+
+            assert!(
+                err.to_string().starts_with("UnifiedPush endpoint refused"),
+                "expected the guard to reject {token}, got: {err}"
+            );
+        }
+    }
+
+    /// An opaque value (an FCM token that reached the wrong backend) must not
+    /// be handed to reqwest to interpret.
+    #[tokio::test]
+    async fn send_to_token_refuses_opaque_tokens() {
+        let service = test_service();
+        let err = service
+            .send_to_token("d1PxYz8QRk-2vQ1sAbCdEf", &Platform::Android)
+            .await
+            .expect_err("dispatch MUST refuse an opaque token");
+
+        assert!(err.to_string().starts_with("UnifiedPush endpoint refused"));
+    }
+
+    #[test]
+    fn unifiedpush_supports_android_only() {
+        let service = test_service();
+        assert!(service.supports_platform(&Platform::Android));
+        assert!(!service.supports_platform(&Platform::Ios));
+    }
+}
