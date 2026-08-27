@@ -13,6 +13,11 @@
 //!   outbound POST, and additionally resolves domain hosts so a name pointing
 //!   at an internal address is refused. This is the authoritative check.
 //!
+//! Both passes inspect only the **first hop**. That is only sufficient because
+//! the UnifiedPush backend runs on a client that refuses redirects; see
+//! `UnifiedPushService::build_client`. Reusing a redirect-following client here
+//! would reduce this whole module to decoration.
+//!
 //! Registration cannot be the only gate: `/api/register` carries no field
 //! saying which backend a token belongs to, so an FCM token and a UnifiedPush
 //! URL arrive indistinguishable. `classify_token` therefore only inspects

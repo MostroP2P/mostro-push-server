@@ -78,10 +78,15 @@ async fn main() -> std::io::Result<()> {
     // Initialize push services
     let mut push_services: Vec<(Arc<dyn PushService>, &'static str)> = Vec::new();
 
-    // Keep UnifiedPush service separate for endpoint management
+    // Keep UnifiedPush service separate for endpoint management.
+    //
+    // It also gets its own HTTP client rather than the shared one: its endpoint
+    // URL is attacker-supplied, so redirect following would let a registered
+    // endpoint bounce the request to an internal address, past the guard that
+    // only inspects the first hop. See `UnifiedPushService::build_client`.
     let unifiedpush_service = Arc::new(UnifiedPushService::new(
         config.clone(),
-        Arc::clone(&http_client),
+        Arc::new(UnifiedPushService::build_client()),
     ));
 
     // Load existing endpoints from disk

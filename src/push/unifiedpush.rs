@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs;
 use tokio::sync::RwLock;
 
@@ -29,6 +30,30 @@ pub struct UnifiedPushService {
 }
 
 impl UnifiedPushService {
+    /// Builds the HTTP client this backend must use.
+    ///
+    /// Deliberately NOT the shared client from `main.rs`. `reqwest` defaults to
+    /// `Policy::limited(10)`, and the endpoint URL is attacker-supplied, so a
+    /// registered endpoint could answer `302 Location: http://169.254.169.254/`
+    /// and walk the request straight past `endpoint_guard`, which only ever
+    /// sees the first hop. A push endpoint has no legitimate reason to
+    /// redirect, so redirects are refused outright.
+    ///
+    /// FCM stays on the shared client: it talks to a fixed Google endpoint with
+    /// a token this server mints, not to a URL a caller chose.
+    ///
+    /// Timeouts mirror the shared client (2 s connect, 5 s total) so this
+    /// backend keeps the same bound on tying up worker threads.
+    pub fn build_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Some(Duration::from_secs(90)))
+            .build()
+            .expect("reqwest::Client build never fails on this config")
+    }
+
     pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
         let storage_path = PathBuf::from("data/unifiedpush_endpoints.json");
 
@@ -224,7 +249,7 @@ mod tests {
     }
 
     fn test_service() -> UnifiedPushService {
-        UnifiedPushService::new(test_config(), Arc::new(reqwest::Client::new()))
+        UnifiedPushService::new(test_config(), Arc::new(UnifiedPushService::build_client()))
     }
 
     /// The guard living in `endpoint_guard` is only useful if the dispatch path
@@ -267,6 +292,56 @@ mod tests {
             .expect_err("dispatch MUST refuse an opaque token");
 
         assert!(err.to_string().starts_with("UnifiedPush endpoint refused"));
+    }
+
+    /// `endpoint_guard` only ever inspects the first hop, so the client must
+    /// not chase a second one. Without this, a registered endpoint answering
+    /// `302 Location: http://169.254.169.254/` walks the request straight past
+    /// the guard and the whole SSRF fix is one HTTP header away from useless.
+    ///
+    /// The guard refuses loopback endpoints, so this exercises the client
+    /// configuration directly rather than going through `send_to_token`: the
+    /// client policy is the property under test.
+    #[tokio::test]
+    async fn dispatch_client_refuses_to_follow_redirects() {
+        let mut server = mockito::Server::new_async().await;
+        let base = server.url();
+
+        let second_hop = server
+            .mock("GET", "/internal-secret")
+            .with_status(200)
+            .with_body("METADATA_LEAKED")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let _redirector = server
+            .mock("POST", "/push")
+            .with_status(302)
+            .with_header("location", &format!("{base}/internal-secret"))
+            .create_async()
+            .await;
+
+        let response = UnifiedPushService::build_client()
+            .post(format!("{base}/push"))
+            .json(&serde_json::json!({"type": "silent_wake"}))
+            .send()
+            .await
+            .expect("the request itself must still succeed");
+
+        assert_eq!(
+            response.status(),
+            302,
+            "the redirect must be surfaced, not followed"
+        );
+        let body = response.text().await.unwrap_or_default();
+        assert!(
+            !body.contains("METADATA_LEAKED"),
+            "the second hop's body must never be reached, got: {body}"
+        );
+
+        // The strongest assertion: the second hop was never requested at all.
+        second_hop.assert_async().await;
     }
 
     #[test]

@@ -54,6 +54,13 @@ Two passes:
    non-public. This is the authoritative gate; registration is defence in
    depth and fast feedback.
 
+The guard only ever inspects the **first hop**, which is why this backend does
+not use the shared HTTP client. `reqwest` follows up to 10 redirects by
+default, so a registered endpoint answering `302 Location: http://169.254.169.254/`
+would walk the request past the guard entirely. `UnifiedPushService::build_client`
+refuses redirects outright: a push endpoint has no legitimate reason to issue
+one. A regression test asserts the second hop is never requested.
+
 Known limitation: `reqwest` resolves the host again when it connects, so a DNS
 record with a very short TTL can change between validation and connection.
 Closing that race requires pinning the validated address into the connection;
@@ -63,7 +70,7 @@ tracked in [#39](https://github.com/MostroP2P/mostro-push-server/issues/39).
 
 - UnifiedPush has no per-payload distinction between silent and visible push. `send_silent_to_token` falls back to `send_to_token`, which is the same code path the Nostr listener uses.
 - There is no rate limiting on outbound UnifiedPush calls beyond what the server-wide `reqwest::Client` timeouts provide (2 s connect, 5 s total).
-- The endpoint URL is fully attacker-controlled in the sense that the distributor can be any HTTP server. The shared `reqwest::Client` enforces TLS and the timeouts; the server does not pin certificates or restrict hostnames.
+- The endpoint URL is fully attacker-controlled in the sense that the distributor can be any HTTP server. A dedicated `reqwest::Client` (`UnifiedPushService::build_client`) enforces TLS, the timeouts, and a no-redirect policy; the server does not pin certificates.
 
 ## Reference
 
