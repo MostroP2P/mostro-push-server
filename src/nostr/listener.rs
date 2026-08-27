@@ -146,23 +146,35 @@ impl NostrListener {
     }
 }
 
+/// Watched kinds are held as `u16` because nostr-sdk parses 1059 and 14 into
+/// the named `Kind::GiftWrap` and `Kind::PrivateDirectMessage` variants. A
+/// `Kind::Custom(14)` *pattern* therefore never matches an inbound event, even
+/// though `Kind`'s `PartialEq` compares the two as equal (it compares
+/// `as_u16()`). Matching on the number keeps equality and pattern matching
+/// from disagreeing.
+const KIND_GIFT_WRAP: u16 = 1059;
+const KIND_PROTOCOL_V2: u16 = 14;
+
 /// Event kinds the listener subscribes to and dispatches on:
 /// - 1059 — Gift Wrap (NIP-59), Mostro protocol v1 and dispute admin DMs.
 /// - 14 — NIP-44 direct message, Mostro protocol v2 (daemons advertising
 ///   `protocol_version=2` reply with signed kind-14 events addressed to the
 ///   trade pubkey in the `p` tag instead of a Gift Wrap).
 fn watched_kinds() -> Vec<Kind> {
-    vec![Kind::Custom(1059), Kind::Custom(14)]
+    vec![
+        Kind::from_u16(KIND_GIFT_WRAP),
+        Kind::from_u16(KIND_PROTOCOL_V2),
+    ]
 }
 
 fn is_watched_kind(kind: Kind) -> bool {
-    watched_kinds().contains(&kind)
+    matches!(kind.as_u16(), KIND_GIFT_WRAP | KIND_PROTOCOL_V2)
 }
 
 fn kind_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Custom(1059) => "Gift Wrap (kind 1059)",
-        Kind::Custom(14) => "protocol v2 (kind 14)",
+    match kind.as_u16() {
+        KIND_GIFT_WRAP => "Gift Wrap (kind 1059)",
+        KIND_PROTOCOL_V2 => "protocol v2 (kind 14)",
         _ => "unexpected kind",
     }
 }
@@ -189,6 +201,24 @@ mod tests {
     fn watched_kinds_include_gift_wrap_and_protocol_v2() {
         assert!(is_watched_kind(Kind::Custom(1059)));
         assert!(is_watched_kind(Kind::Custom(14)));
+        // Inbound events arrive as the named variants, not as Custom.
+        assert!(is_watched_kind(Kind::from_u16(1059)));
+        assert!(is_watched_kind(Kind::from_u16(14)));
+    }
+
+    /// Regression guard for the 0.45 migration: `kind_label` used to match on
+    /// `Kind::Custom(..)` patterns, which never match the named variants the
+    /// SDK produces for inbound events. Every watched event logged as
+    /// "unexpected kind" while still dispatching correctly.
+    #[test]
+    fn kind_label_names_both_watched_kinds_however_constructed() {
+        for kind in [Kind::from_u16(1059), Kind::Custom(1059)] {
+            assert_eq!(kind_label(kind), "Gift Wrap (kind 1059)");
+        }
+        for kind in [Kind::from_u16(14), Kind::Custom(14)] {
+            assert_eq!(kind_label(kind), "protocol v2 (kind 14)");
+        }
+        assert_eq!(kind_label(Kind::from_u16(1)), "unexpected kind");
     }
 
     #[test]

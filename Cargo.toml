@@ -8,8 +8,7 @@ edition = "2021"
 actix-web = "4.9"
 actix-rt = "2.9"
 
-# WebSocket client for Nostr
-tokio-tungstenite = "0.21"
+# Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
 # JSON handling
