@@ -37,7 +37,7 @@ flyctl secrets set -a mostro-push-server \
   SERVER_PRIVATE_KEY="${server_private_key}" \
   NOSTR_RELAYS="wss://relay.mostro.network" \
   FIREBASE_PROJECT_ID="your-project-id" \
-  FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/firebase-service-account.json" \
+  FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)" \
   FCM_ENABLED="true" \
   UNIFIEDPUSH_ENABLED="false" \
   SERVER_HOST="0.0.0.0" \
@@ -55,7 +55,7 @@ unset server_private_key
 - `NOSTR_RELAYS`
 - `SERVER_PRIVATE_KEY`
 - `FIREBASE_PROJECT_ID`
-- `FIREBASE_SERVICE_ACCOUNT_PATH`
+- one of `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
 
 Deploy after the secrets exist:
 
@@ -65,7 +65,50 @@ Deploy after the secrets exist:
 
 `NOTIFY_TRUST_PROXY_HEADERS=true` is correct on Fly because requests reach the app behind the Fly edge proxy, which sets `Fly-Client-IP`. On any deployment where the app is reachable directly, leave this `false`; otherwise an attacker can rotate that header per request and defeat the per-IP limiter.
 
-The Firebase service account JSON is bundled into the Docker image at the path specified by `FIREBASE_SERVICE_ACCOUNT_PATH`. Provision it before the build (the `Dockerfile` copies the `secrets/` directory).
+### Provisioning the Firebase service account
+
+The credential is **not** in the image. It used to be: the `Dockerfile` copied
+`secrets/` into a layer, which published the private key to anyone able to pull
+the image — `docker save` and `docker history` reach it without ever running the
+container. `.dockerignore` now also keeps `secrets/` out of the build context
+entirely, which matters because Fly builds on a remote builder by default.
+
+Two ways to supply it at runtime, and exactly one is needed:
+
+| Variable | Use when |
+|---|---|
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | The credential itself. Preferred on Fly.io, where a secret already *is* an environment variable. |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | A path to a file mounted into the runtime. Preferred for docker-compose, systemd and Kubernetes. |
+
+`FIREBASE_SERVICE_ACCOUNT_JSON` takes precedence when both are set. An empty
+value is treated as absent, so a half-configured deployment falls back to the
+path form instead of failing.
+
+The inline form is the default on Fly for a specific reason: the container now
+runs as UID 10001, and a file the platform mounts carries ownership and mode
+this project does not control. An environment variable is readable by the
+process whatever its UID.
+
+```bash
+flyctl secrets set -a mostro-push-server \
+  FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)"
+```
+
+**Sequencing matters.** If neither variable is set the server still starts:
+`main.rs` logs the failure and runs without FCM, because a listener and an HTTP
+API without push are more useful than no server at all. The result is an
+instance that accepts registrations and delivers nothing. `deploy-fly.sh`
+refuses to deploy when no credential secret exists, but if you deploy by other
+means, set the secret **before** rolling out an image built from this Dockerfile.
+
+Confirm it took after the first deploy:
+
+```bash
+flyctl logs -a mostro-push-server | grep -i "FCM service initialized"
+```
+
+An `FCM notifications are DISABLED` line at `error` level means the credential
+did not arrive.
 
 ### Rotate `SERVER_PRIVATE_KEY`
 
@@ -230,7 +273,7 @@ The only on-disk state is `data/unifiedpush_endpoints.json`, written atomically 
 
 There is no database to back up. Operationally important inputs are:
 
-- `FIREBASE_SERVICE_ACCOUNT_PATH` JSON file (regenerate via Firebase Console if lost)
+- The Firebase service account JSON, held in `FIREBASE_SERVICE_ACCOUNT_JSON` or at `FIREBASE_SERVICE_ACCOUNT_PATH` (regenerate via Firebase Console if lost)
 - The contents of `flyctl secrets list` (or the `.env` file on bare-metal)
 - `data/unifiedpush_endpoints.json` if you want UnifiedPush registrations to survive a host migration; clients will re-register on next use otherwise
 

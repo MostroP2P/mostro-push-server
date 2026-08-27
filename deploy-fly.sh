@@ -10,6 +10,14 @@ REQUIRED_SECRETS=(
   NOSTR_RELAYS
   SERVER_PRIVATE_KEY
   FIREBASE_PROJECT_ID
+)
+
+# The Firebase credential no longer ships inside the image, so it must arrive
+# at runtime. Either form works and exactly one is enough:
+#   FIREBASE_SERVICE_ACCOUNT_JSON - the credential itself (preferred on Fly)
+#   FIREBASE_SERVICE_ACCOUNT_PATH - a path to a file mounted into the machine
+CREDENTIAL_SECRETS=(
+  FIREBASE_SERVICE_ACCOUNT_JSON
   FIREBASE_SERVICE_ACCOUNT_PATH
 )
 
@@ -45,6 +53,24 @@ if (( ${#missing_secrets[@]} > 0 )); then
     echo "Missing required Fly secrets for ${APP_NAME}:" >&2
     printf '  - %s\n' "${missing_secrets[@]}" >&2
     echo "Set them with flyctl secrets set before deploying. See docs/deployment.md." >&2
+    exit 1
+fi
+
+# Without one of these the server still starts, but FCM is disabled and every
+# push is silently dropped. Fail here rather than discover it in the logs.
+credential_present=false
+for secret in "${CREDENTIAL_SECRETS[@]}"; do
+    if grep -qx "${secret}" <<< "${configured_secret_names}"; then
+        credential_present=true
+        break
+    fi
+done
+
+if [[ "${credential_present}" != true ]]; then
+    echo "No Firebase credential secret is set for ${APP_NAME}." >&2
+    echo "Set exactly one of:" >&2
+    printf '  - %s\n' "${CREDENTIAL_SECRETS[@]}" >&2
+    echo "The credential is no longer baked into the image. See docs/deployment.md." >&2
     exit 1
 fi
 

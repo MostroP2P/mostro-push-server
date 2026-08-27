@@ -1,0 +1,25 @@
+# Everything here would otherwise be uploaded to the Docker daemon on every
+# build. That matters more than usual for this repo: Fly.io builds on a remote
+# builder by default, so the build context leaves the machine.
+#
+# The Dockerfile only COPYs Cargo.toml, Cargo.lock, src/ and config/, so
+# nothing below is needed to build.
+
+secrets/
+.env
+.env.*
+!.env.example
+
+data/
+target/
+.git/
+.github/
+.claude/
+.planning/
+
+*.md
+docs/
+tests/
+deploy-fly.sh
+docker-compose.yml
+fly.toml

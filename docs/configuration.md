@@ -74,7 +74,8 @@ To turn the filter on/off without rebuilding, flip
 | `FCM_ENABLED`                   | `true`  | Enable Firebase Cloud Messaging backend                                                    |
 | `UNIFIEDPUSH_ENABLED`           | `false` | Enable UnifiedPush backend. Opt-in on purpose: the dispatch path POSTs to the client-supplied device token treated as a URL, so the backend stays off unless set explicitly. |
 | `FIREBASE_PROJECT_ID`           | -       | Firebase project ID, required when `FCM_ENABLED=true`                                      |
-| `FIREBASE_SERVICE_ACCOUNT_PATH` | -       | Absolute path to the Firebase service-account JSON. If missing or unreadable, FCM is disabled at startup with a warning; the server keeps running. |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | -       | The Firebase service-account JSON itself. Takes precedence over the path form; an empty value is treated as absent. |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | -       | Absolute path to the Firebase service-account JSON. Used when the JSON form is unset. If neither resolves, FCM is disabled at startup with an `error` log and the server keeps running. |
 | `BATCH_DELAY_MS`                | `5000`  | Reserved (declared on `PushConfig`; not currently consumed)                                |
 | `COOLDOWN_MS`                   | `60000` | Reserved (declared on `PushConfig`; not currently consumed)                                |
 
@@ -141,7 +142,7 @@ SERVER_PORT=8080
 FCM_ENABLED=true
 UNIFIEDPUSH_ENABLED=false
 FIREBASE_PROJECT_ID=mostro-mobile
-FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/mostro-mobile-firebase-adminsdk.json
+FIREBASE_SERVICE_ACCOUNT_PATH=/app/secrets/firebase-service-account.json
 
 # Token store
 TOKEN_TTL_HOURS=48
@@ -184,6 +185,12 @@ Full detail, including the known DNS-rebinding limitation, is in
 1. [Firebase Console](https://console.firebase.google.com/) → your project → Project Settings → Service accounts.
 2. Click **Generate new private key**, save the JSON file outside the repo.
 3. Mount it into the runtime (Docker volume, Fly.io secret file, or a path on disk for systemd).
-4. Set `FIREBASE_SERVICE_ACCOUNT_PATH` to the path the binary will read at startup.
+4. Supply it at runtime with either `FIREBASE_SERVICE_ACCOUNT_JSON` (the JSON
+   itself) or `FIREBASE_SERVICE_ACCOUNT_PATH` (a path to a mounted file). It is
+   deliberately not baked into the container image; see
+   [deployment.md](./deployment.md#provisioning-the-firebase-service-account).
+
+   The container runs as UID 10001, so a bind-mounted file must be readable by
+   that UID on the host.
 
 If FCM init fails (file missing, JSON invalid, OAuth refusal) the server logs a warning and runs without FCM. UnifiedPush, if enabled, continues to work.

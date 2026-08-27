@@ -10,17 +10,27 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - FCM_ENABLED=true
-      # The Dockerfile bakes secrets/ into the image at /secrets. Only the
-      # file name is configurable: the path must stay inside the container,
-      # so it must not be interpolated from a host-side path.
-      - FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/${FIREBASE_SERVICE_ACCOUNT_FILE:-firebase-service-account.json}
       # Opt-in: the dispatch path POSTs to the client-supplied device
       # token treated as a URL. Keep it false unless you accept that.
       - UNIFIEDPUSH_ENABLED=false
       - FIREBASE_PROJECT_ID=mostro-test
+      # The credential is not in the image. This path must match the mount
+      # below; without it FCM starts disabled and every push is dropped.
+      - FIREBASE_SERVICE_ACCOUNT_PATH=/app/secrets/firebase-service-account.json
       - RUST_LOG=info
     volumes:
-      # The binary runs with / as its working directory and writes the
+      # The binary runs with /app as its working directory and writes the
       # UnifiedPush endpoint store to data/unifiedpush_endpoints.json.
-      - ./data:/data
+      - ./data:/app/data
+      # The container runs as UID 10001, so this file must be readable by that
+      # UID on the host (e.g. `chmod 0644`). If that is awkward, drop the mount
+      # and pass the credential inline instead:
+      #   FIREBASE_SERVICE_ACCOUNT_JSON=$(cat firebase-service-account.json)
+      - ./firebase-service-account.json:/app/secrets/firebase-service-account.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
     restart: unless-stopped
