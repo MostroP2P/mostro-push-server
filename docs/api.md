@@ -77,7 +77,7 @@ Request:
 | Field           | Type   | Description                                                                                                            |
 |-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
 | `trade_pubkey`  | string | 64 hex characters                                                                                                      |
-| `token`         | string | FCM device token, or UnifiedPush endpoint URL                                                                          |
+| `token`         | string | FCM device token, or UnifiedPush endpoint URL. Non-empty, at most 4096 bytes.                                          |
 | `platform`      | string | `"android"` or `"ios"`                                                                                                 |
 | `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
@@ -226,9 +226,48 @@ curl -i -X POST http://localhost:8080/api/notify \
 |--------|-------------------------------------------------------------------------------|
 | 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
 | 202    | `/api/notify` on parse-valid input                                            |
-| 400    | Malformed body, invalid `trade_pubkey`, invalid `platform`, empty `token`     |
+| 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token` |
 | 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits                 |
 | 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
+
+## Request size limits
+
+Every endpoint that accepts a body caps it. Actix's own default is 2 MB, which
+on unauthenticated endpoints is a free memory-amplification primitive.
+
+| Endpoint          | Max body | Notes                                                        |
+|-------------------|----------|--------------------------------------------------------------|
+| `/api/register`   | 8 KiB    | Sized to fit a 4096-byte `token` plus the other fields        |
+| `/api/unregister` | 1 KiB    | Body carries a single 64-char hex pubkey                      |
+| `/api/notify`     | 1 KiB    | Body carries a single 64-char hex pubkey                      |
+
+The `token` field of a registration is bounded separately at **4096 bytes**. The
+body cap stops an enormous request; the field cap stops a merely large one from
+being retained in the in-memory token store for its whole TTL.
+
+Exceeding either limit is reported as `400 Bad Request`, **not** `413 Payload
+Too Large`:
+
+```json
+{
+  "success": false,
+  "message": "Request body too large"
+}
+```
+
+```json
+{
+  "success": false,
+  "message": "Token exceeds maximum length"
+}
+```
+
+Returning `400` rather than `413` is deliberate. The response bodies of
+`/api/register` and `/api/unregister` are frozen against pre-1.1 fixtures, and
+`/api/notify` is contractually restricted to a single failure status, so the
+size cap reuses the shape those endpoints already emit instead of introducing a
+new one. Only the payload-overflow case is remapped; every other body-parsing
+failure keeps its previous behaviour.
 
 ## Rate limiting
 

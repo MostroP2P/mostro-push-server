@@ -1,5 +1,6 @@
+use actix_web::error::{InternalError, JsonPayloadError};
 use actix_web::middleware::from_fn;
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, Error, HttpRequest, HttpResponse, Responder};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -66,6 +67,53 @@ pub struct AppState {
     pub trusted_whitelist_enabled: bool,
 }
 
+/// Upper bound on the JSON body accepted by /api/register.
+///
+/// Sized to fit the largest legitimate registration: a 64-char pubkey, a
+/// platform string, an optional 64-char Mostro pubkey and a device token of up
+/// to `MAX_TOKEN_BYTES`, with room to spare for whitespace and future fields.
+const MAX_REGISTER_BODY_BYTES: usize = 8 * 1024;
+
+/// Upper bound on the JSON body accepted by /api/unregister.
+///
+/// The body carries a single 64-char hex pubkey and nothing else.
+const MAX_UNREGISTER_BODY_BYTES: usize = 1024;
+
+/// Upper bound on the `token` field of a registration.
+///
+/// FCM registration tokens sit around 160-200 characters; UnifiedPush
+/// endpoints are URLs. 4 KB leaves generous headroom while keeping an
+/// unbounded string out of the in-memory `TokenStore`, which has no on-disk
+/// backing to bound its growth (hard constraint 4).
+const MAX_TOKEN_BYTES: usize = 4096;
+
+/// JSON extractor config for /api/register and /api/unregister.
+///
+/// Caps the body without introducing a new status code: hard constraint 3
+/// freezes these response bodies, and its documented exceptions are 403
+/// (whitelist) and 429 (rate limit) only. An oversized body is therefore
+/// reported as the 400 shape both endpoints already use, rather than actix's
+/// default 413. Every other `JsonPayloadError` variant falls through to
+/// actix's own handling, so malformed-JSON behaviour is unchanged.
+fn json_config(limit: usize) -> web::JsonConfig {
+    web::JsonConfig::default()
+        .limit(limit)
+        .error_handler(|err, _req: &HttpRequest| -> Error {
+            if matches!(
+                err,
+                JsonPayloadError::Overflow { .. } | JsonPayloadError::OverflowKnownLength { .. }
+            ) {
+                let response = HttpResponse::BadRequest().json(RegisterResponse {
+                    success: false,
+                    message: "Request body too large".to_string(),
+                    platform: None,
+                });
+                return InternalError::from_response(err, response).into();
+            }
+            err.into()
+        })
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")
@@ -73,17 +121,20 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/status", web::get().to(status))
             .service(
                 web::resource("/register")
+                    .app_data(json_config(MAX_REGISTER_BODY_BYTES))
                     .wrap(from_fn(register_ip_rate_limit_mw))
                     .route(web::post().to(register_token)),
             )
             .service(
                 web::resource("/unregister")
+                    .app_data(json_config(MAX_UNREGISTER_BODY_BYTES))
                     .wrap(from_fn(register_ip_rate_limit_mw))
                     .route(web::post().to(unregister_token)),
             )
             .route("/info", web::get().to(server_info))
             .service(
                 web::resource("/notify")
+                    .app_data(crate::api::notify::json_config())
                     // Order matters: actix-web wraps in reverse-registration order, so the
                     // last `.wrap()` is the outermost. `request_id_mw` MUST be outermost so
                     // it runs even when `per_ip_rate_limit_mw` short-circuits with 429,
@@ -144,6 +195,18 @@ async fn register_token(
         return HttpResponse::BadRequest().json(RegisterResponse {
             success: false,
             message: "Token cannot be empty".to_string(),
+            platform: None,
+        });
+    }
+
+    // Bound the token independently of the body limit: the body cap stops a
+    // huge request, this stops a merely large one from being retained in the
+    // in-memory store for the whole TTL.
+    if req.token.len() > MAX_TOKEN_BYTES {
+        warn!("Token exceeds maximum length");
+        return HttpResponse::BadRequest().json(RegisterResponse {
+            success: false,
+            message: "Token exceeds maximum length".to_string(),
             platform: None,
         });
     }
@@ -885,5 +948,108 @@ mod tests {
                 resp.status()
             );
         }
+    }
+    /// The body cap must not introduce a new status code: hard constraint 3
+    /// freezes these bodies and lists 403 and 429 as the only exceptions, so an
+    /// oversized payload is reported as the 400 shape the endpoint already uses
+    /// rather than as actix's default 413.
+    #[actix_web::test]
+    async fn register_oversized_body_returns_400_not_413() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "a".repeat(1024 * 1024),
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = atest::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"Request body too large"}"#
+        );
+    }
+
+    /// A token that fits the body cap but exceeds `MAX_TOKEN_BYTES` is rejected by
+    /// the field check. Without it such a token would sit in the in-memory store
+    /// for the whole TTL.
+    #[actix_web::test]
+    async fn register_token_over_max_length_returns_400() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "a".repeat(super::MAX_TOKEN_BYTES + 1),
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = atest::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"Token exceeds maximum length"}"#
+        );
+    }
+
+    /// Boundary: exactly `MAX_TOKEN_BYTES` is still accepted, and the 200 body
+    /// stays byte-identical to the pre-1.1 fixture.
+    #[actix_web::test]
+    async fn register_token_at_max_length_succeeds() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "a".repeat(super::MAX_TOKEN_BYTES),
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = atest::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":true,"message":"Token registered successfully","platform":"android"}"#
+        );
+    }
+
+    #[actix_web::test]
+    async fn unregister_oversized_body_returns_400_not_413() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/unregister")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "padding": "a".repeat(super::MAX_UNREGISTER_BODY_BYTES * 2)
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = atest::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"Request body too large"}"#
+        );
     }
 }
