@@ -102,8 +102,12 @@ impl Config {
                 fcm_enabled: env::var("FCM_ENABLED")
                     .unwrap_or_else(|_| "true".to_string())
                     .parse()?,
+                // Default false: the UnifiedPush dispatch path POSTs to the
+                // client-supplied device token treated as a URL, so enabling
+                // the backend by omission opens an SSRF surface. Operators
+                // opt in explicitly.
                 unifiedpush_enabled: env::var("UNIFIEDPUSH_ENABLED")
-                    .unwrap_or_else(|_| "true".to_string())
+                    .unwrap_or_else(|_| "false".to_string())
                     .parse()?,
                 batch_delay_ms: env::var("BATCH_DELAY_MS")
                     .unwrap_or_else(|_| "5000".to_string())
@@ -244,6 +248,65 @@ mod tests {
             msg.contains("NOTIFY_RATE_PER_IP_PER_MIN must be > 0"),
             "expected D-04 error message, got: {}",
             msg
+        );
+    }
+
+    /// UnifiedPush must be opt-in. Its dispatch path POSTs to the
+    /// client-supplied device token treated as a URL, so a deployment that
+    /// simply forgets the variable must not end up with the backend live.
+    #[test]
+    fn unifiedpush_defaults_to_disabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("UNIFIEDPUSH_ENABLED");
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        let result = Config::from_env();
+
+        std::env::remove_var("NOSTR_RELAYS");
+
+        let config = result.expect("Config::from_env MUST succeed on defaults");
+        assert!(
+            !config.push.unifiedpush_enabled,
+            "UNIFIEDPUSH_ENABLED MUST default to false"
+        );
+    }
+
+    /// The opt-in still works: setting the variable explicitly enables it.
+    #[test]
+    fn unifiedpush_honours_explicit_opt_in() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("UNIFIEDPUSH_ENABLED", "true");
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        let result = Config::from_env();
+
+        std::env::remove_var("UNIFIEDPUSH_ENABLED");
+        std::env::remove_var("NOSTR_RELAYS");
+
+        let config = result.expect("Config::from_env MUST succeed on explicit opt-in");
+        assert!(
+            config.push.unifiedpush_enabled,
+            "UNIFIEDPUSH_ENABLED=true MUST enable the backend"
+        );
+    }
+
+    /// FCM keeps its permissive default: it does not take a client-supplied
+    /// URL, so the fail-open concern that motivates the UnifiedPush default
+    /// does not apply, and flipping it would change existing deployments.
+    #[test]
+    fn fcm_default_is_unchanged() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("FCM_ENABLED");
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        let result = Config::from_env();
+
+        std::env::remove_var("NOSTR_RELAYS");
+
+        let config = result.expect("Config::from_env MUST succeed on defaults");
+        assert!(
+            config.push.fcm_enabled,
+            "FCM_ENABLED MUST keep defaulting to true"
         );
     }
 }
