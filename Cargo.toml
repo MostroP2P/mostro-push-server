@@ -8,19 +8,25 @@ edition = "2021"
 actix-web = "4.9"
 actix-rt = "2.9"
 
-# WebSocket client for Nostr
-tokio-tungstenite = "0.21"
+# Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
 # JSON handling
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `preserve_order` is load-bearing, not a preference. Several response bodies
+# are built with the `json!` macro, and CLAUDE.md hard constraint 3 requires
+# them to stay byte-identical to the pre-1.1 fixtures. Without this feature
+# serde_json's Map is a BTreeMap and serialises keys alphabetically, which
+# reorders `{"success":..,"message":..}` into `{"message":..,"success":..}`.
+# nostr-sdk 0.27 used to enable it transitively; 0.45 does not, so it is
+# declared here explicitly. See #37 for making the contract self-enforcing.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 
 # HTTP client for FCM and UnifiedPush
 reqwest = { version = "0.11", features = ["json"] }
 
 # Nostr
-nostr-sdk = "0.27"
+nostr-sdk = "0.45"
 
 # Logging
 env_logger = "0.11"
