@@ -77,7 +77,7 @@ Request:
 | Field           | Type   | Description                                                                                                            |
 |-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
 | `trade_pubkey`  | string | 64 hex characters                                                                                                      |
-| `token`         | string | FCM device token, or UnifiedPush endpoint URL. Non-empty, at most 4096 bytes.                                          |
+| `token`         | string | FCM device token, or UnifiedPush endpoint URL. Non-empty, at most 4096 bytes. If it parses as an `http`/`https` URL it must be `https` and point at a public address (see below). |
 | `platform`      | string | `"android"` or `"ios"`                                                                                                 |
 | `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
@@ -229,6 +229,43 @@ curl -i -X POST http://localhost:8080/api/notify \
 | 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token` |
 | 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits                 |
 | 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
+
+### Push endpoint validation
+
+The `token` field is overloaded: for FCM it is an opaque registration token,
+for UnifiedPush it is the URL the server will POST to. The request carries no
+field saying which, so the server inspects the value instead.
+
+A token that parses as an `http` or `https` URL is treated as a push endpoint
+and must satisfy all of:
+
+- scheme is `https`
+- the host is not a private, loopback, link-local, CGNAT, or otherwise
+  non-routable address, including the IPv4-mapped IPv6 spellings of those
+  (`https://[::ffff:169.254.169.254]/`)
+
+Anything that does not parse as an `http`/`https` URL is treated as an opaque
+backend token and passed through untouched, so FCM registrations are
+unaffected. A short list of clearly unusable schemes (`file`, `ftp`, `gopher`,
+`data`, `dict`, `ldap`) is refused outright.
+
+Rejection — `400 Bad Request`:
+
+```json
+{
+  "success": false,
+  "message": "Invalid push endpoint"
+}
+```
+
+The message is identical for every rejection reason on purpose. A caller must
+not be able to use the response to distinguish "unsupported scheme" from
+"internal address" and map the server's network.
+
+Registration performs the checks above without touching the network. The
+authoritative check runs again immediately before the outbound POST and
+additionally resolves domain hosts, refusing the endpoint if any resolved
+address is non-public.
 
 ## Request size limits
 

@@ -140,7 +140,14 @@ impl PushService for UnifiedPushService {
         device_token: &str,
         _platform: &Platform,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // For UnifiedPush, the device_token IS the endpoint URL
+        // For UnifiedPush, the device_token IS the endpoint URL, so this is the
+        // request-forgery boundary: everything reachable from here was supplied
+        // by an unauthenticated caller. Validate before any outbound traffic.
+        if let Err(reason) = crate::push::endpoint_guard::validate_endpoint(device_token).await {
+            warn!("UnifiedPush endpoint refused: {}", reason);
+            return Err(format!("UnifiedPush endpoint refused: {}", reason).into());
+        }
+
         let payload = serde_json::json!({
             "type": "silent_wake",
             "timestamp": chrono::Utc::now().timestamp()

@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::api::rate_limit::{per_ip_rate_limit_mw, register_ip_rate_limit_mw, PerPubkeyLimiter};
+use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::push::PushDispatcher;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
 use crate::utils::log_pubkey::log_pubkey;
@@ -207,6 +208,24 @@ async fn register_token(
         return HttpResponse::BadRequest().json(RegisterResponse {
             success: false,
             message: "Token exceeds maximum length".to_string(),
+            platform: None,
+        });
+    }
+
+    // SSRF guard, static pass. `/api/register` carries no field saying which
+    // backend a token belongs to, so an FCM token and a UnifiedPush endpoint
+    // URL arrive indistinguishable. Only values that parse as http(s) URLs are
+    // inspected; everything else is opaque and left to its own backend.
+    //
+    // The message is deliberately identical for every rejection reason: the
+    // caller must not be able to use the response to map the server's network.
+    // The authoritative check, including DNS resolution, runs at dispatch time
+    // in `endpoint_guard::validate_endpoint`.
+    if let TokenShape::Rejected(reason) = classify_token(&req.token) {
+        warn!("Register denied: unusable push endpoint ({})", reason);
+        return HttpResponse::BadRequest().json(RegisterResponse {
+            success: false,
+            message: "Invalid push endpoint".to_string(),
             platform: None,
         });
     }
@@ -1050,6 +1069,101 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
             r#"{"success":false,"message":"Request body too large"}"#
+        );
+    }
+
+    /// The SSRF guard must refuse an endpoint pointing at cloud metadata, and
+    /// the message must not reveal *why* it was refused.
+    #[actix_web::test]
+    async fn register_with_non_public_endpoint_returns_400() {
+        for token in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1:8080/",
+            "https://[::ffff:169.254.169.254]/",
+            "https://10.0.0.1/push",
+            "file:///etc/passwd",
+        ] {
+            let c = make_test_components();
+            let app = atest::init_service(build_test_actix_app(c)).await;
+
+            let req = atest::TestRequest::post()
+                .uri("/api/register")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({
+                    "trade_pubkey": TEST_PUBKEY,
+                    "token": token,
+                    "platform": "android"
+                }))
+                .to_request();
+            let resp = atest::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{token}");
+            let body = atest::read_body(resp).await;
+            assert_eq!(
+                std::str::from_utf8(&body).unwrap(),
+                r#"{"success":false,"message":"Invalid push endpoint"}"#,
+                "{token}"
+            );
+        }
+    }
+
+    /// Regression guard for the guard itself. FCM is the only backend enabled
+    /// in production and `/api/register` cannot tell an FCM token from a
+    /// UnifiedPush URL, so an over-eager SSRF check here would break every
+    /// real registration. The 200 body must also stay byte-identical.
+    #[actix_web::test]
+    async fn register_with_fcm_token_is_unaffected_by_the_ssrf_guard() {
+        for token in [
+            "cXY7bF2mRk2vQ1s:APA91bH8xYzKq3vN9pLmT4wRbC7dEfGhIjKlMnOpQrStUvWxYz",
+            "d1PxYz8QRk-2vQ1sAbCdEf",
+        ] {
+            let c = make_test_components();
+            let app = atest::init_service(build_test_actix_app(c)).await;
+
+            let req = atest::TestRequest::post()
+                .uri("/api/register")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({
+                    "trade_pubkey": TEST_PUBKEY,
+                    "token": token,
+                    "platform": "android"
+                }))
+                .to_request();
+            let resp = atest::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::OK, "{token}");
+            let body = atest::read_body(resp).await;
+            assert_eq!(
+                std::str::from_utf8(&body).unwrap(),
+                r#"{"success":true,"message":"Token registered successfully","platform":"android"}"#,
+                "{token}"
+            );
+        }
+    }
+
+    /// A legitimate public UnifiedPush endpoint is still accepted.
+    #[actix_web::test]
+    async fn register_with_public_unifiedpush_endpoint_succeeds() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let req = atest::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "https://ntfy.sh/abcdef",
+                "platform": "android"
+            }))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = atest::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":true,"message":"Token registered successfully","platform":"android"}"#
         );
     }
 }

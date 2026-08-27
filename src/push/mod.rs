@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 pub mod dispatcher;
+pub mod endpoint_guard;
 pub mod fcm;
 pub mod unifiedpush;
 

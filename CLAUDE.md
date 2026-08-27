@@ -74,6 +74,7 @@ src/
 ├── push/
 │   ├── mod.rs           # PushService trait
 │   ├── dispatcher.rs    # PushDispatcher (lock-free)
+│   ├── endpoint_guard.rs # SSRF guard for UnifiedPush endpoint URLs
 │   ├── fcm.rs           # FCM v1, OAuth2 service-account JWT
 │   └── unifiedpush.rs   # UnifiedPush backend, persistent endpoint store
 ├── store/mod.rs         # In-memory TokenStore + TTL cleanup

@@ -38,6 +38,27 @@ The endpoint store is loaded once at startup. Failures to read or parse the file
 
 If `UNIFIEDPUSH_ENABLED=false`, the service is not added to the dispatcher slice. Existing entries in `data/unifiedpush_endpoints.json` are ignored at runtime but not deleted.
 
+## Endpoint validation
+
+The registered device token *is* the URL the server POSTs to, which makes it a
+request-forgery surface reachable from the unauthenticated `/api/register` and
+`/api/notify` pair. `src/push/endpoint_guard.rs` is the single place that
+decides whether an endpoint may be contacted.
+
+Two passes:
+
+1. **Registration** — static, no network. Refuses non-`https` schemes and hosts
+   that are IP literals outside the public internet.
+2. **Dispatch** — runs immediately before the outbound POST, repeats the static
+   checks, and resolves domain hosts, refusing if *any* resolved address is
+   non-public. This is the authoritative gate; registration is defence in
+   depth and fast feedback.
+
+Known limitation: `reqwest` resolves the host again when it connects, so a DNS
+record with a very short TTL can change between validation and connection.
+Closing that race requires pinning the validated address into the connection;
+tracked in [#39](https://github.com/MostroP2P/mostro-push-server/issues/39).
+
 ## Operational notes
 
 - UnifiedPush has no per-payload distinction between silent and visible push. `send_silent_to_token` falls back to `send_to_token`, which is the same code path the Nostr listener uses.
