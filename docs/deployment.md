@@ -133,7 +133,21 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-`docker-compose.yml` mounts `./secrets` read-only and `./data` read-write so UnifiedPush endpoints persist across restarts.
+`docker-compose.yml` points `FIREBASE_SERVICE_ACCOUNT_PATH` at `/secrets/firebase-service-account.json`, the in-image copy of `secrets/` described above. Name your service-account file accordingly before building, or keep its own name and pass it at run time:
+
+```bash
+FIREBASE_SERVICE_ACCOUNT_FILE=my-project-adminsdk.json docker-compose up -d
+```
+
+Only the file name is configurable, not the full path: the value has to resolve inside the container, so a host-side path from your `.env` must not leak into it. Verify what Compose resolved before starting:
+
+```bash
+docker-compose config | grep FIREBASE_SERVICE_ACCOUNT_PATH
+```
+
+`./data` is bind-mounted to `/data` so the UnifiedPush endpoint store survives container recreation. The binary runs with `/` as its working directory and writes the store to `data/unifiedpush_endpoints.json`, which lands at `/data/unifiedpush_endpoints.json` inside the container.
+
+The compose file ships with `UNIFIEDPUSH_ENABLED=false` to match the binary default. The UnifiedPush dispatch path POSTs to the client-supplied device token treated as a URL, so enabling it is an explicit operator decision.
 
 ## Reverse proxy (nginx)
 

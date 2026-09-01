@@ -10,9 +10,17 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - FCM_ENABLED=true
-      - UNIFIEDPUSH_ENABLED=true
+      # The Dockerfile bakes secrets/ into the image at /secrets. Only the
+      # file name is configurable: the path must stay inside the container,
+      # so it must not be interpolated from a host-side path.
+      - FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/${FIREBASE_SERVICE_ACCOUNT_FILE:-firebase-service-account.json}
+      # Opt-in: the dispatch path POSTs to the client-supplied device
+      # token treated as a URL. Keep it false unless you accept that.
+      - UNIFIEDPUSH_ENABLED=false
       - FIREBASE_PROJECT_ID=mostro-test
       - RUST_LOG=info
     volumes:
-      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
+      # The binary runs with / as its working directory and writes the
+      # UnifiedPush endpoint store to data/unifiedpush_endpoints.json.
+      - ./data:/data
     restart: unless-stopped
