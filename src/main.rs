@@ -113,8 +113,9 @@ async fn main() -> std::io::Result<()> {
                 // must not scroll past as routine noise.
                 log::error!("Failed to initialize FCM service: {}", e);
                 log::error!(
-                    "FCM notifications are DISABLED. Provide the credential via \
-                     FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH."
+                    "FCM notifications are DISABLED. The cause is above; the \
+                     credential is read from FIREBASE_SERVICE_ACCOUNT_JSON or \
+                     FIREBASE_SERVICE_ACCOUNT_PATH."
                 );
             }
         }

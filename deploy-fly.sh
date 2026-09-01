@@ -12,14 +12,22 @@ REQUIRED_SECRETS=(
   FIREBASE_PROJECT_ID
 )
 
-# The Firebase credential no longer ships inside the image, so it must arrive
-# at runtime. Either form works and exactly one is enough:
-#   FIREBASE_SERVICE_ACCOUNT_JSON - the credential itself (preferred on Fly)
-#   FIREBASE_SERVICE_ACCOUNT_PATH - a path to a file mounted into the machine
-CREDENTIAL_SECRETS=(
-  FIREBASE_SERVICE_ACCOUNT_JSON
-  FIREBASE_SERVICE_ACCOUNT_PATH
-)
+FLY_CONFIG="${FLY_CONFIG:-fly.toml}"
+
+# The Firebase credential no longer ships inside the image, so it must arrive at
+# runtime. On Fly a secret already *is* an environment variable, so the inline
+# form needs nothing else.
+#
+# FIREBASE_SERVICE_ACCOUNT_PATH only names a file; something else has to put one
+# there. It is accepted only once fly.toml declares [[files]] or [mounts],
+# because otherwise the path resolves to nothing, FCM starts disabled and every
+# push is dropped in silence. A leftover PATH secret from before this change is
+# exactly that case.
+CREDENTIAL_SECRETS=(FIREBASE_SERVICE_ACCOUNT_JSON)
+if [[ -f "${FLY_CONFIG}" ]] \
+   && grep -Eq '^[[:space:]]*\[\[?(files|mounts)\]\]?' "${FLY_CONFIG}"; then
+    CREDENTIAL_SECRETS+=(FIREBASE_SERVICE_ACCOUNT_PATH)
+fi
 
 die() {
     echo "Error: $*" >&2
@@ -67,15 +75,20 @@ for secret in "${CREDENTIAL_SECRETS[@]}"; do
 done
 
 if [[ "${credential_present}" != true ]]; then
-    echo "No Firebase credential secret is set for ${APP_NAME}." >&2
-    echo "Set exactly one of:" >&2
+    echo "No usable Firebase credential secret is set for ${APP_NAME}." >&2
+    echo "Set one of:" >&2
     printf '  - %s\n' "${CREDENTIAL_SECRETS[@]}" >&2
+    if (( ${#CREDENTIAL_SECRETS[@]} == 1 )); then
+        echo "FIREBASE_SERVICE_ACCOUNT_PATH does not count here: ${FLY_CONFIG} declares" >&2
+        echo "no [[files]] or [mounts] section, so no file would exist at that path." >&2
+    fi
     echo "The credential is no longer baked into the image. See docs/deployment.md." >&2
     exit 1
 fi
 
 echo "Deploying..."
-flyctl deploy -a "${APP_NAME}"
+# Same config the credential check above read, so the two cannot diverge.
+flyctl deploy -a "${APP_NAME}" -c "${FLY_CONFIG}"
 
 echo "Deploy complete."
 echo ""

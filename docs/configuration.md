@@ -193,4 +193,4 @@ Full detail, including the known DNS-rebinding limitation, is in
    The container runs as UID 10001, so a bind-mounted file must be readable by
    that UID on the host.
 
-If FCM init fails (file missing, JSON invalid, OAuth refusal) the server logs a warning and runs without FCM. UnifiedPush, if enabled, continues to work.
+If FCM init fails (no credential configured, JSON invalid, OAuth refusal) the server logs at `error` and runs without FCM. UnifiedPush, if enabled, continues to work.

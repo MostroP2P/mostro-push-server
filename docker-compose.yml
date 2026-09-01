@@ -20,17 +20,16 @@ services:
       - RUST_LOG=info
     volumes:
       # The binary runs with /app as its working directory and writes the
-      # UnifiedPush endpoint store to data/unifiedpush_endpoints.json.
+      # UnifiedPush endpoint store to data/unifiedpush_endpoints.json. A bind
+      # mount keeps the host's ownership, so ./data must be WRITABLE by UID
+      # 10001 (`chown 10001:10001 data`). Only matters once UnifiedPush is on.
       - ./data:/app/data
       # The container runs as UID 10001, so this file must be readable by that
       # UID on the host (e.g. `chmod 0644`). If that is awkward, drop the mount
       # and pass the credential inline instead:
       #   FIREBASE_SERVICE_ACCOUNT_JSON=$(cat firebase-service-account.json)
       - ./firebase-service-account.json:/app/secrets/firebase-service-account.json:ro
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
-      interval: 30s
-      timeout: 3s
-      start_period: 5s
-      retries: 3
+    # The image already declares a HEALTHCHECK, and it reads SERVER_PORT from
+    # the container environment. Redeclaring it here would hard-code the port
+    # and silently stop matching the moment SERVER_PORT above changes.
     restart: unless-stopped

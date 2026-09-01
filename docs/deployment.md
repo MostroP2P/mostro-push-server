@@ -55,7 +55,11 @@ unset server_private_key
 - `NOSTR_RELAYS`
 - `SERVER_PRIVATE_KEY`
 - `FIREBASE_PROJECT_ID`
-- one of `FIREBASE_SERVICE_ACCOUNT_JSON` or `FIREBASE_SERVICE_ACCOUNT_PATH`
+- `FIREBASE_SERVICE_ACCOUNT_JSON`
+
+`FIREBASE_SERVICE_ACCOUNT_PATH` is accepted in its place only once `fly.toml`
+declares a `[[files]]` or `[mounts]` section. Without one, nothing puts a file
+at that path and the deploy would come up with FCM silently disabled.
 
 Deploy after the secrets exist:
 
@@ -94,12 +98,19 @@ flyctl secrets set -a mostro-push-server \
   FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)"
 ```
 
-**Sequencing matters.** If neither variable is set the server still starts:
+On Fly the path form is not interchangeable with the inline one. `fly.toml`
+declares neither `[[files]]` nor `[mounts]`, so `FIREBASE_SERVICE_ACCOUNT_PATH`
+names a file nothing creates — including a `FIREBASE_SERVICE_ACCOUNT_PATH`
+secret left over from when the image carried the credential. `deploy-fly.sh`
+rejects that case rather than deploying an instance that cannot push.
+
+**Sequencing matters.** If no credential resolves the server still starts:
 `main.rs` logs the failure and runs without FCM, because a listener and an HTTP
 API without push are more useful than no server at all. The result is an
 instance that accepts registrations and delivers nothing. `deploy-fly.sh`
-refuses to deploy when no credential secret exists, but if you deploy by other
-means, set the secret **before** rolling out an image built from this Dockerfile.
+refuses to deploy when no usable credential secret exists, but if you deploy by
+other means, set the secret **before** rolling out an image built from this
+Dockerfile.
 
 Confirm it took after the first deploy:
 
@@ -176,19 +187,34 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-`docker-compose.yml` points `FIREBASE_SERVICE_ACCOUNT_PATH` at `/secrets/firebase-service-account.json`, the in-image copy of `secrets/` described above. Name your service-account file accordingly before building, or keep its own name and pass it at run time:
+The compose file bind-mounts `./firebase-service-account.json` to `/app/secrets/firebase-service-account.json` and points `FIREBASE_SERVICE_ACCOUNT_PATH` there. Put the credential next to `docker-compose.yml` under that name, or edit both the mount and the variable together — they have to agree, and a mismatch starts the container with FCM disabled.
+
+The container runs as UID 10001, so the file must be readable by that UID on the host:
 
 ```bash
-FIREBASE_SERVICE_ACCOUNT_FILE=my-project-adminsdk.json docker-compose up -d
+chmod 0644 firebase-service-account.json
 ```
 
-Only the file name is configurable, not the full path: the value has to resolve inside the container, so a host-side path from your `.env` must not leak into it. Verify what Compose resolved before starting:
+Compose creates a **directory** where a bind-mount source does not exist, which surfaces later as a confusing parse failure. Confirm the file is there before the first `up`, and check what Compose resolved:
 
 ```bash
-docker-compose config | grep FIREBASE_SERVICE_ACCOUNT_PATH
+ls -l firebase-service-account.json
+docker-compose config | grep FIREBASE_SERVICE_ACCOUNT
 ```
 
-`./data` is bind-mounted to `/data` so the UnifiedPush endpoint store survives container recreation. The binary runs with `/` as its working directory and writes the store to `data/unifiedpush_endpoints.json`, which lands at `/data/unifiedpush_endpoints.json` inside the container.
+If host-side permissions are awkward, drop the mount and pass the credential inline instead:
+
+```bash
+FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" docker-compose up -d
+```
+
+`./data` is bind-mounted to `/app/data` so the UnifiedPush endpoint store survives container recreation. The image sets `WORKDIR /app` and the binary writes the store to `data/unifiedpush_endpoints.json`, which lands at `/app/data/unifiedpush_endpoints.json` inside the container.
+
+A bind mount keeps the host directory's ownership, overriding the one the image sets, so `./data` has to be writable by UID 10001 before enabling UnifiedPush:
+
+```bash
+mkdir -p data && sudo chown 10001:10001 data
+```
 
 The compose file ships with `UNIFIEDPUSH_ENABLED=false` to match the binary default. The UnifiedPush dispatch path POSTs to the client-supplied device token treated as a URL, so enabling it is an explicit operator decision.
 
@@ -291,11 +317,19 @@ journalctl -u mostro-push -n 100
 ### FCM not delivering
 
 ```bash
-flyctl ssh console
-ls -la /secrets/                          # confirm the JSON is at the configured path
-flyctl secrets list | grep FIREBASE       # confirm path env var is set
-RUST_LOG=debug flyctl deploy              # redeploy with debug logging to see OAuth exchange
+flyctl logs | grep -i "FCM"                # startup lines: which credential loaded, and why init failed
+flyctl secrets list | grep FIREBASE        # confirm the credential secret exists
+RUST_LOG=debug flyctl deploy               # redeploy with debug logging to see the OAuth exchange
 ```
+
+`FCM notifications are DISABLED` is preceded by the actual cause. Distinguish
+the two cases by whether a `Loaded Firebase service account for ...` line
+appears first: without it no credential resolved at all, with it the credential
+arrived and was rejected downstream (bad key, OAuth refusal).
+
+There is no `/secrets` inside the container any more. With the inline form the
+credential is an environment variable, so that startup line is the confirmation
+it arrived, not a file listing.
 
 ### `/api/notify` always 429s
 
