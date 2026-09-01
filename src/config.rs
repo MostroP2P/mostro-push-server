@@ -203,23 +203,49 @@ mod tests {
     // tests that call std::env::set_var / remove_var on the same keys.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    /// Snapshots the listed variables on construction and restores them on
+    /// drop, so a test cannot leak its own values into the next one nor leave
+    /// a variable unset when the suite runs with it configured. Restoring on
+    /// drop also survives a panic between the mutation and the assertion.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys.iter().map(|k| (*k, env::var(k).ok())).collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     /// D-04: NOTIFY_RATE_PER_PUBKEY_PER_MIN=0 must be rejected by Config::from_env
     /// with a chained error message containing "must be > 0".
     #[test]
     fn rejects_zero_per_pubkey_rate() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&[
+            "NOTIFY_RATE_PER_PUBKEY_PER_MIN",
+            "NOTIFY_RATE_PER_IP_PER_MIN",
+            "NOSTR_RELAYS",
+        ]);
         std::env::set_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN", "0");
         std::env::set_var("NOTIFY_RATE_PER_IP_PER_MIN", "120");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
 
-        let result = Config::from_env();
-
-        std::env::remove_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN");
-        std::env::remove_var("NOTIFY_RATE_PER_IP_PER_MIN");
-        std::env::remove_var("NOSTR_RELAYS");
-
-        let err =
-            result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_PUBKEY_PER_MIN=0");
+        let err = Config::from_env()
+            .expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_PUBKEY_PER_MIN=0");
         let msg = err.to_string();
         assert!(
             msg.contains("NOTIFY_RATE_PER_PUBKEY_PER_MIN must be > 0"),
@@ -231,18 +257,18 @@ mod tests {
     /// D-04: NOTIFY_RATE_PER_IP_PER_MIN=0 must be rejected by Config::from_env.
     #[test]
     fn rejects_zero_per_ip_rate() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&[
+            "NOTIFY_RATE_PER_PUBKEY_PER_MIN",
+            "NOTIFY_RATE_PER_IP_PER_MIN",
+            "NOSTR_RELAYS",
+        ]);
         std::env::set_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN", "30");
         std::env::set_var("NOTIFY_RATE_PER_IP_PER_MIN", "0");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
 
-        let result = Config::from_env();
-
-        std::env::remove_var("NOTIFY_RATE_PER_PUBKEY_PER_MIN");
-        std::env::remove_var("NOTIFY_RATE_PER_IP_PER_MIN");
-        std::env::remove_var("NOSTR_RELAYS");
-
-        let err = result.expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_IP_PER_MIN=0");
+        let err = Config::from_env()
+            .expect_err("Config::from_env MUST reject NOTIFY_RATE_PER_IP_PER_MIN=0");
         let msg = err.to_string();
         assert!(
             msg.contains("NOTIFY_RATE_PER_IP_PER_MIN must be > 0"),
@@ -256,15 +282,12 @@ mod tests {
     /// simply forgets the variable must not end up with the backend live.
     #[test]
     fn unifiedpush_defaults_to_disabled() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["UNIFIEDPUSH_ENABLED", "NOSTR_RELAYS"]);
         std::env::remove_var("UNIFIEDPUSH_ENABLED");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
 
-        let result = Config::from_env();
-
-        std::env::remove_var("NOSTR_RELAYS");
-
-        let config = result.expect("Config::from_env MUST succeed on defaults");
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
         assert!(
             !config.push.unifiedpush_enabled,
             "UNIFIEDPUSH_ENABLED MUST default to false"
@@ -274,16 +297,12 @@ mod tests {
     /// The opt-in still works: setting the variable explicitly enables it.
     #[test]
     fn unifiedpush_honours_explicit_opt_in() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["UNIFIEDPUSH_ENABLED", "NOSTR_RELAYS"]);
         std::env::set_var("UNIFIEDPUSH_ENABLED", "true");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
 
-        let result = Config::from_env();
-
-        std::env::remove_var("UNIFIEDPUSH_ENABLED");
-        std::env::remove_var("NOSTR_RELAYS");
-
-        let config = result.expect("Config::from_env MUST succeed on explicit opt-in");
+        let config = Config::from_env().expect("Config::from_env MUST succeed on explicit opt-in");
         assert!(
             config.push.unifiedpush_enabled,
             "UNIFIEDPUSH_ENABLED=true MUST enable the backend"
@@ -295,15 +314,12 @@ mod tests {
     /// does not apply, and flipping it would change existing deployments.
     #[test]
     fn fcm_default_is_unchanged() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["FCM_ENABLED", "NOSTR_RELAYS"]);
         std::env::remove_var("FCM_ENABLED");
         std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
 
-        let result = Config::from_env();
-
-        std::env::remove_var("NOSTR_RELAYS");
-
-        let config = result.expect("Config::from_env MUST succeed on defaults");
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
         assert!(
             config.push.fcm_enabled,
             "FCM_ENABLED MUST keep defaulting to true"
