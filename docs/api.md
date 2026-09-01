@@ -103,7 +103,8 @@ Validation failure — `400 Bad Request`:
 Possible validation errors:
 
 - `trade_pubkey` not 64 hex characters
-- `token` empty
+- `token` empty, or longer than 4096 bytes
+- `token` rejected as a push endpoint (see below)
 - `platform` not `"android"` or `"ios"`
 - `mostro_pubkey` present but not 64 hex characters
 
@@ -226,7 +227,7 @@ curl -i -X POST http://localhost:8080/api/notify \
 |--------|-------------------------------------------------------------------------------|
 | 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
 | 202    | `/api/notify` on parse-valid input                                            |
-| 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token` |
+| 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint |
 | 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits                 |
 | 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
 
@@ -242,12 +243,17 @@ and must satisfy all of:
 - scheme is `https`
 - the host is not a private, loopback, link-local, CGNAT, or otherwise
   non-routable address, including the IPv4-mapped IPv6 spellings of those
-  (`https://[::ffff:169.254.169.254]/`)
+  (`https://[::ffff:169.254.169.254]/`) and the IPv6 documentation and
+  discard-only prefixes
 
-Anything that does not parse as an `http`/`https` URL is treated as an opaque
-backend token and passed through untouched, so FCM registrations are
-unaffected. A short list of clearly unusable schemes (`file`, `ftp`, `gopher`,
-`data`, `dict`, `ldap`) is refused outright.
+A value that parses under one of a short list of clearly unusable schemes
+(`file`, `ftp`, `gopher`, `data`, `dict`, `ldap`) is refused outright. That is
+hygiene rather than an SSRF control: none of those schemes can produce an
+outbound request, so such a token is broken whichever backend claims it.
+
+Every remaining value — including anything that does not parse as a URL at all
+— is treated as an opaque backend token and passed through untouched, so FCM
+registrations are unaffected.
 
 Rejection — `400 Bad Request`:
 
