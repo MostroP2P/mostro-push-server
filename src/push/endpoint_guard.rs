@@ -248,13 +248,20 @@ fn is_non_public_v6(addr: Ipv6Addr) -> bool {
         return is_non_public_v4(v4);
     }
 
-    let first = addr.segments()[0];
+    let seg = addr.segments();
 
     addr.is_loopback()
         || addr.is_unspecified()
         || addr.is_multicast()
-        || (first & 0xfe00) == 0xfc00   // fc00::/7 unique local
-        || (first & 0xffc0) == 0xfe80 // fe80::/10 link local
+        || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+        || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
+        // `Ipv6Addr::is_documentation` is still unstable, so the special-purpose
+        // prefixes below are spelled out. None of them names a host that can be
+        // reached over the public internet, so a token pointing at one is either
+        // a mistake or an attempt to probe what the server does with it.
+        || (seg[0] == 0x2001 && seg[1] == 0x0db8) // 2001:db8::/32 documentation
+        || (seg[0] == 0x3fff && (seg[1] & 0xf000) == 0) // 3fff::/20 documentation
+        || (seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0) // 100::/64 discard-only
 }
 
 #[cfg(test)]
@@ -353,6 +360,41 @@ mod tests {
                 TokenShape::Rejected(EndpointRejection::NonPublicAddress),
                 "{token}"
             );
+        }
+    }
+
+    /// Special-purpose prefixes that are not covered by any `Ipv6Addr`
+    /// predicate on stable Rust, so the guard spells them out itself.
+    #[test]
+    fn special_purpose_ipv6_prefixes_are_refused() {
+        for token in [
+            "https://[2001:db8::1]/",       // documentation, RFC 3849
+            "https://[2001:db8:ffff::1]/",  // documentation, upper end
+            "https://[3fff::1]/",           // documentation, RFC 9637
+            "https://[3fff:0fff:ffff::1]/", // documentation, upper end
+            "https://[100::1]/",            // discard-only, RFC 6666
+        ] {
+            assert_eq!(
+                classify_token(token),
+                TokenShape::Rejected(EndpointRejection::NonPublicAddress),
+                "{token}"
+            );
+        }
+    }
+
+    /// Pins the prefix masks above: each of these sits just outside one of the
+    /// blocks and must stay reachable. A mask that is one bit too wide would
+    /// silently refuse legitimate endpoints.
+    #[test]
+    fn addresses_just_outside_the_special_prefixes_stay_public() {
+        for ip in [
+            "2001:db9::1",      // 2001:db8::/32 is 32 bits wide, not 16
+            "2001:db7:ffff::1", // just below it
+            "3fff:1000::1",     // 3fff::/20 stops at 3fff:0fff:...
+            "100:0:0:1::1",     // 100::/64 is a single /64
+        ] {
+            let parsed: IpAddr = ip.parse().unwrap();
+            assert!(!is_non_public(parsed), "{ip} should be public");
         }
     }
 
