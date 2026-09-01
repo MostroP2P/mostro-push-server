@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use log::{debug, error, info, warn};
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
@@ -51,9 +52,8 @@ impl NostrListener {
     async fn connect_and_listen(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Connecting to Nostr relays...");
 
-        // Create Nostr client
-        let keys = Keys::generate();
-        let client = Client::new(&keys);
+        // Create Nostr client. It never publishes, so it needs no signer.
+        let client = Client::new();
 
         // Add relays
         for relay_url in &self.config.nostr.relays {
@@ -79,8 +79,12 @@ impl NostrListener {
         let since = Timestamp::now() - Duration::from_secs(60);
         let filter = Filter::new().kinds(watched_kinds()).since(since);
 
-        // Subscribe to events
-        client.subscribe(vec![filter]).await;
+        // Open the notification channel BEFORE subscribing: the stream only
+        // carries what arrives after this call, so subscribing first would
+        // drop every event received in between.
+        let mut notifications = client.notifications();
+
+        client.subscribe(filter).await?;
         info!("Subscribed to kind 1059 (Gift Wrap) and kind 14 (protocol v2) events on relay");
 
         // Handle incoming events
@@ -88,67 +92,68 @@ impl NostrListener {
         let dispatcher = self.dispatcher.clone();
         let log_salt = self.log_salt.clone();
 
-        client
-            .handle_notifications(|notification| async {
-                if let RelayPoolNotification::Event { event, .. } = notification {
-                    if is_watched_kind(event.kind) {
-                        // Log every watched event received
-                        info!(
-                            "Received {} event: {}",
+        while let Some(notification) = notifications.next().await {
+            if let ClientNotification::Event { event, .. } = notification {
+                if is_watched_kind(event.kind) {
+                    // Log every watched event received
+                    info!("Received {} event: {}", kind_label(event.kind), event.id);
+
+                    // Extract recipient from 'p' tag
+                    let recipient_pubkey = extract_recipient(&event);
+
+                    if let Some(trade_pubkey) = recipient_pubkey {
+                        let log_pk = log_pubkey(&log_salt, &trade_pubkey);
+                        info!("Event recipient (p tag) pk={}", log_pk);
+
+                        // Look up token in store
+                        if let Some(registered_token) = token_store.get(&trade_pubkey).await {
+                            info!(
+                                "MATCH! Found registered token pk={}, sending push to {} device",
+                                log_pk, registered_token.platform
+                            );
+
+                            // Dispatch via PushDispatcher (lock-free; iteration protocol owned by dispatcher).
+                            match dispatcher.dispatch(&registered_token).await {
+                                Ok(DispatchOutcome::Delivered { backend: _ }) => {
+                                    info!("Push sent successfully for event {}", event.id);
+                                }
+                                Err(DispatchError::NoBackendForPlatform) => {
+                                    // Preserve existing observable behaviour: today's loop simply
+                                    // exits silently when no service supports the platform.
+                                    // Phase 2's /api/notify handler will distinguish this case.
+                                }
+                                Err(DispatchError::AllBackendsFailed { errors }) => {
+                                    for err in errors {
+                                        error!("Failed to send push: {}", err);
+                                    }
+                                }
+                            }
+                        } else {
+                            debug!("No registered token pk={}", log_pk);
+                        }
+                    } else {
+                        warn!(
+                            "No 'p' tag found in {} event {}",
                             kind_label(event.kind),
                             event.id
                         );
-
-                        // Extract recipient from 'p' tag
-                        let recipient_pubkey = extract_recipient(&event);
-
-                        if let Some(trade_pubkey) = recipient_pubkey {
-                            let log_pk = log_pubkey(&log_salt, &trade_pubkey);
-                            info!("Event recipient (p tag) pk={}", log_pk);
-
-                            // Look up token in store
-                            if let Some(registered_token) = token_store.get(&trade_pubkey).await {
-                                info!(
-                                    "MATCH! Found registered token pk={}, sending push to {} device",
-                                    log_pk,
-                                    registered_token.platform
-                                );
-
-                                // Dispatch via PushDispatcher (lock-free; iteration protocol owned by dispatcher).
-                                match dispatcher.dispatch(&registered_token).await {
-                                    Ok(DispatchOutcome::Delivered { backend: _ }) => {
-                                        info!("Push sent successfully for event {}", event.id);
-                                    }
-                                    Err(DispatchError::NoBackendForPlatform) => {
-                                        // Preserve existing observable behaviour: today's loop simply
-                                        // exits silently when no service supports the platform.
-                                        // Phase 2's /api/notify handler will distinguish this case.
-                                    }
-                                    Err(DispatchError::AllBackendsFailed { errors }) => {
-                                        for err in errors {
-                                            error!("Failed to send push: {}", err);
-                                        }
-                                    }
-                                }
-                            } else {
-                                debug!("No registered token pk={}", log_pk);
-                            }
-                        } else {
-                            warn!(
-                                "No 'p' tag found in {} event {}",
-                                kind_label(event.kind),
-                                event.id
-                            );
-                        }
                     }
                 }
-                Ok(false)
-            })
-            .await?;
+            }
+        }
 
         Ok(())
     }
 }
+
+/// Watched kinds are held as `u16` because nostr-sdk parses 1059 and 14 into
+/// the named `Kind::GiftWrap` and `Kind::PrivateDirectMessage` variants. A
+/// `Kind::Custom(14)` *pattern* therefore never matches an inbound event, even
+/// though `Kind`'s `PartialEq` compares the two as equal (it compares
+/// `as_u16()`). Matching on the number keeps equality and pattern matching
+/// from disagreeing.
+const KIND_GIFT_WRAP: u16 = 1059;
+const KIND_PROTOCOL_V2: u16 = 14;
 
 /// Event kinds the listener subscribes to and dispatches on:
 /// - 1059 — Gift Wrap (NIP-59), Mostro protocol v1 and dispute admin DMs.
@@ -156,17 +161,20 @@ impl NostrListener {
 ///   `protocol_version=2` reply with signed kind-14 events addressed to the
 ///   trade pubkey in the `p` tag instead of a Gift Wrap).
 fn watched_kinds() -> Vec<Kind> {
-    vec![Kind::Custom(1059), Kind::Custom(14)]
+    vec![
+        Kind::from_u16(KIND_GIFT_WRAP),
+        Kind::from_u16(KIND_PROTOCOL_V2),
+    ]
 }
 
 fn is_watched_kind(kind: Kind) -> bool {
-    watched_kinds().contains(&kind)
+    matches!(kind.as_u16(), KIND_GIFT_WRAP | KIND_PROTOCOL_V2)
 }
 
 fn kind_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Custom(1059) => "Gift Wrap (kind 1059)",
-        Kind::Custom(14) => "protocol v2 (kind 14)",
+    match kind.as_u16() {
+        KIND_GIFT_WRAP => "Gift Wrap (kind 1059)",
+        KIND_PROTOCOL_V2 => "protocol v2 (kind 14)",
         _ => "unexpected kind",
     }
 }
@@ -176,9 +184,9 @@ fn kind_label(kind: Kind) -> &'static str {
 /// same way).
 fn extract_recipient(event: &Event) -> Option<String> {
     event.tags.iter().find_map(|tag| {
-        let tag_vec = tag.as_vec();
-        if tag_vec.len() >= 2 && tag_vec[0] == "p" {
-            Some(tag_vec[1].clone())
+        let tag_slice = tag.as_slice();
+        if tag_slice.len() >= 2 && tag_slice[0] == "p" {
+            Some(tag_slice[1].clone())
         } else {
             None
         }
@@ -193,6 +201,24 @@ mod tests {
     fn watched_kinds_include_gift_wrap_and_protocol_v2() {
         assert!(is_watched_kind(Kind::Custom(1059)));
         assert!(is_watched_kind(Kind::Custom(14)));
+        // Inbound events arrive as the named variants, not as Custom.
+        assert!(is_watched_kind(Kind::from_u16(1059)));
+        assert!(is_watched_kind(Kind::from_u16(14)));
+    }
+
+    /// Regression guard for the 0.45 migration: `kind_label` used to match on
+    /// `Kind::Custom(..)` patterns, which never match the named variants the
+    /// SDK produces for inbound events. Every watched event logged as
+    /// "unexpected kind" while still dispatching correctly.
+    #[test]
+    fn kind_label_names_both_watched_kinds_however_constructed() {
+        for kind in [Kind::from_u16(1059), Kind::Custom(1059)] {
+            assert_eq!(kind_label(kind), "Gift Wrap (kind 1059)");
+        }
+        for kind in [Kind::from_u16(14), Kind::Custom(14)] {
+            assert_eq!(kind_label(kind), "protocol v2 (kind 14)");
+        }
+        assert_eq!(kind_label(Kind::from_u16(1)), "unexpected kind");
     }
 
     #[test]
@@ -206,13 +232,10 @@ mod tests {
     fn extract_recipient_returns_first_p_tag() {
         let keys = Keys::generate();
         let recipient = Keys::generate();
-        let event = EventBuilder::new(
-            Kind::Custom(14),
-            "ciphertext",
-            [Tag::public_key(recipient.public_key())],
-        )
-        .to_event(&keys)
-        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(14), "ciphertext")
+            .tags([Tag::public_key(recipient.public_key())])
+            .finalize(&keys)
+            .unwrap();
 
         assert_eq!(
             extract_recipient(&event),
@@ -223,8 +246,8 @@ mod tests {
     #[test]
     fn extract_recipient_returns_none_without_p_tag() {
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(14), "ciphertext", [])
-            .to_event(&keys)
+        let event = EventBuilder::new(Kind::Custom(14), "ciphertext")
+            .finalize(&keys)
             .unwrap();
 
         assert_eq!(extract_recipient(&event), None);

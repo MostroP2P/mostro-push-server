@@ -72,7 +72,7 @@ To turn the filter on/off without rebuilding, flip
 | Variable                        | Default | Description                                                                                |
 |---------------------------------|---------|--------------------------------------------------------------------------------------------|
 | `FCM_ENABLED`                   | `true`  | Enable Firebase Cloud Messaging backend                                                    |
-| `UNIFIEDPUSH_ENABLED`           | `true`  | Enable UnifiedPush backend                                                                 |
+| `UNIFIEDPUSH_ENABLED`           | `false` | Enable UnifiedPush backend. Opt-in on purpose: the dispatch path POSTs to the client-supplied device token treated as a URL, so the backend stays off unless set explicitly. |
 | `FIREBASE_PROJECT_ID`           | -       | Firebase project ID, required when `FCM_ENABLED=true`                                      |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | -       | Absolute path to the Firebase service-account JSON. If missing or unreadable, FCM is disabled at startup with a warning; the server keeps running. |
 | `BATCH_DELAY_MS`                | `5000`  | Reserved (declared on `PushConfig`; not currently consumed)                                |
