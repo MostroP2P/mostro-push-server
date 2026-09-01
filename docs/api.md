@@ -242,9 +242,13 @@ and must satisfy all of:
 
 - scheme is `https`
 - the host is not a private, loopback, link-local, CGNAT, or otherwise
-  non-routable address, including the IPv4-mapped IPv6 spellings of those
-  (`https://[::ffff:169.254.169.254]/`) and the IPv6 documentation and
-  discard-only prefixes
+  non-routable IPv4 address, including the IPv4-mapped IPv6 spellings of those
+  (`https://[::ffff:169.254.169.254]/`)
+- the host, if IPv6, is inside globally routable unicast (`2000::/3`). This is
+  an allowlist rather than a list of bad ranges, so site-local, unique-local,
+  link-local, discard-only and unassigned space are all refused without a rule
+  each. The blocks carved out of `2000::/3` that are not globally reachable —
+  documentation, 6to4, and the IETF protocol assignments — are refused as well
 
 A value that parses under one of a short list of clearly unusable schemes
 (`file`, `ftp`, `gopher`, `data`, `dict`, `ldap`) is refused outright. That is

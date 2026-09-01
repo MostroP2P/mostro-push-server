@@ -240,6 +240,16 @@ fn is_non_public_v4(addr: Ipv4Addr) -> bool {
         || a >= 240 // 240.0.0.0/4 reserved
 }
 
+/// An allowlist, unlike the IPv4 rules above.
+///
+/// Enumerating non-public IPv6 blocks is a losing game: most of the address
+/// space is unassigned, `Ipv6Addr` exposes no stable predicate for the
+/// special-purpose ranges, and each pass over this function found another block
+/// the list had missed. Only global unicast (`2000::/3`) is reachable on the
+/// public internet at all, so everything else is refused by default — loopback,
+/// unspecified, unique-local, link-local, site-local, multicast, and every
+/// block IANA has not handed out yet. A new special-purpose assignment outside
+/// `2000::/3` then needs no change here.
 fn is_non_public_v6(addr: Ipv6Addr) -> bool {
     // `https://[::ffff:169.254.169.254]/` parses as an Ipv6 host, so the v4
     // ranges must be applied to the embedded address or every v4 rule above is
@@ -250,18 +260,24 @@ fn is_non_public_v6(addr: Ipv6Addr) -> bool {
 
     let seg = addr.segments();
 
-    addr.is_loopback()
-        || addr.is_unspecified()
-        || addr.is_multicast()
-        || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
-        || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
-        // `Ipv6Addr::is_documentation` is still unstable, so the special-purpose
-        // prefixes below are spelled out. None of them names a host that can be
-        // reached over the public internet, so a token pointing at one is either
-        // a mistake or an attempt to probe what the server does with it.
-        || (seg[0] == 0x2001 && seg[1] == 0x0db8) // 2001:db8::/32 documentation
-        || (seg[0] == 0x3fff && (seg[1] & 0xf000) == 0) // 3fff::/20 documentation
-        || (seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0) // 100::/64 discard-only
+    if (seg[0] & 0xe000) != 0x2000 {
+        return true;
+    }
+
+    // Blocks carved out of 2000::/3 that are not globally reachable. 6to4 and
+    // the IETF assignments matter most: both wrap an arbitrary IPv4 address, so
+    // leaving them out would reopen the v4 rules from the other side, the way
+    // `::ffff:` does.
+    match seg[0] {
+        // 2001::/23 IETF protocol assignments (Teredo, benchmarking, ORCHIDv2)
+        // and 2001:db8::/32 documentation.
+        0x2001 => (seg[1] & 0xfe00) == 0 || seg[1] == 0x0db8,
+        // 2002::/16 6to4.
+        0x2002 => true,
+        // 3fff::/20 documentation.
+        0x3fff => (seg[1] & 0xf000) == 0,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -363,16 +379,18 @@ mod tests {
         }
     }
 
-    /// Special-purpose prefixes that are not covered by any `Ipv6Addr`
-    /// predicate on stable Rust, so the guard spells them out itself.
+    /// Everything outside global unicast is refused by the allowlist, with no
+    /// per-block rule. Site-local is the case that motivated the allowlist: it
+    /// slipped past an enumeration that already covered ULA and link-local.
     #[test]
-    fn special_purpose_ipv6_prefixes_are_refused() {
+    fn ipv6_outside_global_unicast_is_refused() {
         for token in [
-            "https://[2001:db8::1]/",       // documentation, RFC 3849
-            "https://[2001:db8:ffff::1]/",  // documentation, upper end
-            "https://[3fff::1]/",           // documentation, RFC 9637
-            "https://[3fff:0fff:ffff::1]/", // documentation, upper end
-            "https://[100::1]/",            // discard-only, RFC 6666
+            "https://[fec0::1]/",    // site-local, RFC 3879
+            "https://[100::1]/",     // discard-only, RFC 6666
+            "https://[64:ff9b::1]/", // NAT64 well-known prefix
+            "https://[4000::1]/",    // unassigned
+            "https://[a000::1]/",    // unassigned
+            "https://[c000::1]/",    // unassigned
         ] {
             assert_eq!(
                 classify_token(token),
@@ -382,16 +400,38 @@ mod tests {
         }
     }
 
-    /// Pins the prefix masks above: each of these sits just outside one of the
-    /// blocks and must stay reachable. A mask that is one bit too wide would
-    /// silently refuse legitimate endpoints.
+    /// The blocks inside `2000::/3` that the allowlist alone would let through.
     #[test]
-    fn addresses_just_outside_the_special_prefixes_stay_public() {
+    fn non_routable_blocks_inside_global_unicast_are_refused() {
+        for token in [
+            "https://[2001:db8::1]/",       // documentation, RFC 3849
+            "https://[2001:db8:ffff::1]/",  // documentation, upper end
+            "https://[3fff::1]/",           // documentation, RFC 9637
+            "https://[3fff:0fff:ffff::1]/", // documentation, upper end
+            "https://[2001::1]/",           // Teredo
+            "https://[2001:2::1]/",         // benchmarking
+            "https://[2001:20::1]/",        // ORCHIDv2
+            "https://[2002:a9fe:a9fe::1]/", // 6to4 wrapping 169.254.169.254
+        ] {
+            assert_eq!(
+                classify_token(token),
+                TokenShape::Rejected(EndpointRejection::NonPublicAddress),
+                "{token}"
+            );
+        }
+    }
+
+    /// Pins the carve-out masks: each of these sits just outside one of the
+    /// blocks above, inside global unicast, and must stay reachable. A mask one
+    /// bit too wide would silently refuse legitimate endpoints.
+    #[test]
+    fn addresses_just_outside_the_carve_outs_stay_public() {
         for ip in [
             "2001:db9::1",      // 2001:db8::/32 is 32 bits wide, not 16
             "2001:db7:ffff::1", // just below it
+            "2001:200::1",      // just above 2001::/23
+            "2003::1",          // just above 2002::/16
             "3fff:1000::1",     // 3fff::/20 stops at 3fff:0fff:...
-            "100:0:0:1::1",     // 100::/64 is a single /64
         ] {
             let parsed: IpAddr = ip.parse().unwrap();
             assert!(!is_non_public(parsed), "{ip} should be public");
@@ -443,6 +483,22 @@ mod tests {
         ] {
             let parsed: IpAddr = ip.parse().unwrap();
             assert!(!is_non_public(parsed), "{ip} should be public");
+        }
+    }
+
+    /// The resolved-address branch of `validate_endpoint` and the literal
+    /// branch of `classify_token` both decide through `is_non_public`, so this
+    /// covers the DNS path for addresses no test can make a resolver return.
+    #[test]
+    fn resolved_addresses_are_judged_by_the_same_rules() {
+        for ip in [
+            "fec0::1",           // site-local
+            "2002:a9fe:a9fe::1", // 6to4 wrapping cloud metadata
+            "fd00::1",           // unique local
+            "169.254.169.254",   // cloud metadata
+        ] {
+            let parsed: IpAddr = ip.parse().unwrap();
+            assert!(is_non_public(parsed), "{ip} must not be treated as public");
         }
     }
 
@@ -520,6 +576,10 @@ mod tests {
     async fn dispatch_refuses_what_registration_refuses() {
         assert_eq!(
             validate_endpoint("https://169.254.169.254/latest/").await,
+            Err(EndpointRejection::NonPublicAddress)
+        );
+        assert_eq!(
+            validate_endpoint("https://[fec0::1]/push").await,
             Err(EndpointRejection::NonPublicAddress)
         );
         assert_eq!(
