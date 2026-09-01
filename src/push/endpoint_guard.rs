@@ -25,17 +25,29 @@
 //! for its own backend to interpret.
 
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
+use std::time::Duration;
 
 use reqwest::Url;
 use tokio::net::lookup_host;
+use tokio::time::timeout;
 
 /// Schemes refused outright at registration. None of them can produce an
 /// outbound request through `reqwest`, so this is data hygiene rather than an
 /// SSRF control: a token spelled this way is broken whichever backend claims
 /// it, and there is no reason to hold it in the store until its TTL expires.
 const DANGEROUS_SCHEMES: &[&str] = &["file", "ftp", "gopher", "data", "dict", "ldap"];
+
+/// Upper bound on the pre-flight DNS lookup in [`validate_endpoint`].
+///
+/// The lookup runs before `reqwest` ever sees the request, so it is outside
+/// that client's 5 s total timeout. The endpoint host is attacker-supplied, so
+/// its nameserver may simply never answer: the Nostr listener awaits dispatch
+/// inline and `/api/notify` holds one of its 50 permits for the lifetime of
+/// the spawned task, which makes an unbounded lookup a way to stall event
+/// processing and drain the permit pool. Matches the client's connect timeout.
+const DNS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Why an endpoint URL was refused. Kept coarse on purpose: the HTTP layer
 /// collapses every variant into one message so a caller cannot use the
@@ -125,7 +137,8 @@ pub fn classify_token(token: &str) -> TokenShape {
 /// Applies [`classify_token`] and, for domain hosts, resolves the name and
 /// refuses if **any** resolved address is non-public. A domain that resolves
 /// to several addresses is refused if even one of them is internal, so a
-/// round-robin record cannot be used to slip through.
+/// round-robin record cannot be used to slip through. The lookup is bounded by
+/// [`DNS_TIMEOUT`], since the host it resolves is attacker-supplied.
 ///
 /// This narrows but does not eliminate DNS rebinding: `reqwest` performs its
 /// own resolution when it connects, so a record with a very short TTL can
@@ -153,22 +166,32 @@ pub async fn validate_endpoint(token: &str) -> Result<(), EndpointRejection> {
     let domain = host;
 
     let port = url.port_or_known_default().unwrap_or(443);
-    let resolved = lookup_host((domain.as_str(), port))
-        .await
-        .map_err(|_| EndpointRejection::UnresolvableHost)?;
+    let resolved = resolve_addresses(&domain, port, DNS_TIMEOUT).await?;
 
-    let mut saw_address = false;
-    for addr in resolved {
-        saw_address = true;
-        if is_non_public(addr.ip()) {
-            return Err(EndpointRejection::NonPublicAddress);
-        }
+    if resolved.is_empty() {
+        return Err(EndpointRejection::UnresolvableHost);
+    }
+    if resolved.iter().any(|addr| is_non_public(addr.ip())) {
+        return Err(EndpointRejection::NonPublicAddress);
     }
 
-    if saw_address {
-        Ok(())
-    } else {
-        Err(EndpointRejection::UnresolvableHost)
+    Ok(())
+}
+
+/// Resolves a domain host under an explicit time budget.
+///
+/// A lookup that times out and one that fails are the same answer here: the
+/// host was not shown to be safe, so it is not contacted. The budget is a
+/// parameter rather than a constant read inline so the bound itself is
+/// testable without a stalling nameserver.
+async fn resolve_addresses(
+    domain: &str,
+    port: u16,
+    budget: Duration,
+) -> Result<Vec<SocketAddr>, EndpointRejection> {
+    match timeout(budget, lookup_host((domain, port))).await {
+        Ok(Ok(addrs)) => Ok(addrs.collect()),
+        Ok(Err(_)) | Err(_) => Err(EndpointRejection::UnresolvableHost),
     }
 }
 
@@ -390,6 +413,56 @@ mod tests {
             validate_endpoint("https://localhost/up").await,
             Err(EndpointRejection::NonPublicAddress)
         );
+    }
+
+    /// A stalled resolver must be refused rather than awaited: the lookup runs
+    /// outside the HTTP client's timeout while a dispatch permit is held.
+    ///
+    /// `lookup_host` defers to the blocking pool, so capping that pool at one
+    /// thread and occupying it makes the lookup unable to start. That stalls
+    /// the resolution deterministically, where simply passing a zero budget
+    /// races against a `localhost` lookup that often completes on the first
+    /// poll.
+    #[test]
+    fn dns_lookup_is_bounded() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = held.recv();
+            });
+            // Let the blocker actually take the one blocking thread.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // Outer bound so that dropping the inner one fails the test rather
+            // than deadlocking it: the blocker is only released afterwards.
+            let result = timeout(
+                Duration::from_secs(5),
+                resolve_addresses("localhost", 443, Duration::from_millis(50)),
+            )
+            .await
+            .expect("resolve_addresses must return within its own budget");
+
+            let _ = release.send(());
+            let _ = blocker.await;
+
+            assert_eq!(result, Err(EndpointRejection::UnresolvableHost));
+        });
+    }
+
+    /// The same host under the real budget resolves, so the test above pins the
+    /// bound rather than a name that never resolves.
+    #[tokio::test]
+    async fn dns_lookup_succeeds_within_budget() {
+        let resolved = resolve_addresses("localhost", 443, DNS_TIMEOUT)
+            .await
+            .expect("localhost must resolve");
+        assert!(!resolved.is_empty());
     }
 
     /// `.invalid` is reserved by RFC 2606 and never resolves.
