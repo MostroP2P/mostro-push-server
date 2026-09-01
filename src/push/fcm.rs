@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
@@ -65,22 +65,42 @@ const OAUTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Base delay for the exponential backoff between attempts.
 const OAUTH_BACKOFF_BASE_MS: u64 = 200;
 
+/// How long a failed refresh suppresses the next exchange.
+///
+/// Single-flight alone only serialises the cohort waiting on the lock: during
+/// an outage each waiter finds the cache still empty and runs its own full
+/// sequence, so 50 queued dispatches become 150 requests aimed at a service
+/// already failing, and the last one waits ~50 retry budgets while holding an
+/// `/api/notify` permit. Sharing the failure caps an outage at one sequence
+/// per window. Longer than the worst-case budget so the cohort cannot
+/// immediately re-probe, and negligible against the ~1 h token lifetime, so
+/// recovery is not meaningfully delayed.
+const OAUTH_FAILURE_COOLDOWN: Duration = Duration::from_secs(10);
+
 /// One failed exchange, and whether trying again could plausibly help.
 struct OauthAttemptError {
     message: String,
     retryable: bool,
 }
 
+/// The outcome of an exhausted refresh, kept so the callers queued behind it
+/// fail with the same cause instead of each re-running the sequence.
+struct FailedRefresh {
+    at: Instant,
+    message: String,
+}
+
 pub struct FcmPush {
     client: Arc<reqwest::Client>,
     service_account: Option<ServiceAccount>,
     cached_token: Arc<RwLock<Option<CachedToken>>>,
-    /// Serialises token refreshes. Without it, every concurrent dispatch that
-    /// misses the cache mints its own JWT and calls Google independently, so
-    /// adding retries would multiply an outage by the number of in-flight
-    /// dispatches. Single-flight is what makes the retry safe, not a separate
-    /// optimisation.
-    refresh_lock: Mutex<()>,
+    /// Serialises token refreshes, and guards the last one that failed.
+    ///
+    /// Without it, every concurrent dispatch that misses the cache mints its
+    /// own JWT and calls Google independently, so adding retries would
+    /// multiply an outage by the number of in-flight dispatches. Single-flight
+    /// is what makes the retry safe, not a separate optimisation.
+    refresh_lock: Mutex<Option<FailedRefresh>>,
     /// Where the token exchange is POSTed. Fixed in production; overridden by
     /// tests so the retry behaviour can be exercised against a local server.
     oauth_token_url: String,
@@ -118,7 +138,7 @@ impl FcmPush {
             client,
             service_account,
             cached_token: Arc::new(RwLock::new(None)),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Mutex::new(None),
             oauth_token_url: OAUTH_TOKEN_URL.to_string(),
             project_id,
         }
@@ -142,14 +162,39 @@ impl FcmPush {
 
         // Single-flight: only one refresh runs at a time, and everyone else
         // reuses its result rather than starting their own.
-        let _refresh = self.refresh_lock.lock().await;
+        let mut last_failure = self.refresh_lock.lock().await;
 
         // Another task may have refreshed while we waited for the lock.
         if let Some(token) = self.cached_token_if_fresh().await {
             return Ok(token);
         }
 
-        self.refresh_access_token().await
+        // Or it may have exhausted its attempts against a dependency that is
+        // still down. Re-running the sequence per waiter is what turns one
+        // outage into fifty, so the cohort shares that failure instead.
+        if let Some(failure) = last_failure.as_ref() {
+            if failure.at.elapsed() < OAUTH_FAILURE_COOLDOWN {
+                debug!(
+                    "Reusing a recent FCM OAuth2 failure instead of retrying: {}",
+                    failure.message
+                );
+                return Err(failure.message.clone().into());
+            }
+        }
+
+        match self.refresh_access_token().await {
+            Ok(token) => {
+                *last_failure = None;
+                Ok(token)
+            }
+            Err(e) => {
+                *last_failure = Some(FailedRefresh {
+                    at: Instant::now(),
+                    message: e.to_string(),
+                });
+                Err(e)
+            }
+        }
     }
 
     /// The cached token, if it is still comfortably valid.
@@ -487,7 +532,7 @@ mod tests {
             client: Arc::new(reqwest::Client::new()),
             service_account: None,
             cached_token: Arc::new(RwLock::new(None)),
-            refresh_lock: Mutex::new(()),
+            refresh_lock: Mutex::new(None),
             oauth_token_url,
             project_id: "test-project".to_string(),
         }
@@ -648,6 +693,48 @@ mod tests {
         assert_eq!(
             service.cached_token_if_fresh().await,
             Some("fresh".to_string())
+        );
+    }
+
+    /// Single-flight only serialises the cohort; without sharing the outcome
+    /// each waiter finds the cache still empty and runs its own sequence,
+    /// which is what multiplies an outage by the number of queued dispatches.
+    #[tokio::test]
+    async fn a_failed_refresh_is_shared_with_the_waiting_cohort() {
+        let service = test_service("http://unused.invalid/token".to_string());
+        *service.refresh_lock.lock().await = Some(FailedRefresh {
+            at: Instant::now(),
+            message: "OAuth2 token exchange failed (503 Service Unavailable)".to_string(),
+        });
+
+        let err = service
+            .get_access_token()
+            .await
+            .expect_err("a refresh that just failed must not be re-run per caller");
+
+        // Re-running it would have failed on the missing service account
+        // instead, before ever reaching the network.
+        assert!(err.to_string().contains("503"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_shared_failure_expires_so_recovery_is_not_blocked() {
+        let service = test_service("http://unused.invalid/token".to_string());
+        *service.refresh_lock.lock().await = Some(FailedRefresh {
+            at: Instant::now()
+                .checked_sub(OAUTH_FAILURE_COOLDOWN + Duration::from_secs(1))
+                .expect("monotonic clock predates the cooldown window"),
+            message: "OAuth2 token exchange failed (503 Service Unavailable)".to_string(),
+        });
+
+        let err = service
+            .get_access_token()
+            .await
+            .expect_err("no service account is configured in tests");
+
+        assert!(
+            err.to_string().contains("No service account configured"),
+            "an expired window must attempt a fresh exchange; got: {err}"
         );
     }
 
