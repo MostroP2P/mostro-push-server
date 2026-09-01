@@ -57,9 +57,14 @@ unset server_private_key
 - `FIREBASE_PROJECT_ID`
 - `FIREBASE_SERVICE_ACCOUNT_JSON`
 
-`FIREBASE_SERVICE_ACCOUNT_PATH` is accepted in its place only once `fly.toml`
-declares a `[[files]]` or `[mounts]` section. Without one, nothing puts a file
-at that path and the deploy would come up with FCM silently disabled.
+`FIREBASE_SERVICE_ACCOUNT_PATH` is not accepted in its place. Nothing the
+wrapper can read proves a file exists at the path that secret names, and a wrong
+guess deploys an instance that accepts registrations and delivers nothing. If
+you do provision the file through `[[files]]`, assert it explicitly:
+
+```bash
+FLY_ALLOW_CREDENTIAL_PATH=1 ./deploy-fly.sh
+```
 
 Deploy after the secrets exist:
 
@@ -98,11 +103,18 @@ flyctl secrets set -a mostro-push-server \
   FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)"
 ```
 
-On Fly the path form is not interchangeable with the inline one. `fly.toml`
-declares neither `[[files]]` nor `[mounts]`, so `FIREBASE_SERVICE_ACCOUNT_PATH`
-names a file nothing creates — including a `FIREBASE_SERVICE_ACCOUNT_PATH`
-secret left over from when the image carried the credential. `deploy-fly.sh`
-rejects that case rather than deploying an instance that cannot push.
+On Fly the path form is not interchangeable with the inline one, and
+`deploy-fly.sh` refuses it rather than deploying an instance that cannot push.
+`FIREBASE_SERVICE_ACCOUNT_PATH` only names a file; `fly.toml` as shipped
+declares no `[[files]]` entry to create one, and a secret left over from when
+the image carried the credential names a path that no longer exists.
+
+The wrapper does not try to decide the question from `fly.toml` either. It
+cannot: `flyctl secrets list` returns secret names, never values, so the path
+the secret holds cannot be compared against any `guest_path` declared there, and
+a `[[files]]` entry may write something else entirely. Rather than accept weak
+evidence, it requires the inline form and takes
+`FLY_ALLOW_CREDENTIAL_PATH=1` as the operator asserting the match themselves.
 
 **Sequencing matters.** If no credential resolves the server still starts:
 `main.rs` logs the failure and runs without FCM, because a listener and an HTTP

@@ -16,27 +16,25 @@ FLY_CONFIG="${FLY_CONFIG:-fly.toml}"
 
 # The Firebase credential no longer ships inside the image, so it must arrive at
 # runtime. On Fly a secret already *is* an environment variable, so the inline
-# form needs nothing else.
+# form needs nothing else, and it is what this wrapper requires.
 #
-# FIREBASE_SERVICE_ACCOUNT_PATH only names a file; something else has to put one
-# there. [[files]] is the one declarative way to do that on Fly, so the path
-# form is accepted only once fly.toml declares it. A [mounts] table does not
-# count: it attaches an empty volume and says nothing about the credential.
-# Without either, the path resolves to nothing, FCM starts disabled and every
-# push is dropped in silence — which is what a PATH secret left over from when
-# the image carried the credential would do today.
+# FIREBASE_SERVICE_ACCOUNT_PATH is deliberately not accepted here. It only names
+# a file, and nothing this script can read proves a file will exist there:
+# `flyctl secrets list` returns names, never values, so the path the secret
+# holds cannot be compared against anything fly.toml declares. A [[files]] entry
+# is not evidence either — it may well write something unrelated. Guessing wrong
+# means FCM starts disabled and every push is dropped in silence, which is the
+# failure this check exists to catch, and it is exactly what a PATH secret left
+# over from when the image carried the credential would do today.
 #
-# The match stops at "a [[files]] entry exists". Whether its guest_path is the
-# one FIREBASE_SERVICE_ACCOUNT_PATH points at cannot be checked from here:
-# `flyctl secrets list` returns names, never values. The declared paths are
-# printed so the operator can confirm that last step.
+# The path form stays first-class everywhere the file is genuinely under the
+# operator's control — docker-compose, systemd, Kubernetes — none of which
+# deploy through this script. If you do provision one on Fly via [[files]], set
+# FLY_ALLOW_CREDENTIAL_PATH=1 to assert that its guest_path is the path the
+# secret names. That is an assertion the operator makes, not one verified here.
 CREDENTIAL_SECRETS=(FIREBASE_SERVICE_ACCOUNT_JSON)
-declared_guest_paths=""
-if [[ -f "${FLY_CONFIG}" ]] \
-   && grep -Eq '^[[:space:]]*\[\[files\]\]' "${FLY_CONFIG}"; then
+if [[ "${FLY_ALLOW_CREDENTIAL_PATH:-}" == 1 ]]; then
     CREDENTIAL_SECRETS+=(FIREBASE_SERVICE_ACCOUNT_PATH)
-    declared_guest_paths="$(grep -E '^[[:space:]]*guest_path[[:space:]]*=' "${FLY_CONFIG}" \
-        | sed -E 's/^[[:space:]]*guest_path[[:space:]]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//')"
 fi
 
 die() {
@@ -89,25 +87,16 @@ if [[ "${credential_present}" != true ]]; then
     echo "Set one of:" >&2
     printf '  - %s\n' "${CREDENTIAL_SECRETS[@]}" >&2
     if (( ${#CREDENTIAL_SECRETS[@]} == 1 )); then
-        echo "FIREBASE_SERVICE_ACCOUNT_PATH does not count here: ${FLY_CONFIG} declares no" >&2
-        echo "[[files]] section, so nothing would create a file at that path." >&2
+        echo "FIREBASE_SERVICE_ACCOUNT_PATH is not accepted for Fly deploys: nothing here" >&2
+        echo "can prove a file exists at the path it names. If ${FLY_CONFIG} provisions one" >&2
+        echo "through [[files]], re-run with FLY_ALLOW_CREDENTIAL_PATH=1." >&2
     fi
     echo "The credential is no longer baked into the image. See docs/deployment.md." >&2
     exit 1
 fi
 
-# Accepted on the strength of [[files]] alone. Surface the paths it declares so
-# a guest_path that does not match the secret is caught here, not in the logs.
-if [[ -n "${declared_guest_paths}" ]] \
-   && grep -qx "FIREBASE_SERVICE_ACCOUNT_PATH" <<< "${configured_secret_names}" \
-   && ! grep -qx "FIREBASE_SERVICE_ACCOUNT_JSON" <<< "${configured_secret_names}"; then
-    echo "Using FIREBASE_SERVICE_ACCOUNT_PATH. ${FLY_CONFIG} writes these guest paths:" >&2
-    printf '  - %s\n' ${declared_guest_paths} >&2
-    echo "The secret must name one of them, or FCM will start disabled." >&2
-fi
-
 echo "Deploying..."
-# Same config the credential check above read, so the two cannot diverge.
+# Explicit, so the config named in the messages above is the one deployed.
 flyctl deploy -a "${APP_NAME}" -c "${FLY_CONFIG}"
 
 echo "Deploy complete."
