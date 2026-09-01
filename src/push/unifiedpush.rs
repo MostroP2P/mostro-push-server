@@ -359,4 +359,199 @@ mod tests {
         assert!(service.supports_platform(&Platform::Android));
         assert!(!service.supports_platform(&Platform::Ios));
     }
+
+    // ---------------------------------------------------------------------
+    // End-to-end chain: /api/register -> token store -> /api/notify ->
+    // dispatcher -> UnifiedPushService.
+    //
+    // The tests above cover the guard by composition: one proves
+    // `send_to_token` calls it, the `endpoint_guard` unit tests prove the guard
+    // itself is right. Neither proves the unauthenticated chain actually
+    // reaches this backend. A dispatcher wired to the wrong service, or a
+    // `/api/notify` that never dispatches, leaves all of them green.
+    // ---------------------------------------------------------------------
+
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Aliased rather than imported as `test`: a bare `use actix_web::test`
+    // shadows the built-in `#[test]` attribute for the whole module.
+    use actix_web::test as actix_test;
+    use actix_web::{http::StatusCode, web, App};
+    use governor::RateLimiter;
+    use tokio::sync::Semaphore;
+
+    use crate::api::rate_limit::{PerIpLimiter, RegisterIpLimiter, TrustProxyHeaders};
+    use crate::api::routes::{configure, AppState};
+    use crate::api::test_support::{
+        make_app_state_for_service, test_register_ip_quota, TEST_PUBKEY,
+    };
+
+    /// Binds a loopback listener that accepts connections, counts them and drops
+    /// them without answering.
+    ///
+    /// The connection count, rather than an HTTP mock, is what the chain tests
+    /// assert on. A registered endpoint has to be `https` to get past the static
+    /// pass, and a plain-HTTP mock server would report zero requests even with
+    /// the guard removed, because the TLS handshake fails before any request is
+    /// written — the test would pass with the bug in place. A TCP connection is
+    /// still established in that case, so this counter moves.
+    async fn counting_listener() -> (u16, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("listener address").port();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&count);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        (port, count)
+    }
+
+    /// App state whose only push backend is a real `UnifiedPushService`.
+    fn chain_state() -> (AppState, Arc<PerIpLimiter>, Arc<PerIpLimiter>) {
+        let service: Arc<dyn PushService> = Arc::new(test_service());
+        let (state, per_ip) =
+            make_app_state_for_service(service, "unifiedpush", Arc::new(HashSet::new()), false);
+        let register_ip = Arc::new(RateLimiter::keyed(test_register_ip_quota()));
+        (state, per_ip, register_ip)
+    }
+
+    /// Waits for the detached dispatch task to finish.
+    ///
+    /// `/api/notify` takes a semaphore permit before spawning and the task owns
+    /// it for its whole lifetime, so the permit coming back is the task ending.
+    /// That beats sleeping on a guess: with no wait at all the assertions would
+    /// pass even if dispatch never ran.
+    async fn await_dispatch(semaphore: &Arc<Semaphore>, expected: usize) {
+        for _ in 0..500 {
+            if semaphore.available_permits() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("dispatch task did not release its permit within 5s");
+    }
+
+    /// The regression #4 asks for, on the branch that no other test reaches
+    /// through HTTP: an endpoint refused only at dispatch time.
+    ///
+    /// `https://localhost:<port>/push` survives registration because `localhost`
+    /// is a domain, not an IP literal, so the static pass has nothing to reject.
+    /// It is refused at dispatch, once resolved to loopback — which is exactly
+    /// the step the registration-side tests cannot cover.
+    #[actix_web::test]
+    async fn register_then_notify_never_contacts_a_loopback_endpoint() {
+        let (port, connections) = counting_listener().await;
+        let (state, per_ip, register_ip) = chain_state();
+        let semaphore = Arc::clone(&state.semaphore);
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(per_ip))
+                .app_data(web::Data::new(RegisterIpLimiter(register_ip)))
+                .app_data(web::Data::new(TrustProxyHeaders(true)))
+                .configure(configure),
+        )
+        .await;
+
+        let register = actix_test::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": format!("https://localhost:{port}/push"),
+                "platform": "android",
+            }))
+            .to_request();
+        let resp = actix_test::call_service(&app, register).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a domain endpoint must pass the static pass, or this test proves nothing"
+        );
+
+        let permits = semaphore.available_permits();
+
+        let notify = actix_test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({ "trade_pubkey": TEST_PUBKEY }))
+            .to_request();
+        let resp = actix_test::call_service(&app, notify).await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        assert!(
+            semaphore.available_permits() < permits,
+            "the chain must actually dispatch, otherwise the count below is vacuous"
+        );
+        await_dispatch(&semaphore, permits).await;
+
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            0,
+            "the loopback endpoint must never be contacted"
+        );
+    }
+
+    /// The other half of the chain: an endpoint the static pass refuses never
+    /// reaches the store, so `/api/notify` has nothing to dispatch. The response
+    /// is still 202 — registered and unregistered pubkeys must stay
+    /// indistinguishable.
+    #[actix_web::test]
+    async fn register_refusing_an_endpoint_leaves_nothing_to_dispatch() {
+        let (state, per_ip, register_ip) = chain_state();
+        let token_store = Arc::clone(&state.token_store);
+        let semaphore = Arc::clone(&state.semaphore);
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(per_ip))
+                .app_data(web::Data::new(RegisterIpLimiter(register_ip)))
+                .app_data(web::Data::new(TrustProxyHeaders(true)))
+                .configure(configure),
+        )
+        .await;
+
+        let register = actix_test::TestRequest::post()
+            .uri("/api/register")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "https://169.254.169.254/latest/meta-data/",
+                "platform": "android",
+            }))
+            .to_request();
+        let resp = actix_test::call_service(&app, register).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        assert!(
+            token_store.get(TEST_PUBKEY).await.is_none(),
+            "a refused endpoint must not be retained in the store"
+        );
+
+        let permits = semaphore.available_permits();
+
+        let notify = actix_test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "1.2.3.4"))
+            .set_json(serde_json::json!({ "trade_pubkey": TEST_PUBKEY }))
+            .to_request();
+        let resp = actix_test::call_service(&app, notify).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::ACCEPTED,
+            "an unregistered pubkey must be indistinguishable from a registered one"
+        );
+
+        await_dispatch(&semaphore, permits).await;
+    }
 }
