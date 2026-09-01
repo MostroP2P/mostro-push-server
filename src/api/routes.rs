@@ -1166,4 +1166,99 @@ mod tests {
             r#"{"success":true,"message":"Token registered successfully","platform":"android"}"#
         );
     }
+    /// Bodies used by the decompression regression below. The gzip blobs are
+    /// the exact gzip of the plaintext beside them, precomputed rather than
+    /// produced with a compression crate: no such crate is a dependency any
+    /// more, which is the whole point of the fix.
+    const REGISTER_BODY: &str = concat!(
+        r#"{"trade_pubkey":"1111111111111111111111111111111111111111111111111111111111111111","#,
+        r#""token":"gzip_regression_token","platform":"android"}"#
+    );
+
+    const REGISTER_BODY_GZIP: &[u8] = &[
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 3, 171, 86, 42, 41, 74, 76, 73, 141, 47, 40, 77, 202, 78,
+        173, 84, 178, 82, 50, 164, 16, 40, 233, 40, 149, 228, 103, 167, 230, 1, 141, 74, 175, 202,
+        44, 136, 47, 74, 77, 47, 74, 45, 46, 206, 204, 207, 139, 135, 136, 235, 40, 21, 228, 36,
+        150, 164, 229, 23, 229, 2, 149, 36, 230, 165, 20, 229, 103, 166, 40, 213, 2, 0, 208, 200,
+        236, 139, 136, 0, 0, 0,
+    ];
+
+    const PUBKEY_ONLY_BODY: &str =
+        r#"{"trade_pubkey":"1111111111111111111111111111111111111111111111111111111111111111"}"#;
+
+    const PUBKEY_ONLY_BODY_GZIP: &[u8] = &[
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 3, 171, 86, 42, 41, 74, 76, 73, 141, 47, 40, 77, 202, 78,
+        173, 84, 178, 82, 50, 164, 16, 40, 213, 2, 0, 138, 165, 9, 180, 83, 0, 0, 0,
+    ];
+
+    /// Actix applies request decompression *inside* the JSON extractor, before
+    /// `JsonConfig::limit` has seen anything, and `ContentDecoder::feed_data`
+    /// decodes a whole chunk into an unbounded `BytesMut`. With the
+    /// `compress-*` features enabled, 316 bytes of brotli decode to 382 MB on
+    /// these unauthenticated endpoints, so the body caps guard the wrong side
+    /// of the decompressor and the memory-amplification fix is defeated.
+    ///
+    /// `Cargo.toml` therefore builds actix-web without those features, which
+    /// removes the decompressor rather than guarding each use of it. A
+    /// compressed body then reaches serde_json as opaque bytes and is refused
+    /// by the malformed-body path that already existed, so no endpoint gains a
+    /// response shape.
+    ///
+    /// Each blob below decompresses to the plaintext body next to it, and the
+    /// control leg asserts that plaintext is accepted. A build that
+    /// decompresses would therefore answer 200/202 here instead of 400, which
+    /// is what makes this a regression test rather than a restatement of the
+    /// current behaviour.
+    #[actix_web::test]
+    async fn compressed_bodies_are_refused_rather_than_decompressed() {
+        for (uri, plain, gzipped, accepted) in [
+            (
+                "/api/register",
+                REGISTER_BODY,
+                REGISTER_BODY_GZIP,
+                StatusCode::OK,
+            ),
+            (
+                "/api/unregister",
+                PUBKEY_ONLY_BODY,
+                PUBKEY_ONLY_BODY_GZIP,
+                StatusCode::OK,
+            ),
+            (
+                "/api/notify",
+                PUBKEY_ONLY_BODY,
+                PUBKEY_ONLY_BODY_GZIP,
+                StatusCode::ACCEPTED,
+            ),
+        ] {
+            let c = make_test_components();
+            let app = atest::init_service(build_test_actix_app(c)).await;
+            let req = atest::TestRequest::post()
+                .uri(uri)
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .insert_header(("Content-Type", "application/json"))
+                .set_payload(plain)
+                .to_request();
+            assert_eq!(
+                atest::call_service(&app, req).await.status(),
+                accepted,
+                "{uri}: the plaintext body must be accepted, or the assertion below proves nothing"
+            );
+
+            let c = make_test_components();
+            let app = atest::init_service(build_test_actix_app(c)).await;
+            let req = atest::TestRequest::post()
+                .uri(uri)
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .insert_header(("Content-Type", "application/json"))
+                .insert_header(("Content-Encoding", "gzip"))
+                .set_payload(gzipped)
+                .to_request();
+            assert_eq!(
+                atest::call_service(&app, req).await.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri}: a compressed body must not be decompressed"
+            );
+        }
+    }
 }

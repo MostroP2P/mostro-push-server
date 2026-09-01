@@ -309,6 +309,14 @@ Too Large`:
 }
 ```
 
+Compressed request bodies are not accepted on any endpoint. The server is built
+without actix-web's `compress-*` features, so a `Content-Encoding` of `gzip`,
+`deflate`, `br` or `zstd` is not decoded: the body reaches the JSON parser as
+opaque bytes and is refused as malformed. This is what makes the limits above
+meaningful — actix decompresses inside the JSON extractor, before the limit is
+consulted and into an unbounded buffer, so a few hundred compressed bytes would
+otherwise expand to hundreds of megabytes on an unauthenticated endpoint.
+
 Returning `400` rather than `413` is deliberate. The response bodies of
 `/api/register` and `/api/unregister` are frozen against pre-1.1 fixtures, and
 `/api/notify` is contractually restricted to a single failure status, so the

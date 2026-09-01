@@ -8,7 +8,7 @@ For deeper context (data flow, components, ops): [docs/architecture.md](docs/arc
 
 - **Language**: Rust, edition 2021. MSRV 1.75 (Docker builder pinned to 1.90).
 - **Async runtime**: Tokio 1.35 (`full`).
-- **HTTP**: `actix-web 4.9`, `actix-rt 2.9`.
+- **HTTP**: `actix-web 4.9` (built with `default-features = false`; the `compress-brotli`/`compress-gzip`/`compress-zstd` features are deliberately off), `actix-rt 2.9`. Actix decompresses request bodies inside the JSON extractor, before `JsonConfig::limit` is consulted, into an unbounded buffer — 316 bytes of brotli decode to 382 MB — so the body caps would guard the wrong side of the decompressor. Do NOT re-enable those features; `compressed_bodies_are_refused_rather_than_decompressed` in `src/api/routes.rs` fails if you do.
 - **Nostr**: `nostr-sdk 0.27`.
 - **HTTP client**: shared `reqwest::Client` with explicit timeouts (2 s connect, 5 s total). UnifiedPush is the one exception: it builds its own via `UnifiedPushService::build_client()`, identical except that redirects and environment-configured proxies are refused. Its endpoint URL is attacker-supplied, and the SSRF guard only inspects the first hop.
 - **Rate limiting**: `governor 0.6` (already approved, dual-keyed limiter).
