@@ -77,7 +77,7 @@ Request:
 | Field           | Type   | Description                                                                                                            |
 |-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
 | `trade_pubkey`  | string | 64 hex characters                                                                                                      |
-| `token`         | string | FCM device token, or UnifiedPush endpoint URL                                                                          |
+| `token`         | string | FCM device token, or UnifiedPush endpoint URL. Non-empty, at most 4096 bytes. If it parses as an `http`/`https` URL it must be `https` and point at a public address (see below). |
 | `platform`      | string | `"android"` or `"ios"`                                                                                                 |
 | `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
@@ -103,7 +103,8 @@ Validation failure — `400 Bad Request`:
 Possible validation errors:
 
 - `trade_pubkey` not 64 hex characters
-- `token` empty
+- `token` empty, or longer than 4096 bytes
+- `token` rejected as a push endpoint (see below)
 - `platform` not `"android"` or `"ios"`
 - `mostro_pubkey` present but not 64 hex characters
 
@@ -226,9 +227,102 @@ curl -i -X POST http://localhost:8080/api/notify \
 |--------|-------------------------------------------------------------------------------|
 | 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
 | 202    | `/api/notify` on parse-valid input                                            |
-| 400    | Malformed body, invalid `trade_pubkey`, invalid `platform`, empty `token`     |
+| 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint |
 | 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits                 |
 | 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
+
+### Push endpoint validation
+
+The `token` field is overloaded: for FCM it is an opaque registration token,
+for UnifiedPush it is the URL the server will POST to. The request carries no
+field saying which, so the server inspects the value instead.
+
+A token that parses as an `http` or `https` URL is treated as a push endpoint
+and must satisfy all of:
+
+- scheme is `https`
+- the host is not a private, loopback, link-local, CGNAT, or otherwise
+  non-routable IPv4 address, including the IPv4-mapped IPv6 spellings of those
+  (`https://[::ffff:169.254.169.254]/`)
+- the host, if IPv6, is inside globally routable unicast (`2000::/3`). This is
+  an allowlist rather than a list of bad ranges, so site-local, unique-local,
+  link-local, discard-only and unassigned space are all refused without a rule
+  each. The blocks carved out of `2000::/3` that are not globally reachable —
+  documentation, 6to4, and the IETF protocol assignments — are refused as well
+
+A value that parses under one of a short list of clearly unusable schemes
+(`file`, `ftp`, `gopher`, `data`, `dict`, `ldap`) is refused outright. That is
+hygiene rather than an SSRF control: none of those schemes can produce an
+outbound request, so such a token is broken whichever backend claims it.
+
+Every remaining value — including anything that does not parse as a URL at all
+— is treated as an opaque backend token and passed through untouched, so FCM
+registrations are unaffected.
+
+Rejection — `400 Bad Request`:
+
+```json
+{
+  "success": false,
+  "message": "Invalid push endpoint"
+}
+```
+
+The message is identical for every rejection reason on purpose. A caller must
+not be able to use the response to distinguish "unsupported scheme" from
+"internal address" and map the server's network.
+
+Registration performs the checks above without touching the network. The
+authoritative check runs again immediately before the outbound POST and
+additionally resolves domain hosts, refusing the endpoint if any resolved
+address is non-public.
+
+## Request size limits
+
+Every endpoint that accepts a body caps it. Actix's own default is 2 MB, which
+on unauthenticated endpoints is a free memory-amplification primitive.
+
+| Endpoint          | Max body | Notes                                                        |
+|-------------------|----------|--------------------------------------------------------------|
+| `/api/register`   | 8 KiB    | Sized to fit a 4096-byte `token` plus the other fields        |
+| `/api/unregister` | 1 KiB    | Body carries a single 64-char hex pubkey                      |
+| `/api/notify`     | 1 KiB    | Body carries a single 64-char hex pubkey                      |
+
+The `token` field of a registration is bounded separately at **4096 bytes**. The
+body cap stops an enormous request; the field cap stops a merely large one from
+being retained in the in-memory token store for its whole TTL.
+
+Exceeding either limit is reported as `400 Bad Request`, **not** `413 Payload
+Too Large`:
+
+```json
+{
+  "success": false,
+  "message": "Request body too large"
+}
+```
+
+```json
+{
+  "success": false,
+  "message": "Token exceeds maximum length"
+}
+```
+
+Compressed request bodies are not accepted on any endpoint. The server is built
+without actix-web's `compress-*` features, so a `Content-Encoding` of `gzip`,
+`deflate`, `br` or `zstd` is not decoded: the body reaches the JSON parser as
+opaque bytes and is refused as malformed. This is what makes the limits above
+meaningful — actix decompresses inside the JSON extractor, before the limit is
+consulted and into an unbounded buffer, so a few hundred compressed bytes would
+otherwise expand to hundreds of megabytes on an unauthenticated endpoint.
+
+Returning `400` rather than `413` is deliberate. The response bodies of
+`/api/register` and `/api/unregister` are frozen against pre-1.1 fixtures, and
+`/api/notify` is contractually restricted to a single failure status, so the
+size cap reuses the shape those endpoints already emit instead of introducing a
+new one. Only the payload-overflow case is remapped; every other body-parsing
+failure keeps its previous behaviour.
 
 ## Rate limiting
 

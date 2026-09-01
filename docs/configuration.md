@@ -158,6 +158,27 @@ NOTIFY_TRUST_PROXY_HEADERS=true
 RUST_LOG=info
 ```
 
+## UnifiedPush endpoint policy
+
+When UnifiedPush is enabled, the registered device token *is* the URL the
+server POSTs to, which makes it a request-forgery surface reachable from the
+unauthenticated `/api/register` and `/api/notify` pair. `src/push/endpoint_guard.rs`
+refuses any endpoint that is not `https`, or whose host is (or resolves to) a
+non-routable address: loopback, RFC1918, link-local, CGNAT, unique-local and
+the rest.
+
+There is no configuration knob to relax this. Two consequences for operators:
+
+- **A UnifiedPush distributor on a private range is not reachable.** Front it
+  with a public hostname and a TLS certificate. This is deliberate: the blast
+  radius of accidentally reaching a cloud metadata service or a container-local
+  admin port is far worse than that of an operator having to publish a name.
+- **Local mock servers cannot be used to exercise the dispatch path**, since
+  they bind to loopback.
+
+Full detail, including the known DNS-rebinding limitation, is in
+[unifiedpush.md](./unifiedpush.md#endpoint-validation).
+
 ## Generating a Firebase service account
 
 1. [Firebase Console](https://console.firebase.google.com/) → your project → Project Settings → Service accounts.

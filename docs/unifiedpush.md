@@ -38,11 +38,42 @@ The endpoint store is loaded once at startup. Failures to read or parse the file
 
 If `UNIFIEDPUSH_ENABLED=false`, the service is not added to the dispatcher slice. Existing entries in `data/unifiedpush_endpoints.json` are ignored at runtime but not deleted.
 
+## Endpoint validation
+
+The registered device token *is* the URL the server POSTs to, which makes it a
+request-forgery surface reachable from the unauthenticated `/api/register` and
+`/api/notify` pair. `src/push/endpoint_guard.rs` is the single place that
+decides whether an endpoint may be contacted.
+
+Two passes:
+
+1. **Registration** — static, no network. Refuses non-`https` schemes and hosts
+   that are IP literals outside the public internet.
+2. **Dispatch** — runs immediately before the outbound POST, repeats the static
+   checks, and resolves domain hosts, refusing if *any* resolved address is
+   non-public. This is the authoritative gate; registration is defence in
+   depth and fast feedback.
+
+The guard only ever inspects the **first hop**, which is why this backend does
+not use the shared HTTP client. `reqwest` follows up to 10 redirects by
+default, so a registered endpoint answering `302 Location: http://169.254.169.254/`
+would walk the request past the guard entirely. `UnifiedPushService::build_client`
+refuses redirects outright: a push endpoint has no legitimate reason to issue
+one. A regression test asserts the second hop is never requested.
+
+Known limitation: `reqwest` resolves the host again when it connects, so a DNS
+record with a very short TTL can change between validation and connection.
+Closing that race requires pinning the validated address into the connection;
+tracked in [#39](https://github.com/MostroP2P/mostro-push-server/issues/39).
+
 ## Operational notes
 
 - UnifiedPush has no per-payload distinction between silent and visible push. `send_silent_to_token` falls back to `send_to_token`, which is the same code path the Nostr listener uses.
-- There is no rate limiting on outbound UnifiedPush calls beyond what the server-wide `reqwest::Client` timeouts provide (2 s connect, 5 s total).
-- The endpoint URL is fully attacker-controlled in the sense that the distributor can be any HTTP server. The shared `reqwest::Client` enforces TLS and the timeouts; the server does not pin certificates or restrict hostnames.
+- There is no rate limiting on outbound UnifiedPush calls. Nothing bounds how often the server will POST to a registered endpoint.
+- The backend's client applies a 2 s connect timeout and a 5 s total timeout. Those bound how long one call may take, not how many are made, so they are not a substitute for the rate limiting above. They come from `UnifiedPushService::build_client`, not from the server-wide `reqwest::Client`, which this backend does not use.
+- The pre-flight DNS lookup in `endpoint_guard::validate_endpoint` carries its own 2 s bound. It runs before the client ever sees the request, so it is outside those timeouts, and the host it resolves is attacker-supplied.
+- The endpoint URL is fully attacker-controlled in the sense that the distributor can be any HTTP server. A dedicated `reqwest::Client` (`UnifiedPushService::build_client`) enforces TLS, the timeouts, and a no-redirect policy; the server does not pin certificates.
+- That client also refuses proxies. `reqwest` otherwise honours `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and the OS proxy settings, which would route an attacker-chosen URL through a hop the guard never validated. Deployments that require an egress proxy must enforce the same destination policy on the proxy itself; setting the environment variables alone will not work here.
 
 ## Reference
 

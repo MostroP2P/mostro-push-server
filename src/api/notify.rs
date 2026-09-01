@@ -1,9 +1,10 @@
 use actix_web::{
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
+    error::{InternalError, JsonPayloadError},
     http::header::{HeaderName, HeaderValue},
     middleware::Next,
-    web, Error, HttpResponse, Responder,
+    web, Error, HttpRequest, HttpResponse, Responder,
 };
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,42 @@ use governor::clock::Clock;
 #[derive(Deserialize)]
 pub struct NotifyRequest {
     pub trade_pubkey: String,
+}
+
+/// Upper bound on the JSON body accepted by /api/notify.
+///
+/// The body is a fixed shape carrying one 64-char hex pubkey, so a kilobyte is
+/// already generous. Actix defaults to 2 MB, which on an unauthenticated
+/// endpoint is a free memory-amplification primitive.
+const MAX_BODY_BYTES: usize = 1024;
+
+/// JSON extractor config for /api/notify.
+///
+/// Two jobs: cap the body, and keep the response contract intact while doing
+/// it. D-12 / hard constraint 2 allow exactly two failure statuses on this
+/// endpoint — 400 for a parse failure and 400 for a bad pubkey — so an
+/// oversized body is reported as the same 400, not as actix's default 413.
+/// Every other `JsonPayloadError` variant falls through to actix's own
+/// handling, leaving the existing malformed-JSON behaviour untouched.
+///
+/// The 400 carries no information about the pubkey, so it cannot be used to
+/// distinguish a registered from an unregistered one.
+pub fn json_config() -> web::JsonConfig {
+    web::JsonConfig::default()
+        .limit(MAX_BODY_BYTES)
+        .error_handler(|err, _req: &HttpRequest| -> Error {
+            if matches!(
+                err,
+                JsonPayloadError::Overflow { .. } | JsonPayloadError::OverflowKnownLength { .. }
+            ) {
+                let response = HttpResponse::BadRequest().json(NotifyError {
+                    success: false,
+                    message: "Request body too large".to_string(),
+                });
+                return InternalError::from_response(err, response).into();
+            }
+            err.into()
+        })
 }
 
 /// 400-only response shape for /api/notify.
@@ -302,5 +339,30 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(Uuid::parse_str(id_value).is_ok());
+    }
+    /// Hard constraint 2 allows exactly one failure status on this endpoint.
+    /// An oversized body must therefore be a 400 in the endpoint's own shape,
+    /// not actix's default 413, and it must carry nothing about the pubkey.
+    #[actix_web::test]
+    async fn notify_oversized_body_returns_400_not_413() {
+        let c = make_test_components();
+        let app = test::init_service(build_test_actix_app(c)).await;
+
+        let req = test::TestRequest::post()
+            .uri("/api/notify")
+            .insert_header(("Fly-Client-IP", "8.8.8.8"))
+            .set_json(serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "padding": "a".repeat(super::MAX_BODY_BYTES * 2)
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = test::read_body(resp).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"Request body too large"}"#
+        );
     }
 }

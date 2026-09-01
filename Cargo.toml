@@ -5,7 +5,21 @@ edition = "2021"
 
 [dependencies]
 # Web framework
-actix-web = "4.9"
+# Default features minus compress-brotli/compress-gzip/compress-zstd. Actix
+# applies request decompression inside the JSON extractor, before the
+# `JsonConfig::limit` check, into an unbounded buffer: 316 bytes of brotli
+# decode to 382 MB on an unauthenticated endpoint. Without `__compress`
+# there is no decompressor, so a compressed body reaches serde_json as
+# opaque bytes and is refused by the existing malformed-body path.
+# Re-adding any compress-* feature reopens that; see the regression tests
+# in src/api/routes.rs.
+actix-web = { version = "4.9", default-features = false, features = [
+    "macros",
+    "cookies",
+    "http2",
+    "unicode",
+    "compat",
+] }
 actix-rt = "2.9"
 
 # Async runtime

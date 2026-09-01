@@ -97,8 +97,27 @@ pub fn make_app_state_with_whitelist(
     trusted_mostro_pubkeys: Arc<HashSet<String>>,
     trusted_whitelist_enabled: bool,
 ) -> (AppState, Arc<PerIpLimiter>) {
-    let services: Vec<(Arc<dyn PushService>, &'static str)> =
-        vec![(stub.clone() as Arc<dyn PushService>, "stub")];
+    make_app_state_for_service(
+        stub as Arc<dyn PushService>,
+        "stub",
+        trusted_mostro_pubkeys,
+        trusted_whitelist_enabled,
+    )
+}
+
+/// [`make_app_state`] with an arbitrary backend in place of the stub.
+///
+/// Exists for the end-to-end SSRF regression, which has to drive the real
+/// `UnifiedPushService` through the HTTP routes: a stub records the dispatch
+/// but proves nothing about the endpoint guard that runs inside the real
+/// backend, which is the property under test.
+pub fn make_app_state_for_service(
+    service: Arc<dyn PushService>,
+    backend_name: &'static str,
+    trusted_mostro_pubkeys: Arc<HashSet<String>>,
+    trusted_whitelist_enabled: bool,
+) -> (AppState, Arc<PerIpLimiter>) {
+    let services: Vec<(Arc<dyn PushService>, &'static str)> = vec![(service, backend_name)];
     let dispatcher = Arc::new(PushDispatcher::new(services));
 
     let mut salt_bytes = [0u8; 32];
