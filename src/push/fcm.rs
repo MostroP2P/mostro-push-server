@@ -327,8 +327,17 @@ impl FcmPush {
             });
         }
 
-        response.json().await.map_err(|e| OauthAttemptError {
-            // A malformed success body is not something a retry repairs.
+        // Read and parse separately: a connection that times out or resets
+        // while the body streams in surfaces here rather than at `send()`, and
+        // a retry can still deliver the notification. Only the parse itself is
+        // terminal, because repeating the request cannot repair a body Google
+        // already sent in full.
+        let body = response.bytes().await.map_err(|e| OauthAttemptError {
+            retryable: true,
+            message: format!("OAuth2 response body could not be read: {}", e),
+        })?;
+
+        serde_json::from_slice(&body).map_err(|e| OauthAttemptError {
             retryable: false,
             message: format!("OAuth2 response was not valid JSON: {}", e),
         })
@@ -524,6 +533,9 @@ fn oauth_backoff(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     /// `exchange_with_retry` never touches the service account, so these tests
     /// need no RSA key material: the assertion is passed in already signed.
@@ -694,6 +706,74 @@ mod tests {
             service.cached_token_if_fresh().await,
             Some("fresh".to_string())
         );
+    }
+
+    /// A connection that dies mid-body surfaces at the body read, not at
+    /// `send()`. Classifying it with malformed JSON would drop a notification
+    /// a second attempt could still deliver.
+    #[tokio::test]
+    async fn retries_a_connection_that_dies_while_the_body_is_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+
+        let served = connections.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let nth = served.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0u8; 2048];
+                let _ = socket.read(&mut request).await;
+
+                // The first response promises more than the socket delivers
+                // and then closes: an incomplete body, not bad JSON.
+                let payload = if nth == 0 {
+                    "{\"access_token\""
+                } else {
+                    TOKEN_BODY
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\n\r\n{}",
+                    TOKEN_BODY.len(),
+                    payload
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+
+        let service = test_service(format!("http://{}/token", addr));
+        let token = service
+            .exchange_with_retry("dummy.jwt.value", 0)
+            .await
+            .expect("a truncated body must be retried, not reported as malformed");
+
+        assert_eq!(token, "ya29.test");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    /// The other half of the split: a body that arrived in full and does not
+    /// parse is terminal, because repeating the request cannot repair it.
+    #[tokio::test]
+    async fn does_not_retry_a_malformed_success_body() {
+        let mut server = mockito::Server::new_async().await;
+        let once = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not json")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let service = test_service(format!("{}/token", server.url()));
+        let err = service
+            .exchange_with_retry("dummy.jwt.value", 0)
+            .await
+            .expect_err("an unparseable success body must fail");
+
+        assert!(err.to_string().contains("not valid JSON"), "got: {err}");
+        once.assert_async().await;
     }
 
     /// Single-flight only serialises the cohort; without sharing the outcome
