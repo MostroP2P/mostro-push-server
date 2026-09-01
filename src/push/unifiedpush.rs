@@ -44,9 +44,18 @@ impl UnifiedPushService {
     ///
     /// Timeouts mirror the shared client (2 s connect, 5 s total) so this
     /// backend keeps the same bound on tying up worker threads.
+    ///
+    /// Proxies are refused for the same reason redirects are. `reqwest` honours
+    /// `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and the OS proxy settings by
+    /// default, which would send an attacker-chosen URL through a hop
+    /// `endpoint_guard` never inspected — the guard validates the address the
+    /// URL names, not the address the connection actually goes to. An operator
+    /// who needs an egress proxy has to enforce the same destination policy on
+    /// the proxy itself.
     pub fn build_client() -> reqwest::Client {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(5))
             .pool_idle_timeout(Some(Duration::from_secs(90)))

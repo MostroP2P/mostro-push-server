@@ -71,6 +71,7 @@ tracked in [#39](https://github.com/MostroP2P/mostro-push-server/issues/39).
 - UnifiedPush has no per-payload distinction between silent and visible push. `send_silent_to_token` falls back to `send_to_token`, which is the same code path the Nostr listener uses.
 - There is no rate limiting on outbound UnifiedPush calls beyond what the server-wide `reqwest::Client` timeouts provide (2 s connect, 5 s total).
 - The endpoint URL is fully attacker-controlled in the sense that the distributor can be any HTTP server. A dedicated `reqwest::Client` (`UnifiedPushService::build_client`) enforces TLS, the timeouts, and a no-redirect policy; the server does not pin certificates.
+- That client also refuses proxies. `reqwest` otherwise honours `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and the OS proxy settings, which would route an attacker-chosen URL through a hop the guard never validated. Deployments that require an egress proxy must enforce the same destination policy on the proxy itself; setting the environment variables alone will not work here.
 
 ## Reference
 

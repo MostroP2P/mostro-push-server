@@ -10,7 +10,7 @@ For deeper context (data flow, components, ops): [docs/architecture.md](docs/arc
 - **Async runtime**: Tokio 1.35 (`full`).
 - **HTTP**: `actix-web 4.9`, `actix-rt 2.9`.
 - **Nostr**: `nostr-sdk 0.27`.
-- **HTTP client**: shared `reqwest::Client` with explicit timeouts (2 s connect, 5 s total). UnifiedPush is the one exception: it builds its own via `UnifiedPushService::build_client()`, identical except that redirects are refused. Its endpoint URL is attacker-supplied, and the SSRF guard only inspects the first hop.
+- **HTTP client**: shared `reqwest::Client` with explicit timeouts (2 s connect, 5 s total). UnifiedPush is the one exception: it builds its own via `UnifiedPushService::build_client()`, identical except that redirects and environment-configured proxies are refused. Its endpoint URL is attacker-supplied, and the SSRF guard only inspects the first hop.
 - **Rate limiting**: `governor 0.6` (already approved, dual-keyed limiter).
 - **Privacy hash**: `blake3` (salted truncated keyed hash for log correlators).
 - **Other notable deps**: `jsonwebtoken` (FCM OAuth), `secp256k1`, `chacha20poly1305`, `hkdf`, `sha2` (gated `crypto` module reserved for future encrypted-token registration), `uuid` (UUIDv4 `x-request-id`).
