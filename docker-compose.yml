@@ -17,6 +17,11 @@ services:
       # The credential is not in the image. This path must match the mount
       # below; without it FCM starts disabled and every push is dropped.
       - FIREBASE_SERVICE_ACCOUNT_PATH=/app/secrets/firebase-service-account.json
+      # Bare key: forwarded from the host shell only when set there, and it
+      # wins over the path above. This is what makes the mount optional --
+      #   FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" docker-compose up -d
+      # Without this line Compose never passes it in and FCM starts disabled.
+      - FIREBASE_SERVICE_ACCOUNT_JSON
       - RUST_LOG=info
     volumes:
       # The binary runs with /app as its working directory and writes the
@@ -24,10 +29,12 @@ services:
       # mount keeps the host's ownership, so ./data must be WRITABLE by UID
       # 10001 (`chown 10001:10001 data`). Only matters once UnifiedPush is on.
       - ./data:/app/data
-      # The container runs as UID 10001, so this file must be readable by that
-      # UID on the host (e.g. `chmod 0644`). If that is awkward, drop the mount
-      # and pass the credential inline instead:
-      #   FIREBASE_SERVICE_ACCOUNT_JSON=$(cat firebase-service-account.json)
+      # A private key: give it to UID 10001 and nobody else, rather than
+      # widening the mode until the container can read it.
+      #   sudo chown 10001:10001 firebase-service-account.json
+      #   chmod 0600 firebase-service-account.json
+      # If host-side ownership is awkward, drop this mount and use the inline
+      # form above instead.
       - ./firebase-service-account.json:/app/secrets/firebase-service-account.json:ro
     # The image already declares a HEALTHCHECK, and it reads SERVER_PORT from
     # the container environment. Redeclaring it here would hard-code the port

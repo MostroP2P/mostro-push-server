@@ -189,10 +189,11 @@ docker-compose logs -f
 
 The compose file bind-mounts `./firebase-service-account.json` to `/app/secrets/firebase-service-account.json` and points `FIREBASE_SERVICE_ACCOUNT_PATH` there. Put the credential next to `docker-compose.yml` under that name, or edit both the mount and the variable together — they have to agree, and a mismatch starts the container with FCM disabled.
 
-The container runs as UID 10001, so the file must be readable by that UID on the host:
+The container runs as UID 10001, so the file has to be readable by that UID on the host. Hand it to that UID rather than widening the mode — this is a private key, and `0644` would expose it to every local user:
 
 ```bash
-chmod 0644 firebase-service-account.json
+sudo chown 10001:10001 firebase-service-account.json
+chmod 0600 firebase-service-account.json
 ```
 
 Compose creates a **directory** where a bind-mount source does not exist, which surfaces later as a confusing parse failure. Confirm the file is there before the first `up`, and check what Compose resolved:
@@ -202,11 +203,13 @@ ls -l firebase-service-account.json
 docker-compose config | grep FIREBASE_SERVICE_ACCOUNT
 ```
 
-If host-side permissions are awkward, drop the mount and pass the credential inline instead:
+If host-side ownership is awkward, drop the mount and pass the credential inline instead. The compose file lists `FIREBASE_SERVICE_ACCOUNT_JSON` as a bare key, so a value set in the shell is forwarded into the container and takes precedence over the path:
 
 ```bash
 FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" docker-compose up -d
 ```
+
+Without that bare key in the `environment:` list Compose would not pass the variable in at all, and FCM would start disabled with nothing on the host to suggest why.
 
 `./data` is bind-mounted to `/app/data` so the UnifiedPush endpoint store survives container recreation. The image sets `WORKDIR /app` and the binary writes the store to `data/unifiedpush_endpoints.json`, which lands at `/app/data/unifiedpush_endpoints.json` inside the container.
 
@@ -317,9 +320,19 @@ journalctl -u mostro-push -n 100
 ### FCM not delivering
 
 ```bash
-flyctl logs | grep -i "FCM"                # startup lines: which credential loaded, and why init failed
-flyctl secrets list | grep FIREBASE        # confirm the credential secret exists
-RUST_LOG=debug flyctl deploy               # redeploy with debug logging to see the OAuth exchange
+flyctl logs | grep -i "FCM"          # startup lines: which credential loaded, and why init failed
+flyctl secrets list | grep FIREBASE  # confirm the credential secret exists
+```
+
+To see the OAuth exchange itself, raise the level on the deployed app and put it
+back afterwards. `RUST_LOG` is a Fly secret, so prefixing `flyctl deploy` with it
+only sets the variable for the local flyctl process and leaves the running app
+at `info`:
+
+```bash
+flyctl secrets set -a mostro-push-server RUST_LOG="debug"   # restarts the machines
+flyctl logs -a mostro-push-server
+flyctl secrets set -a mostro-push-server RUST_LOG="info"    # restore when done
 ```
 
 `FCM notifications are DISABLED` is preceded by the actual cause. Distinguish

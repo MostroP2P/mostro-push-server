@@ -19,14 +19,24 @@ FLY_CONFIG="${FLY_CONFIG:-fly.toml}"
 # form needs nothing else.
 #
 # FIREBASE_SERVICE_ACCOUNT_PATH only names a file; something else has to put one
-# there. It is accepted only once fly.toml declares [[files]] or [mounts],
-# because otherwise the path resolves to nothing, FCM starts disabled and every
-# push is dropped in silence. A leftover PATH secret from before this change is
-# exactly that case.
+# there. [[files]] is the one declarative way to do that on Fly, so the path
+# form is accepted only once fly.toml declares it. A [mounts] table does not
+# count: it attaches an empty volume and says nothing about the credential.
+# Without either, the path resolves to nothing, FCM starts disabled and every
+# push is dropped in silence — which is what a PATH secret left over from when
+# the image carried the credential would do today.
+#
+# The match stops at "a [[files]] entry exists". Whether its guest_path is the
+# one FIREBASE_SERVICE_ACCOUNT_PATH points at cannot be checked from here:
+# `flyctl secrets list` returns names, never values. The declared paths are
+# printed so the operator can confirm that last step.
 CREDENTIAL_SECRETS=(FIREBASE_SERVICE_ACCOUNT_JSON)
+declared_guest_paths=""
 if [[ -f "${FLY_CONFIG}" ]] \
-   && grep -Eq '^[[:space:]]*\[\[?(files|mounts)\]\]?' "${FLY_CONFIG}"; then
+   && grep -Eq '^[[:space:]]*\[\[files\]\]' "${FLY_CONFIG}"; then
     CREDENTIAL_SECRETS+=(FIREBASE_SERVICE_ACCOUNT_PATH)
+    declared_guest_paths="$(grep -E '^[[:space:]]*guest_path[[:space:]]*=' "${FLY_CONFIG}" \
+        | sed -E 's/^[[:space:]]*guest_path[[:space:]]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//')"
 fi
 
 die() {
@@ -79,11 +89,21 @@ if [[ "${credential_present}" != true ]]; then
     echo "Set one of:" >&2
     printf '  - %s\n' "${CREDENTIAL_SECRETS[@]}" >&2
     if (( ${#CREDENTIAL_SECRETS[@]} == 1 )); then
-        echo "FIREBASE_SERVICE_ACCOUNT_PATH does not count here: ${FLY_CONFIG} declares" >&2
-        echo "no [[files]] or [mounts] section, so no file would exist at that path." >&2
+        echo "FIREBASE_SERVICE_ACCOUNT_PATH does not count here: ${FLY_CONFIG} declares no" >&2
+        echo "[[files]] section, so nothing would create a file at that path." >&2
     fi
     echo "The credential is no longer baked into the image. See docs/deployment.md." >&2
     exit 1
+fi
+
+# Accepted on the strength of [[files]] alone. Surface the paths it declares so
+# a guest_path that does not match the secret is caught here, not in the logs.
+if [[ -n "${declared_guest_paths}" ]] \
+   && grep -qx "FIREBASE_SERVICE_ACCOUNT_PATH" <<< "${configured_secret_names}" \
+   && ! grep -qx "FIREBASE_SERVICE_ACCOUNT_JSON" <<< "${configured_secret_names}"; then
+    echo "Using FIREBASE_SERVICE_ACCOUNT_PATH. ${FLY_CONFIG} writes these guest paths:" >&2
+    printf '  - %s\n' ${declared_guest_paths} >&2
+    echo "The secret must name one of them, or FCM will start disabled." >&2
 fi
 
 echo "Deploying..."

@@ -10,6 +10,13 @@ secrets/
 .env.*
 !.env.example
 
+# The credential also lands outside secrets/: docker-compose.yml bind-mounts it
+# from the context root, and the file Firebase hands you is named after the
+# project. The Dockerfile COPYs none of these, but the context still travels.
+firebase-service-account.json
+**/*service-account*.json
+**/*adminsdk*.json
+
 data/
 target/
 .git/
