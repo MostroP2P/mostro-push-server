@@ -204,9 +204,12 @@ The compose file bind-mounts `./firebase-service-account.json` to `/app/secrets/
 The container runs as UID 10001, so the file has to be readable by that UID on the host. Hand it to that UID rather than widening the mode — this is a private key, and `0644` would expose it to every local user:
 
 ```bash
-sudo chown 10001:10001 firebase-service-account.json
 chmod 0600 firebase-service-account.json
+sudo chown 10001:10001 firebase-service-account.json
 ```
+
+The mode goes first on purpose: after the `chown` the file belongs to UID 10001,
+and a non-root operator can no longer change it.
 
 Compose creates a **directory** where a bind-mount source does not exist, which surfaces later as a confusing parse failure. Confirm the file is there before the first `up`, and check what Compose resolved:
 
