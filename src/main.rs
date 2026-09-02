@@ -106,8 +106,17 @@ async fn main() -> std::io::Result<()> {
                 push_services.push((Arc::clone(&fcm_service) as Arc<dyn PushService>, "fcm"));
             }
             Err(e) => {
-                log::warn!("Failed to initialize FCM service: {}", e);
-                log::warn!("FCM notifications will be disabled. Set FIREBASE_SERVICE_ACCOUNT_PATH to enable.");
+                // error!, not warn!: the credential no longer ships inside the
+                // image, so a misconfigured deployment is now the likely cause
+                // rather than a corner case. The server keeps running — the
+                // Nostr listener and the HTTP API are still useful — but this
+                // must not scroll past as routine noise.
+                log::error!("Failed to initialize FCM service: {}", e);
+                log::error!(
+                    "FCM notifications are DISABLED. The cause is above; the \
+                     credential is read from FIREBASE_SERVICE_ACCOUNT_JSON or \
+                     FIREBASE_SERVICE_ACCOUNT_PATH."
+                );
             }
         }
     }

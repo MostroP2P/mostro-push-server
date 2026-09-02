@@ -10,8 +10,32 @@ REQUIRED_SECRETS=(
   NOSTR_RELAYS
   SERVER_PRIVATE_KEY
   FIREBASE_PROJECT_ID
-  FIREBASE_SERVICE_ACCOUNT_PATH
 )
+
+FLY_CONFIG="${FLY_CONFIG:-fly.toml}"
+
+# The Firebase credential no longer ships inside the image, so it must arrive at
+# runtime. On Fly a secret already *is* an environment variable, so the inline
+# form needs nothing else, and it is what this wrapper requires.
+#
+# FIREBASE_SERVICE_ACCOUNT_PATH is deliberately not accepted here. It only names
+# a file, and nothing this script can read proves a file will exist there:
+# `flyctl secrets list` returns names, never values, so the path the secret
+# holds cannot be compared against anything fly.toml declares. A [[files]] entry
+# is not evidence either — it may well write something unrelated. Guessing wrong
+# means FCM starts disabled and every push is dropped in silence, which is the
+# failure this check exists to catch, and it is exactly what a PATH secret left
+# over from when the image carried the credential would do today.
+#
+# The path form stays first-class everywhere the file is genuinely under the
+# operator's control — docker-compose, systemd, Kubernetes — none of which
+# deploy through this script. If you do provision one on Fly via [[files]], set
+# FLY_ALLOW_CREDENTIAL_PATH=1 to assert that its guest_path is the path the
+# secret names. That is an assertion the operator makes, not one verified here.
+CREDENTIAL_SECRETS=(FIREBASE_SERVICE_ACCOUNT_JSON)
+if [[ "${FLY_ALLOW_CREDENTIAL_PATH:-}" == 1 ]]; then
+    CREDENTIAL_SECRETS+=(FIREBASE_SERVICE_ACCOUNT_PATH)
+fi
 
 die() {
     echo "Error: $*" >&2
@@ -48,8 +72,32 @@ if (( ${#missing_secrets[@]} > 0 )); then
     exit 1
 fi
 
+# Without one of these the server still starts, but FCM is disabled and every
+# push is silently dropped. Fail here rather than discover it in the logs.
+credential_present=false
+for secret in "${CREDENTIAL_SECRETS[@]}"; do
+    if grep -qx "${secret}" <<< "${configured_secret_names}"; then
+        credential_present=true
+        break
+    fi
+done
+
+if [[ "${credential_present}" != true ]]; then
+    echo "No usable Firebase credential secret is set for ${APP_NAME}." >&2
+    echo "Set one of:" >&2
+    printf '  - %s\n' "${CREDENTIAL_SECRETS[@]}" >&2
+    if (( ${#CREDENTIAL_SECRETS[@]} == 1 )); then
+        echo "FIREBASE_SERVICE_ACCOUNT_PATH is not accepted for Fly deploys: nothing here" >&2
+        echo "can prove a file exists at the path it names. If ${FLY_CONFIG} provisions one" >&2
+        echo "through [[files]], re-run with FLY_ALLOW_CREDENTIAL_PATH=1." >&2
+    fi
+    echo "The credential is no longer baked into the image. See docs/deployment.md." >&2
+    exit 1
+fi
+
 echo "Deploying..."
-flyctl deploy -a "${APP_NAME}"
+# Explicit, so the config named in the messages above is the one deployed.
+flyctl deploy -a "${APP_NAME}" -c "${FLY_CONFIG}"
 
 echo "Deploy complete."
 echo ""

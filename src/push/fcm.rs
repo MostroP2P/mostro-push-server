@@ -14,6 +14,9 @@ use super::PushService;
 use crate::config::Config;
 use crate::store::Platform;
 
+const SERVICE_ACCOUNT_JSON_ENV: &str = "FIREBASE_SERVICE_ACCOUNT_JSON";
+const SERVICE_ACCOUNT_PATH_ENV: &str = "FIREBASE_SERVICE_ACCOUNT_PATH";
+
 #[derive(Debug, Deserialize)]
 struct ServiceAccount {
     client_email: String,
@@ -112,27 +115,13 @@ impl FcmPush {
     // keep call sites stable; FCM currently sources its settings from env vars.
     #[allow(unused_variables)]
     pub fn new(config: Config, client: Arc<reqwest::Client>) -> Self {
-        let service_account_path = std::env::var("FIREBASE_SERVICE_ACCOUNT_PATH").ok();
         let project_id =
             std::env::var("FIREBASE_PROJECT_ID").unwrap_or_else(|_| "mostro".to_string());
 
-        let service_account =
-            service_account_path.and_then(|path| match fs::read_to_string(&path) {
-                Ok(content) => match serde_json::from_str::<ServiceAccount>(&content) {
-                    Ok(sa) => {
-                        info!("Loaded Firebase service account for {}", sa.client_email);
-                        Some(sa)
-                    }
-                    Err(e) => {
-                        error!("Failed to parse service account JSON: {}", e);
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!("Could not read service account file {}: {}", path, e);
-                    None
-                }
-            });
+        let service_account = load_service_account(
+            std::env::var(SERVICE_ACCOUNT_JSON_ENV).ok(),
+            std::env::var(SERVICE_ACCOUNT_PATH_ENV).ok(),
+        );
 
         Self {
             client,
@@ -530,6 +519,55 @@ fn oauth_backoff(attempt: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
+/// Resolves the Firebase service account, inline form first. An inline value
+/// that is empty is treated as absent, so a half-set variable falls back to the
+/// path rather than failing. Why the inline form exists is in
+/// docs/deployment.md.
+///
+/// Both are taken as arguments rather than read here so the precedence can be
+/// tested without mutating process-wide environment state.
+fn load_service_account(inline: Option<String>, path: Option<String>) -> Option<ServiceAccount> {
+    if let Some(raw) = inline {
+        if !raw.trim().is_empty() {
+            // Named, never dumped: the value is the private key.
+            return parse_service_account(&raw, SERVICE_ACCOUNT_JSON_ENV);
+        }
+        warn!(
+            "{} is set but empty; falling back to the path form",
+            SERVICE_ACCOUNT_JSON_ENV
+        );
+    }
+
+    let path = path?;
+    match fs::read_to_string(&path) {
+        Ok(content) => parse_service_account(&content, &path),
+        Err(e) => {
+            warn!("Could not read service account file {}: {}", path, e);
+            None
+        }
+    }
+}
+
+/// Parses a credential, naming only where it came from and never its content.
+fn parse_service_account(raw: &str, source: &str) -> Option<ServiceAccount> {
+    match serde_json::from_str::<ServiceAccount>(raw) {
+        Ok(sa) => {
+            info!(
+                "Loaded Firebase service account for {} (from {})",
+                sa.client_email, source
+            );
+            Some(sa)
+        }
+        Err(e) => {
+            error!(
+                "Failed to parse service account JSON from {}: {}",
+                source, e
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +893,83 @@ mod tests {
             "worst-case OAuth retry budget is {worst_case:?}; a permit held that \
              long turns an outage into silent /api/notify drops"
         );
+    }
+}
+
+#[cfg(test)]
+mod service_account_tests {
+    use super::*;
+
+    const VALID_JSON: &str = r#"{
+        "client_email": "push@example.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+        "project_id": "example-project"
+    }"#;
+
+    fn temp_credential(name: &str, contents: &str) -> String {
+        let path = std::env::temp_dir().join(format!("mostro-sa-{name}.json"));
+        fs::write(&path, contents).expect("temp credential must be writable");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn inline_json_is_loaded() {
+        let sa = load_service_account(Some(VALID_JSON.to_string()), None)
+            .expect("inline credential must load");
+        assert_eq!(sa.client_email, "push@example.iam.gserviceaccount.com");
+    }
+
+    #[test]
+    fn path_is_loaded_when_no_inline_value() {
+        let path = temp_credential("path-only", VALID_JSON);
+        let sa = load_service_account(None, Some(path)).expect("file credential must load");
+        assert_eq!(sa.client_email, "push@example.iam.gserviceaccount.com");
+    }
+
+    /// Inline wins. On Fly a secret is an environment variable, so the inline
+    /// form is the one that needs no assumption about the ownership of a file
+    /// the platform mounts.
+    #[test]
+    fn inline_takes_precedence_over_path() {
+        let other = r#"{
+            "client_email": "from-file@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "project_id": "p"
+        }"#;
+        let path = temp_credential("precedence", other);
+
+        let sa = load_service_account(Some(VALID_JSON.to_string()), Some(path))
+            .expect("inline credential must win");
+        assert_eq!(sa.client_email, "push@example.iam.gserviceaccount.com");
+    }
+
+    /// An env var set to the empty string is a common deployment slip. Treat it
+    /// as absent rather than as a parse failure that masks a usable file.
+    #[test]
+    fn empty_inline_value_falls_back_to_the_path() {
+        let path = temp_credential("empty-inline", VALID_JSON);
+
+        let sa = load_service_account(Some("   ".to_string()), Some(path))
+            .expect("an empty inline value must not shadow the path form");
+        assert_eq!(sa.client_email, "push@example.iam.gserviceaccount.com");
+    }
+
+    #[test]
+    fn no_credential_configured_yields_none() {
+        assert!(load_service_account(None, None).is_none());
+    }
+
+    #[test]
+    fn malformed_inline_json_yields_none() {
+        assert!(load_service_account(Some("{not json".to_string()), None).is_none());
+    }
+
+    #[test]
+    fn missing_file_yields_none() {
+        assert!(load_service_account(
+            None,
+            Some("/nonexistent/mostro-service-account.json".to_string())
+        )
+        .is_none());
     }
 }

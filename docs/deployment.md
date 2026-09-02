@@ -37,7 +37,7 @@ flyctl secrets set -a mostro-push-server \
   SERVER_PRIVATE_KEY="${server_private_key}" \
   NOSTR_RELAYS="wss://relay.mostro.network" \
   FIREBASE_PROJECT_ID="your-project-id" \
-  FIREBASE_SERVICE_ACCOUNT_PATH="/secrets/firebase-service-account.json" \
+  FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)" \
   FCM_ENABLED="true" \
   UNIFIEDPUSH_ENABLED="false" \
   SERVER_HOST="0.0.0.0" \
@@ -55,7 +55,16 @@ unset server_private_key
 - `NOSTR_RELAYS`
 - `SERVER_PRIVATE_KEY`
 - `FIREBASE_PROJECT_ID`
-- `FIREBASE_SERVICE_ACCOUNT_PATH`
+- `FIREBASE_SERVICE_ACCOUNT_JSON`
+
+`FIREBASE_SERVICE_ACCOUNT_PATH` is not accepted in its place. Nothing the
+wrapper can read proves a file exists at the path that secret names, and a wrong
+guess deploys an instance that accepts registrations and delivers nothing. If
+you do provision the file through `[[files]]`, assert it explicitly:
+
+```bash
+FLY_ALLOW_CREDENTIAL_PATH=1 ./deploy-fly.sh
+```
 
 Deploy after the secrets exist:
 
@@ -65,7 +74,64 @@ Deploy after the secrets exist:
 
 `NOTIFY_TRUST_PROXY_HEADERS=true` is correct on Fly because requests reach the app behind the Fly edge proxy, which sets `Fly-Client-IP`. On any deployment where the app is reachable directly, leave this `false`; otherwise an attacker can rotate that header per request and defeat the per-IP limiter.
 
-The Firebase service account JSON is bundled into the Docker image at the path specified by `FIREBASE_SERVICE_ACCOUNT_PATH`. Provision it before the build (the `Dockerfile` copies the `secrets/` directory).
+### Provisioning the Firebase service account
+
+The credential is **not** in the image. It used to be: the `Dockerfile` copied
+`secrets/` into a layer, which published the private key to anyone able to pull
+the image — `docker save` and `docker history` reach it without ever running the
+container. `.dockerignore` now also keeps `secrets/` out of the build context
+entirely, which matters because Fly builds on a remote builder by default.
+
+Two ways to supply it at runtime, and exactly one is needed:
+
+| Variable | Use when |
+|---|---|
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | The credential itself. Preferred on Fly.io, where a secret already *is* an environment variable. |
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | A path to a file mounted into the runtime. Preferred for docker-compose, systemd and Kubernetes. |
+
+`FIREBASE_SERVICE_ACCOUNT_JSON` takes precedence when both are set. An empty
+value is treated as absent, so a half-configured deployment falls back to the
+path form instead of failing.
+
+The inline form is the default on Fly for a specific reason: the container now
+runs as UID 10001, and a file the platform mounts carries ownership and mode
+this project does not control. An environment variable is readable by the
+process whatever its UID.
+
+```bash
+flyctl secrets set -a mostro-push-server \
+  FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)"
+```
+
+On Fly the path form is not interchangeable with the inline one, and
+`deploy-fly.sh` refuses it rather than deploying an instance that cannot push.
+`FIREBASE_SERVICE_ACCOUNT_PATH` only names a file; `fly.toml` as shipped
+declares no `[[files]]` entry to create one, and a secret left over from when
+the image carried the credential names a path that no longer exists.
+
+The wrapper does not try to decide the question from `fly.toml` either. It
+cannot: `flyctl secrets list` returns secret names, never values, so the path
+the secret holds cannot be compared against any `guest_path` declared there, and
+a `[[files]]` entry may write something else entirely. Rather than accept weak
+evidence, it requires the inline form and takes
+`FLY_ALLOW_CREDENTIAL_PATH=1` as the operator asserting the match themselves.
+
+**Sequencing matters.** If no credential resolves the server still starts:
+`main.rs` logs the failure and runs without FCM, because a listener and an HTTP
+API without push are more useful than no server at all. The result is an
+instance that accepts registrations and delivers nothing. `deploy-fly.sh`
+refuses to deploy when no usable credential secret exists, but if you deploy by
+other means, set the secret **before** rolling out an image built from this
+Dockerfile.
+
+Confirm it took after the first deploy:
+
+```bash
+flyctl logs -a mostro-push-server | grep -i "FCM service initialized"
+```
+
+An `FCM notifications are DISABLED` line at `error` level means the credential
+did not arrive.
 
 ### Rotate `SERVER_PRIVATE_KEY`
 
@@ -133,19 +199,40 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-`docker-compose.yml` points `FIREBASE_SERVICE_ACCOUNT_PATH` at `/secrets/firebase-service-account.json`, the in-image copy of `secrets/` described above. Name your service-account file accordingly before building, or keep its own name and pass it at run time:
+The compose file bind-mounts `./firebase-service-account.json` to `/app/secrets/firebase-service-account.json` and points `FIREBASE_SERVICE_ACCOUNT_PATH` there. Put the credential next to `docker-compose.yml` under that name, or edit both the mount and the variable together — they have to agree, and a mismatch starts the container with FCM disabled.
+
+The container runs as UID 10001, so the file has to be readable by that UID on the host. Hand it to that UID rather than widening the mode — this is a private key, and `0644` would expose it to every local user:
 
 ```bash
-FIREBASE_SERVICE_ACCOUNT_FILE=my-project-adminsdk.json docker-compose up -d
+chmod 0600 firebase-service-account.json
+sudo chown 10001:10001 firebase-service-account.json
 ```
 
-Only the file name is configurable, not the full path: the value has to resolve inside the container, so a host-side path from your `.env` must not leak into it. Verify what Compose resolved before starting:
+The mode goes first on purpose: after the `chown` the file belongs to UID 10001,
+and a non-root operator can no longer change it.
+
+Compose creates a **directory** where a bind-mount source does not exist, which surfaces later as a confusing parse failure. Confirm the file is there before the first `up`, and check what Compose resolved:
 
 ```bash
-docker-compose config | grep FIREBASE_SERVICE_ACCOUNT_PATH
+ls -l firebase-service-account.json
+docker-compose config | grep FIREBASE_SERVICE_ACCOUNT
 ```
 
-`./data` is bind-mounted to `/data` so the UnifiedPush endpoint store survives container recreation. The binary runs with `/` as its working directory and writes the store to `data/unifiedpush_endpoints.json`, which lands at `/data/unifiedpush_endpoints.json` inside the container.
+If host-side ownership is awkward, drop the mount and pass the credential inline instead. The compose file lists `FIREBASE_SERVICE_ACCOUNT_JSON` as a bare key, so a value set in the shell is forwarded into the container and takes precedence over the path:
+
+```bash
+FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" docker-compose up -d
+```
+
+Without that bare key in the `environment:` list Compose would not pass the variable in at all, and FCM would start disabled with nothing on the host to suggest why.
+
+`./data` is bind-mounted to `/app/data` so the UnifiedPush endpoint store survives container recreation. The image sets `WORKDIR /app` and the binary writes the store to `data/unifiedpush_endpoints.json`, which lands at `/app/data/unifiedpush_endpoints.json` inside the container.
+
+A bind mount keeps the host directory's ownership, overriding the one the image sets, so `./data` has to be writable by UID 10001 before enabling UnifiedPush:
+
+```bash
+mkdir -p data && sudo chown 10001:10001 data
+```
 
 The compose file ships with `UNIFIEDPUSH_ENABLED=false` to match the binary default. The UnifiedPush dispatch path POSTs to the client-supplied device token treated as a URL, so enabling it is an explicit operator decision.
 
@@ -230,7 +317,7 @@ The only on-disk state is `data/unifiedpush_endpoints.json`, written atomically 
 
 There is no database to back up. Operationally important inputs are:
 
-- `FIREBASE_SERVICE_ACCOUNT_PATH` JSON file (regenerate via Firebase Console if lost)
+- The Firebase service account JSON, held in `FIREBASE_SERVICE_ACCOUNT_JSON` or at `FIREBASE_SERVICE_ACCOUNT_PATH` (regenerate via Firebase Console if lost)
 - The contents of `flyctl secrets list` (or the `.env` file on bare-metal)
 - `data/unifiedpush_endpoints.json` if you want UnifiedPush registrations to survive a host migration; clients will re-register on next use otherwise
 
@@ -248,11 +335,29 @@ journalctl -u mostro-push -n 100
 ### FCM not delivering
 
 ```bash
-flyctl ssh console
-ls -la /secrets/                          # confirm the JSON is at the configured path
-flyctl secrets list | grep FIREBASE       # confirm path env var is set
-RUST_LOG=debug flyctl deploy              # redeploy with debug logging to see OAuth exchange
+flyctl logs | grep -i "FCM"          # startup lines: which credential loaded, and why init failed
+flyctl secrets list | grep FIREBASE  # confirm the credential secret exists
 ```
+
+To see the OAuth exchange itself, raise the level on the deployed app and put it
+back afterwards. `RUST_LOG` is a Fly secret, so prefixing `flyctl deploy` with it
+only sets the variable for the local flyctl process and leaves the running app
+at `info`:
+
+```bash
+flyctl secrets set -a mostro-push-server RUST_LOG="debug"   # restarts the machines
+flyctl logs -a mostro-push-server
+flyctl secrets set -a mostro-push-server RUST_LOG="info"    # restore when done
+```
+
+`FCM notifications are DISABLED` is preceded by the actual cause. Distinguish
+the two cases by whether a `Loaded Firebase service account for ...` line
+appears first: without it no credential resolved at all, with it the credential
+arrived and was rejected downstream (bad key, OAuth refusal).
+
+There is no `/secrets` inside the container any more. With the inline form the
+credential is an environment variable, so that startup line is the confirmation
+it arrived, not a file listing.
 
 ### `/api/notify` always 429s
 

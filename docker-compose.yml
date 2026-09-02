@@ -10,17 +10,34 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - FCM_ENABLED=true
-      # The Dockerfile bakes secrets/ into the image at /secrets. Only the
-      # file name is configurable: the path must stay inside the container,
-      # so it must not be interpolated from a host-side path.
-      - FIREBASE_SERVICE_ACCOUNT_PATH=/secrets/${FIREBASE_SERVICE_ACCOUNT_FILE:-firebase-service-account.json}
       # Opt-in: the dispatch path POSTs to the client-supplied device
       # token treated as a URL. Keep it false unless you accept that.
       - UNIFIEDPUSH_ENABLED=false
       - FIREBASE_PROJECT_ID=mostro-test
+      # The credential is not in the image. This path must match the mount
+      # below; without it FCM starts disabled and every push is dropped.
+      - FIREBASE_SERVICE_ACCOUNT_PATH=/app/secrets/firebase-service-account.json
+      # Bare key: forwarded from the host shell only when set there, and it
+      # wins over the path above. This is what makes the mount optional --
+      #   FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" docker-compose up -d
+      # Without this line Compose never passes it in and FCM starts disabled.
+      - FIREBASE_SERVICE_ACCOUNT_JSON
       - RUST_LOG=info
     volumes:
-      # The binary runs with / as its working directory and writes the
-      # UnifiedPush endpoint store to data/unifiedpush_endpoints.json.
-      - ./data:/data
+      # The binary runs with /app as its working directory and writes the
+      # UnifiedPush endpoint store to data/unifiedpush_endpoints.json. A bind
+      # mount keeps the host's ownership, so ./data must be WRITABLE by UID
+      # 10001 (`chown 10001:10001 data`). Only matters once UnifiedPush is on.
+      - ./data:/app/data
+      # A private key: give it to UID 10001 and nobody else, rather than
+      # widening the mode until the container can read it.
+      #   chmod 0600 firebase-service-account.json
+      #   sudo chown 10001:10001 firebase-service-account.json
+      # Mode first: after the chown the file is UID 10001's, not yours.
+      # If host-side ownership is awkward, drop this mount and use the inline
+      # form above instead.
+      - ./firebase-service-account.json:/app/secrets/firebase-service-account.json:ro
+    # The image already declares a HEALTHCHECK, and it reads SERVER_PORT from
+    # the container environment. Redeclaring it here would hard-code the port
+    # and silently stop matching the moment SERVER_PORT above changes.
     restart: unless-stopped
