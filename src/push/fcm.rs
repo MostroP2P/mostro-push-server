@@ -14,10 +14,7 @@ use super::PushService;
 use crate::config::Config;
 use crate::store::Platform;
 
-/// Inline JSON credential. Takes precedence over the path form.
 const SERVICE_ACCOUNT_JSON_ENV: &str = "FIREBASE_SERVICE_ACCOUNT_JSON";
-
-/// Path to a credential file mounted into the runtime.
 const SERVICE_ACCOUNT_PATH_ENV: &str = "FIREBASE_SERVICE_ACCOUNT_PATH";
 
 #[derive(Debug, Deserialize)]
@@ -522,18 +519,10 @@ fn oauth_backoff(attempt: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
-/// Resolves the Firebase service account from the environment.
-///
-/// Two forms, inline first:
-///
-/// - `FIREBASE_SERVICE_ACCOUNT_JSON` carries the credential itself.
-/// - `FIREBASE_SERVICE_ACCOUNT_PATH` points at a file to read.
-///
-/// The inline form exists because the credential no longer ships inside the
-/// container image. On Fly a secret *is* an environment variable, so it needs
-/// no assumption about the ownership or mode of a file the platform mounts —
-/// which matters once the process stops running as root. The path form stays
-/// first-class for bind mounts under docker-compose, systemd and Kubernetes.
+/// Resolves the Firebase service account, inline form first. An inline value
+/// that is empty is treated as absent, so a half-set variable falls back to the
+/// path rather than failing. Why the inline form exists is in
+/// docs/deployment.md.
 ///
 /// Both are taken as arguments rather than read here so the precedence can be
 /// tested without mutating process-wide environment state.
