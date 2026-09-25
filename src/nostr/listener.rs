@@ -2,18 +2,21 @@ use futures::StreamExt;
 use log::{debug, error, info, warn};
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
 use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
-use crate::store::TokenStore;
+use crate::store::{RegisteredToken, TokenStore};
 use crate::utils::log_pubkey::log_pubkey;
+
+/// Upper bound on push dispatches the listener keeps in flight. Separate
+/// from the `/api/notify` semaphore so neither path can starve the other.
+const MAX_IN_FLIGHT_DISPATCHES: usize = 50;
 
 pub struct NostrListener {
     config: Config,
-    dispatcher: Arc<PushDispatcher>,
-    token_store: Arc<TokenStore>,
-    log_salt: Arc<[u8; 32]>,
+    handler: EventHandler,
 }
 
 impl NostrListener {
@@ -25,9 +28,7 @@ impl NostrListener {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             config,
-            dispatcher,
-            token_store,
-            log_salt,
+            handler: EventHandler::new(dispatcher, token_store, log_salt, MAX_IN_FLIGHT_DISPATCHES),
         })
     }
 
@@ -84,65 +85,128 @@ impl NostrListener {
         // drop every event received in between.
         let mut notifications = client.notifications();
 
-        client.subscribe(filter).await?;
-        info!("Subscribed to kind 1059 (Gift Wrap) and kind 14 (protocol v2) events on relay");
-
-        // Handle incoming events
-        let token_store = self.token_store.clone();
-        let dispatcher = self.dispatcher.clone();
-        let log_salt = self.log_salt.clone();
+        let output = client.subscribe(filter).await?;
+        ensure_subscribed(&output)?;
 
         while let Some(notification) = notifications.next().await {
             if let ClientNotification::Event { event, .. } = notification {
-                if is_watched_kind(event.kind) {
-                    // Log every watched event received
-                    info!("Received {} event: {}", kind_label(event.kind), event.id);
-
-                    // Extract recipient from 'p' tag
-                    let recipient_pubkey = extract_recipient(&event);
-
-                    if let Some(trade_pubkey) = recipient_pubkey {
-                        let log_pk = log_pubkey(&log_salt, &trade_pubkey);
-                        info!("Event recipient (p tag) pk={}", log_pk);
-
-                        // Look up token in store
-                        if let Some(registered_token) = token_store.get(&trade_pubkey).await {
-                            info!(
-                                "MATCH! Found registered token pk={}, sending push to {} device",
-                                log_pk, registered_token.platform
-                            );
-
-                            // Dispatch via PushDispatcher (lock-free; iteration protocol owned by dispatcher).
-                            match dispatcher.dispatch(&registered_token).await {
-                                Ok(DispatchOutcome::Delivered { backend: _ }) => {
-                                    info!("Push sent successfully for event {}", event.id);
-                                }
-                                Err(DispatchError::NoBackendForPlatform) => {
-                                    // Preserve existing observable behaviour: today's loop simply
-                                    // exits silently when no service supports the platform.
-                                    // Phase 2's /api/notify handler will distinguish this case.
-                                }
-                                Err(DispatchError::AllBackendsFailed { errors }) => {
-                                    for err in errors {
-                                        error!("Failed to send push: {}", err);
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!("No registered token pk={}", log_pk);
-                        }
-                    } else {
-                        warn!(
-                            "No 'p' tag found in {} event {}",
-                            kind_label(event.kind),
-                            event.id
-                        );
-                    }
-                }
+                self.handler.handle(*event).await;
             }
         }
 
         Ok(())
+    }
+}
+
+/// Logs per-relay subscription failures and errors out when no relay accepted
+/// the subscription. nostr-sdk drops a subscription on every relay where
+/// sending the REQ failed and never resends it, so continuing would wait
+/// forever on a stream that receives nothing; the error sends `start()`
+/// through its reconnect path instead.
+fn ensure_subscribed(
+    output: &Output<SubscriptionId>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for (relay, reason) in &output.failed {
+        warn!("Subscription failed on relay {}: {}", relay, reason);
+    }
+    info!(
+        "Subscribed to kind 1059 (Gift Wrap) and kind 14 (protocol v2) events on {} of {} relays",
+        output.success.len(),
+        output.success.len() + output.failed.len()
+    );
+    if output.success.is_empty() {
+        return Err("subscription failed on every relay".into());
+    }
+    Ok(())
+}
+
+/// Matches a watched event to a registered device and dispatches its push.
+struct EventHandler {
+    dispatcher: Arc<PushDispatcher>,
+    token_store: Arc<TokenStore>,
+    log_salt: Arc<[u8; 32]>,
+    permits: Arc<Semaphore>,
+}
+
+impl EventHandler {
+    fn new(
+        dispatcher: Arc<PushDispatcher>,
+        token_store: Arc<TokenStore>,
+        log_salt: Arc<[u8; 32]>,
+        max_in_flight: usize,
+    ) -> Self {
+        Self {
+            dispatcher,
+            token_store,
+            log_salt,
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+        }
+    }
+
+    async fn handle(&self, event: Event) {
+        if !is_watched_kind(event.kind) {
+            return;
+        }
+        info!("Received {} event: {}", kind_label(event.kind), event.id);
+
+        let Some(trade_pubkey) = extract_recipient(&event) else {
+            warn!(
+                "No 'p' tag found in {} event {}",
+                kind_label(event.kind),
+                event.id
+            );
+            return;
+        };
+
+        let log_pk = log_pubkey(&self.log_salt, &trade_pubkey);
+        info!("Event recipient (p tag) pk={}", log_pk);
+
+        let Some(registered_token) = self.token_store.get(&trade_pubkey).await else {
+            debug!("No registered token pk={}", log_pk);
+            return;
+        };
+        info!(
+            "MATCH! Found registered token pk={}, sending push to {} device",
+            log_pk, registered_token.platform
+        );
+
+        // Each push runs in its own task so a slow backend (a UnifiedPush
+        // endpoint is chosen by whoever registered it) cannot stall events
+        // from every relay. When every permit is taken the push is dropped
+        // rather than awaited: waiting here would stop the loop draining
+        // nostr-sdk's bounded notification channel, which then discards
+        // events from all relays without a trace.
+        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+            warn!(
+                "Dispatch pool saturated, dropping push for event {} pk={}",
+                event.id, log_pk
+            );
+            return;
+        };
+        let dispatcher = self.dispatcher.clone();
+        tokio::spawn(async move {
+            dispatch_and_log(&dispatcher, &registered_token, event.id).await;
+            drop(permit);
+        });
+    }
+}
+
+async fn dispatch_and_log(
+    dispatcher: &PushDispatcher,
+    registered_token: &RegisteredToken,
+    event_id: EventId,
+) {
+    match dispatcher.dispatch(registered_token).await {
+        Ok(DispatchOutcome::Delivered { backend: _ }) => {
+            info!("Push sent successfully for event {}", event_id);
+        }
+        // Silent on purpose: no backend is configured for the platform.
+        Err(DispatchError::NoBackendForPlatform) => {}
+        Err(DispatchError::AllBackendsFailed { errors }) => {
+            for err in errors {
+                error!("Failed to send push: {}", err);
+            }
+        }
     }
 }
 
@@ -196,6 +260,169 @@ fn extract_recipient(event: &Event) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::push::PushService;
+    use crate::store::Platform;
+    use async_trait::async_trait;
+    use tokio::sync::{mpsc, Notify};
+
+    const SLOW_DEVICE: &str = "slow-device";
+    const FAST_DEVICE: &str = "fast-device";
+    const DELIVERY_WAIT: Duration = Duration::from_secs(2);
+    const BLOCKED_WAIT: Duration = Duration::from_millis(200);
+
+    /// Push backend that holds `SLOW_DEVICE` sends until `release` fires and
+    /// reports every completed send on `delivered`.
+    struct GatedPushService {
+        release: Arc<Notify>,
+        delivered: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl PushService for GatedPushService {
+        async fn send_to_token(
+            &self,
+            device_token: &str,
+            _platform: &Platform,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            if device_token == SLOW_DEVICE {
+                self.release.notified().await;
+            }
+            let _ = self.delivered.send(device_token.to_string());
+            Ok(())
+        }
+
+        fn supports_platform(&self, _platform: &Platform) -> bool {
+            true
+        }
+    }
+
+    struct Fixture {
+        handler: EventHandler,
+        release: Arc<Notify>,
+        delivered: mpsc::UnboundedReceiver<String>,
+        slow_recipient: Keys,
+        fast_recipient: Keys,
+    }
+
+    async fn fixture(max_in_flight: usize) -> Fixture {
+        let salt = Arc::new([7u8; 32]);
+        let release = Arc::new(Notify::new());
+        let (tx, delivered) = mpsc::unbounded_channel();
+        let service: Arc<dyn PushService> = Arc::new(GatedPushService {
+            release: release.clone(),
+            delivered: tx,
+        });
+        let dispatcher = Arc::new(PushDispatcher::new(vec![(service, "gated")]));
+        let store = Arc::new(TokenStore::new(24, salt.clone()));
+
+        let slow_recipient = Keys::generate();
+        let fast_recipient = Keys::generate();
+        store
+            .register(
+                slow_recipient.public_key().to_hex(),
+                SLOW_DEVICE.to_string(),
+                Platform::Android,
+            )
+            .await;
+        store
+            .register(
+                fast_recipient.public_key().to_hex(),
+                FAST_DEVICE.to_string(),
+                Platform::Android,
+            )
+            .await;
+
+        Fixture {
+            handler: EventHandler::new(dispatcher, store, salt, max_in_flight),
+            release,
+            delivered,
+            slow_recipient,
+            fast_recipient,
+        }
+    }
+
+    fn gift_wrap_to(recipient: &Keys) -> Event {
+        EventBuilder::new(Kind::GiftWrap, "ciphertext")
+            .tags([Tag::public_key(recipient.public_key())])
+            .finalize(&Keys::generate())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn slow_push_does_not_delay_the_next_event() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        tokio::time::timeout(DELIVERY_WAIT, async {
+            f.handler.handle(gift_wrap_to(&f.slow_recipient)).await;
+            f.handler.handle(gift_wrap_to(&f.fast_recipient)).await;
+        })
+        .await
+        .expect("handle() must not wait for the push to finish");
+
+        let first = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(first.unwrap().as_deref(), Some(FAST_DEVICE));
+
+        f.release.notify_one();
+        let second = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(second.unwrap().as_deref(), Some(SLOW_DEVICE));
+    }
+
+    #[tokio::test]
+    async fn saturated_dispatch_drops_the_push_without_blocking() {
+        let mut f = fixture(1).await;
+        f.handler.handle(gift_wrap_to(&f.slow_recipient)).await;
+
+        tokio::time::timeout(
+            DELIVERY_WAIT,
+            f.handler.handle(gift_wrap_to(&f.fast_recipient)),
+        )
+        .await
+        .expect("a saturated dispatcher must not block the notification loop");
+        let dropped = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(dropped.is_err(), "push beyond the cap must be dropped");
+
+        f.release.notify_one();
+        let slow = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(slow.unwrap().as_deref(), Some(SLOW_DEVICE));
+
+        f.handler.handle(gift_wrap_to(&f.fast_recipient)).await;
+        let fast = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(fast.unwrap().as_deref(), Some(FAST_DEVICE));
+    }
+
+    fn subscribe_output(succeeded: &[&str], failed: &[&str]) -> Output<SubscriptionId> {
+        let url = |u: &&str| RelayUrl::parse(u).unwrap();
+        Output {
+            value: SubscriptionId::generate(),
+            success: succeeded.iter().map(|u| (url(u), ())).collect(),
+            failed: failed
+                .iter()
+                .map(|u| (url(u), "can't send message".to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn subscription_on_some_relays_is_accepted() {
+        let output = subscribe_output(&["wss://a.example"], &["wss://b.example"]);
+        assert!(ensure_subscribed(&output).is_ok());
+    }
+
+    #[test]
+    fn subscription_failed_on_every_relay_forces_a_reconnect() {
+        let output = subscribe_output(&[], &["wss://a.example", "wss://b.example"]);
+        assert!(ensure_subscribed(&output).is_err());
+    }
+
+    #[tokio::test]
+    async fn unregistered_recipient_dispatches_nothing() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        f.handler.handle(gift_wrap_to(&Keys::generate())).await;
+
+        let got = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(got.is_err());
+    }
 
     #[test]
     fn watched_kinds_include_gift_wrap_and_protocol_v2() {
