@@ -39,7 +39,7 @@ Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/regis
 
 Connects to all configured relays, subscribes to `kind 1059` (Mostro protocol v1 Gift Wrap) and `kind 14` (Mostro protocol v2 NIP-44 direct) events with no author filter, and reconnects automatically on close (5 s) or error (10 s). For each event it extracts the `p` tag and looks up the corresponding token in the store; on hit it calls `PushDispatcher::dispatch` in a spawned task, so a slow push backend never stalls events arriving from other relays. The listener caps in-flight dispatches at 50 with its own `Semaphore`, separate from the `/api/notify` one; when all permits are taken, it waits for one instead of dropping the push. Relays on which the subscription fails are logged at `warn!`.
 
-The listener generates an ephemeral `Keys::generate()` for the connection itself; this key only signs subscriptions, it never identifies a user.
+The listener uses `Client::new()` with no signer: it only subscribes and never publishes, so it holds no keys and nothing it sends identifies a user.
 
 ### Token store (`tokio::sync::RwLock<HashMap>`)
 
