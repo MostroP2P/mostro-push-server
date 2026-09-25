@@ -86,14 +86,7 @@ impl NostrListener {
         let mut notifications = client.notifications();
 
         let output = client.subscribe(filter).await?;
-        for (relay, reason) in &output.failed {
-            warn!("Subscription failed on relay {}: {}", relay, reason);
-        }
-        info!(
-            "Subscribed to kind 1059 (Gift Wrap) and kind 14 (protocol v2) events on {} of {} relays",
-            output.success.len(),
-            output.success.len() + output.failed.len()
-        );
+        ensure_subscribed(&output)?;
 
         while let Some(notification) = notifications.next().await {
             if let ClientNotification::Event { event, .. } = notification {
@@ -103,6 +96,28 @@ impl NostrListener {
 
         Ok(())
     }
+}
+
+/// Logs per-relay subscription failures and errors out when no relay accepted
+/// the subscription. nostr-sdk drops a subscription on every relay where
+/// sending the REQ failed and never resends it, so continuing would wait
+/// forever on a stream that receives nothing; the error sends `start()`
+/// through its reconnect path instead.
+fn ensure_subscribed(
+    output: &Output<SubscriptionId>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for (relay, reason) in &output.failed {
+        warn!("Subscription failed on relay {}: {}", relay, reason);
+    }
+    info!(
+        "Subscribed to kind 1059 (Gift Wrap) and kind 14 (protocol v2) events on {} of {} relays",
+        output.success.len(),
+        output.success.len() + output.failed.len()
+    );
+    if output.success.is_empty() {
+        return Err("subscription failed on every relay".into());
+    }
+    Ok(())
 }
 
 /// Matches a watched event to a registered device and dispatches its push.
@@ -157,12 +172,14 @@ impl EventHandler {
 
         // Each push runs in its own task so a slow backend (a UnifiedPush
         // endpoint is chosen by whoever registered it) cannot stall events
-        // from every relay. Waiting for a permit applies backpressure
-        // instead of dropping the push.
-        let Ok(permit) = self.permits.clone().acquire_owned().await else {
-            error!(
-                "Dispatch semaphore closed, dropping push for event {}",
-                event.id
+        // from every relay. When every permit is taken the push is dropped
+        // rather than awaited: waiting here would stop the loop draining
+        // nostr-sdk's bounded notification channel, which then discards
+        // events from all relays without a trace.
+        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+            warn!(
+                "Dispatch pool saturated, dropping push for event {} pk={}",
+                event.id, log_pk
             );
             return;
         };
@@ -351,17 +368,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_flight_dispatches_are_capped() {
+    async fn saturated_dispatch_drops_the_push_without_blocking() {
         let mut f = fixture(1).await;
         f.handler.handle(gift_wrap_to(&f.slow_recipient)).await;
 
-        let blocked = tokio::time::timeout(
-            BLOCKED_WAIT,
+        tokio::time::timeout(
+            DELIVERY_WAIT,
             f.handler.handle(gift_wrap_to(&f.fast_recipient)),
         )
-        .await;
-        assert!(blocked.is_err(), "second dispatch must wait for a permit");
-        assert!(f.delivered.try_recv().is_err());
+        .await
+        .expect("a saturated dispatcher must not block the notification loop");
+        let dropped = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(dropped.is_err(), "push beyond the cap must be dropped");
 
         f.release.notify_one();
         let slow = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
@@ -370,6 +388,30 @@ mod tests {
         f.handler.handle(gift_wrap_to(&f.fast_recipient)).await;
         let fast = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
         assert_eq!(fast.unwrap().as_deref(), Some(FAST_DEVICE));
+    }
+
+    fn subscribe_output(succeeded: &[&str], failed: &[&str]) -> Output<SubscriptionId> {
+        let url = |u: &&str| RelayUrl::parse(u).unwrap();
+        Output {
+            value: SubscriptionId::generate(),
+            success: succeeded.iter().map(|u| (url(u), ())).collect(),
+            failed: failed
+                .iter()
+                .map(|u| (url(u), "can't send message".to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn subscription_on_some_relays_is_accepted() {
+        let output = subscribe_output(&["wss://a.example"], &["wss://b.example"]);
+        assert!(ensure_subscribed(&output).is_ok());
+    }
+
+    #[test]
+    fn subscription_failed_on_every_relay_forces_a_reconnect() {
+        let output = subscribe_output(&[], &["wss://a.example", "wss://b.example"]);
+        assert!(ensure_subscribed(&output).is_err());
     }
 
     #[tokio::test]
