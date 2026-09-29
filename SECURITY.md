@@ -44,7 +44,8 @@ In scope:
 - The Nostr listener and its subscription handling.
 - The push dispatcher and the FCM and UnifiedPush backends, including
   credential handling.
-- The in-memory token store and the UnifiedPush endpoint file.
+- The token store (in memory and its encrypted SQLite file) and the
+  UnifiedPush endpoint file.
 - Privacy invariants, including log redaction and any behaviour that lets an
   observer or the server operator correlate a sender with a recipient,
   enumerate registered pubkeys, or link a `trade_pubkey` to a device.
@@ -82,7 +83,11 @@ privacy or availability impact beyond what is described here is welcome.
 - The Nostr listener does not filter by `authors`. Gift Wrap uses an ephemeral
   outer key per event and dispute admin messages are user-to-user, so an author
   filter would silently drop legitimate events.
-- Device tokens are held in memory only and are never persisted to disk.
+- Registrations are persisted to disk when `TOKEN_STORE_PATH` is set, so they
+  survive restarts. `trade_pubkey` is stored in the clear (it is public on the
+  relays); device tokens are encrypted with a key held only in the
+  `TOKEN_STORE_KEY` secret. Anyone with both the file and the key can read the
+  live registrations, as anyone with access to the running process can today.
 - The trusted Mostro instance whitelist on `/api/register` is honour-system
   only. The device proves nothing cryptographically about the instance it uses.
   This is a known limitation, tracked for a future hardening phase.

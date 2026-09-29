@@ -14,7 +14,7 @@ Operator and integrator documentation for the Mostro Push Server, a privacy-pres
 ## What this server does
 
 - Subscribes to Nostr relays and observes Gift Wrap events (`kind 1059`, Mostro protocol v1) and NIP-44 direct messages (`kind 14`, Mostro protocol v2).
-- Maintains an in-memory map of `trade_pubkey -> device_token` populated by mobile clients via `POST /api/register`.
+- Maintains a map of `trade_pubkey -> device_token` populated by mobile clients via `POST /api/register`, kept in memory and optionally persisted (encrypted) to SQLite so it survives restarts.
 - On a matching event, dispatches a silent push via Firebase Cloud Messaging (FCM) and/or UnifiedPush.
 - Exposes `POST /api/notify` for the mobile client to trigger a sender-side wake-up (silent push) when peer-to-peer chat events are sent without going through the Mostro daemon.
 
@@ -22,7 +22,7 @@ Operator and integrator documentation for the Mostro Push Server, a privacy-pres
 
 - It does not authenticate `/api/register`, `/api/unregister`, or `/api/notify` callers. The contract is intentionally unauthenticated: anything that would let the operator correlate a sender to a recipient is rejected.
 - It does not filter the Nostr listener by `authors`. Gift Wrap uses an ephemeral outer key per event, and dispute admin DMs are sent user-to-user, never by the Mostro daemon. An author filter would silently drop those.
-- It does not persist registered tokens to disk. Tokens are in-memory only, cleared on restart, and TTL-expired in the background. UnifiedPush endpoints are the only state persisted (atomic JSON write to `data/unifiedpush_endpoints.json`).
+- It does not keep registrations longer than needed. They expire with the TTL and are deleted on `unregister`, in memory and on disk; device tokens on disk are encrypted and deleted rows are zeroed. See [Deployment: Persistence](./deployment.md#persistence).
 - It does not log raw `trade_pubkey`s. All pubkeys are rendered through `log_pubkey` (a salted, truncated BLAKE3 keyed hash) so logs cannot be used as a correlation oracle.
 
 ## Quick start

@@ -1,6 +1,6 @@
 # Architecture Overview
 
-A single-binary Rust service built on Tokio and Actix-web. It has two ingress paths into the push pipeline (Nostr listener and `POST /api/notify`), a single in-memory token store, and a fan-out dispatcher that routes to FCM and/or UnifiedPush.
+A single-binary Rust service built on Tokio and Actix-web. It has two ingress paths into the push pipeline (Nostr listener and `POST /api/notify`), a single token store (in memory, optionally persisted to SQLite), and a fan-out dispatcher that routes to FCM and/or UnifiedPush.
 
 ## Module layout
 
@@ -21,7 +21,9 @@ src/
 │   ├── fcm.rs              # FCM v1 backend, OAuth2 service-account JWT
 │   └── unifiedpush.rs      # UnifiedPush backend, persistent endpoint store
 ├── store/
-│   └── mod.rs              # In-memory TokenStore (RwLock<HashMap>) + TTL cleanup
+│   ├── mod.rs              # TokenStore (RwLock<HashMap>), TTL cleanup, MAX_TOKENS cap
+│   ├── sqlite.rs           # Optional SQLite persistence (TOKEN_STORE_PATH)
+│   └── cipher.rs           # Device-token encryption at rest (TOKEN_STORE_KEY)
 ├── crypto/
 │   └── mod.rs              # ECDH+ChaCha20 token decryption (gated, unused at runtime)
 └── utils/
@@ -43,7 +45,14 @@ The listener uses `Client::new()` with no signer: it only subscribes and never p
 
 ### Token store (`tokio::sync::RwLock<HashMap>`)
 
-Maps `trade_pubkey -> RegisteredToken { device_token, platform, registered_at }`. In-memory only; restart clears it. A background `tokio::spawn` task runs every `CLEANUP_INTERVAL_HOURS` and evicts entries older than `TOKEN_TTL_HOURS`.
+Maps `trade_pubkey -> RegisteredToken { device_token, platform, registered_at }`. A background `tokio::spawn` task runs every `CLEANUP_INTERVAL_HOURS` and evicts entries older than `TOKEN_TTL_HOURS`. New `trade_pubkey`s are refused once the map holds `MAX_TOKENS` entries; refreshing an existing one always succeeds.
+
+Reads always come from memory. With `TOKEN_STORE_PATH` set, `store/sqlite.rs` mirrors the map to SQLite so registrations survive restarts:
+
+- **Startup:** check the key fingerprint (wipe every row if the key changed), delete expired rows, decrypt the rest into memory, drop rows that cannot be read.
+- **Register / unregister / cleanup:** the in-memory change and its SQLite write run under the `write_order` mutex, so the file sees changes in the same order as memory. A failed write is logged and the registration keeps working from memory until the next restart.
+- **Row format:** `trade_pubkey` in the clear; the device token sealed by `store/cipher.rs` (ChaCha20-Poly1305, key derived with HKDF from `TOKEN_STORE_KEY`, random nonce per row, `trade_pubkey` as associated data).
+- **Deletion:** `secure_delete` zeroes deleted rows and every cleanup truncates the WAL.
 
 ### Push dispatcher
 
@@ -129,7 +138,7 @@ Synchronous write under `RwLock::write`, then `200`. No fan-out; the next `kind 
 ## Concurrency model
 
 - **Dispatch path is lock-free.** The dispatcher slice is an immutable `Arc<[Arc<dyn PushService>]>`; replacing it would require swapping out the dispatcher itself.
-- **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so no guard is held across `await` in callers.
+- **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so no guard is held across `await` in callers. Writers also take the `write_order` mutex across their SQLite write; SQLite calls run on `spawn_blocking`, and readers never wait on them.
 - **FCM access-token cache** is `Arc<RwLock<Option<CachedToken>>>`.
 - **UnifiedPush endpoints** are `RwLock<HashMap<String, UnifiedPushEndpoint>>`, persisted via atomic rename on every mutation.
 - **`/api/notify` spawn pool** is bounded by `Arc<Semaphore>(50)`. On saturation the handler logs (without the pubkey, to avoid an oracle) and skips the spawn; the response is still 202.

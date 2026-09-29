@@ -11,6 +11,7 @@ The reference deployment target is Fly.io. The repo also ships a `Dockerfile` an
 - Internal port `8080`, HTTPS forced at the edge
 - `auto_start_machines = true`, `min_machines_running = 1`
 - Hard connection limit of `25` per machine
+- Volume `push_data` mounted on `/app/data`, holding the token store (`TOKEN_STORE_PATH=/app/data/tokens.db`)
 
 The 25-connection hard limit is the inbound capacity ceiling. The `/api/notify` spawn pool (50 permits) is independent and bounds concurrent outbound dispatch tasks, not inbound connections.
 
@@ -19,6 +20,10 @@ The 25-connection hard limit is the inbound capacity ceiling. The `/api/notify` 
 ```bash
 flyctl auth login
 flyctl launch --no-deploy   # reads fly.toml, creates the app, no deploy yet
+
+# Volume for the token store. Scheduled snapshots stay off so no copy of
+# expired or unregistered rows outlives them.
+flyctl volumes create push_data --region gru --size 1 --scheduled-snapshots=false
 ```
 
 ### Configure secrets
@@ -32,9 +37,11 @@ Generate a fresh server key for every production deployment:
 
 ```bash
 server_private_key="$(openssl rand -hex 32)"
+token_store_key="$(openssl rand -hex 32)"
 
 flyctl secrets set -a mostro-push-server \
   SERVER_PRIVATE_KEY="${server_private_key}" \
+  TOKEN_STORE_KEY="${token_store_key}" \
   NOSTR_RELAYS="wss://relay.mostro.network" \
   FIREBASE_PROJECT_ID="your-project-id" \
   FIREBASE_SERVICE_ACCOUNT_JSON="$(cat /path/to/firebase-service-account.json)" \
@@ -47,7 +54,7 @@ flyctl secrets set -a mostro-push-server \
   NOTIFY_TRUST_PROXY_HEADERS="true" \
   RUST_LOG="info"
 
-unset server_private_key
+unset server_private_key token_store_key
 ```
 
 `deploy-fly.sh` requires these secret names to exist before deploy:
@@ -55,7 +62,16 @@ unset server_private_key
 - `NOSTR_RELAYS`
 - `SERVER_PRIVATE_KEY`
 - `FIREBASE_PROJECT_ID`
+- `TOKEN_STORE_KEY`
 - `FIREBASE_SERVICE_ACCOUNT_JSON`
+
+It also checks that the `push_data` volume exists and prints the command to
+create it when it does not.
+
+`TOKEN_STORE_KEY` seals the device tokens persisted on the volume. Keeping a
+copy is optional: if it is lost or changed, the server detects it at startup,
+discards the stored registrations and clients re-register the next time they
+open the app. Never store the key next to the volume or its backups.
 
 `FIREBASE_SERVICE_ACCOUNT_PATH` is not accepted in its place. Nothing the
 wrapper can read proves a file exists at the path that secret names, and a wrong
@@ -163,6 +179,33 @@ curl https://mostro-push-server.fly.dev/api/health
 
 Secrets persist; only re-run `flyctl secrets set` when a value changes.
 
+### Enable persistence on an existing app (one time)
+
+Every restart of an app without the volume empties the token store, so plan
+this change for when clients can recover: the mobile app re-registers its live
+trades whenever it is opened.
+
+```bash
+# 1. Key. --stage stores it without restarting the running machine, which
+#    would drop every current registration.
+flyctl secrets set --stage -a mostro-push-server TOKEN_STORE_KEY="$(openssl rand -hex 32)"
+
+# 2. Volume, in the machine's region, without scheduled snapshots.
+flyctl volumes create push_data -a mostro-push-server --region gru --size 1 --scheduled-snapshots=false
+
+# 3. Deploy (fly.toml already mounts the volume and sets TOKEN_STORE_PATH).
+./deploy-fly.sh
+```
+
+Then confirm registrations survive a restart:
+
+```bash
+curl https://mostro-push-server.fly.dev/api/status      # note tokens.total
+flyctl machine restart -a mostro-push-server <machine-id>
+curl https://mostro-push-server.fly.dev/api/status      # total must not drop to 0
+flyctl logs -a mostro-push-server | grep "Token store persisted"   # "N restored"
+```
+
 ### Operations
 
 ```bash
@@ -226,12 +269,14 @@ FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" docker-comp
 
 Without that bare key in the `environment:` list Compose would not pass the variable in at all, and FCM would start disabled with nothing on the host to suggest why.
 
-`./data` is bind-mounted to `/app/data` so the UnifiedPush endpoint store survives container recreation. The image sets `WORKDIR /app` and the binary writes the store to `data/unifiedpush_endpoints.json`, which lands at `/app/data/unifiedpush_endpoints.json` inside the container.
+`./data` is bind-mounted to `/app/data` so the on-disk state survives container recreation: the token store when `TOKEN_STORE_PATH` is set, and the UnifiedPush endpoint store (the image sets `WORKDIR /app` and the binary writes it to `data/unifiedpush_endpoints.json`).
 
-A bind mount keeps the host directory's ownership, overriding the one the image sets, so `./data` has to be writable by UID 10001 before enabling UnifiedPush:
+The container starts as root only to hand `/app/data` to UID 10001 (`docker-entrypoint.sh`), then runs the server as that UID through `setpriv`. A bind-mounted `./data` therefore ends up owned by UID 10001 on the host; no manual `chown` is needed.
+
+The compose file keeps registrations in memory by default. To persist them, uncomment `TOKEN_STORE_PATH` and `TOKEN_STORE_KEY` there and pass the key from the shell:
 
 ```bash
-mkdir -p data && sudo chown 10001:10001 data
+TOKEN_STORE_KEY="$(openssl rand -hex 32)" docker-compose up -d
 ```
 
 The compose file ships with `UNIFIEDPUSH_ENABLED=false` to match the binary default. The UnifiedPush dispatch path POSTs to the client-supplied device token treated as a URL, so enabling it is an explicit operator decision.
@@ -311,11 +356,18 @@ sudo journalctl -u mostro-push -f
 
 ## Persistence
 
-The only on-disk state is `data/unifiedpush_endpoints.json`, written atomically (temp file + rename). The token store and FCM access-token cache are in-memory and cleared on restart. UnifiedPush endpoints survive restarts because they are external addresses owned by clients; tokens do not, because clients re-register them after each session.
+- **Token store** (`TOKEN_STORE_PATH`, SQLite). Mirrors the in-memory registrations so a restart or deploy no longer drops them. Unset, registrations live in memory only and every restart empties them.
+  - Only live registrations are kept: rows expire with `TOKEN_TTL_HOURS`, are deleted on `/api/unregister`, and expired rows are purged at startup.
+  - `trade_pubkey` is stored in the clear (it is public on the relays). The device token is encrypted with ChaCha20-Poly1305, a random nonce per row and a key derived from `TOKEN_STORE_KEY`.
+  - Deleted rows are zeroed (`secure_delete`) and the WAL is truncated after each cleanup.
+  - If `TOKEN_STORE_KEY` changes, the server discards every stored registration at startup (logged) instead of failing.
+  - With `TOKEN_STORE_PATH` set, the server refuses to start if the key is missing or invalid, or the file cannot be opened: running from memory instead would silently lose registrations again.
+- **UnifiedPush endpoints** (`data/unifiedpush_endpoints.json`), written atomically (temp file + rename).
+- The FCM access-token cache is in memory and refetched after a restart.
 
 ## Backup
 
-There is no database to back up. Operationally important inputs are:
+The token store needs no backup: after a loss clients re-register their live trades the next time they open the app, and a backup would only keep device-to-trade links longer than the TTL. Operationally important inputs are:
 
 - The Firebase service account JSON, held in `FIREBASE_SERVICE_ACCOUNT_JSON` or at `FIREBASE_SERVICE_ACCOUNT_PATH` (regenerate via Firebase Console if lost)
 - The contents of `flyctl secrets list` (or the `.env` file on bare-metal)
@@ -326,6 +378,12 @@ There is no database to back up. Operationally important inputs are:
 ### Server fails to start
 
 The most common cause is `NOSTR_RELAYS` unset. Check `flyctl logs` or the systemd journal for `Failed to load configuration`.
+
+With persistence enabled, also look for:
+
+- `TOKEN_STORE_KEY must be set when TOKEN_STORE_PATH is`: the secret is missing.
+- `Invalid TOKEN_STORE_KEY`: it is not 32 bytes of hex; regenerate it with `openssl rand -hex 32`.
+- `Failed to open token store`: the volume is not mounted or not writable. Check `flyctl volumes list` and that the machine runs the image's entrypoint.
 
 ```bash
 flyctl logs

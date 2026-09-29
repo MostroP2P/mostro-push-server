@@ -46,14 +46,14 @@ Two ingress paths feed the same dispatcher:
 
 ## Privacy properties
 
-- The server stores `trade_pubkey -> device_token` in memory only. No persistence other than UnifiedPush endpoint URLs.
+- The server keeps `trade_pubkey -> device_token` in memory and, when `TOKEN_STORE_PATH` is set, mirrors it to a SQLite file so registrations survive restarts. On disk the device token is encrypted (ChaCha20-Poly1305, random nonce per row, key from the `TOKEN_STORE_KEY` secret), only live registrations are kept (TTL, `unregister`), and deleted rows are zeroed.
 - The server does **not** authenticate `/api/register`, `/api/unregister`, or `/api/notify`. Adding signatures or sender identifiers would let the operator correlate sender and recipient.
 - `/api/notify` always returns `202` on parse-valid input. Registered and unregistered pubkeys are indistinguishable in status, body, and headers; rate-limit responses are byte-identical between the per-IP and per-pubkey paths. The endpoint cannot be used as an enumeration oracle.
 - Inbound `X-Request-Id` on `/api/notify` is stripped; the server generates its own UUIDv4 per request.
 - All `trade_pubkey`s in logs go through a salted truncated BLAKE3 keyed hash (`log_pubkey`), with a per-process random salt that is never persisted.
 - The Nostr listener does **not** filter by `authors`. Gift Wrap uses an ephemeral outer key, and admin DMs in disputes are user-to-user — an author filter would silently drop them.
 
-What the server *does* see: an in-memory mapping of `trade_pubkey -> device_token`, and timing of incoming Gift Wrap events. It does not see message content, sender identity, or peer relationships.
+What the server *does* see: a mapping of `trade_pubkey -> device_token` for live registrations, and timing of incoming Gift Wrap events. It does not see message content, sender identity, or peer relationships.
 
 ## Requirements
 

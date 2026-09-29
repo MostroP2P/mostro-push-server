@@ -85,6 +85,9 @@ To turn the filter on/off without rebuilding, flip
 |---------------------------|---------|------------------------------------------------------------------------------|
 | `TOKEN_TTL_HOURS`         | `48`    | Tokens older than this are evicted by the cleanup task                       |
 | `CLEANUP_INTERVAL_HOURS`  | `1`     | How often the cleanup task runs                                              |
+| `MAX_TOKENS`              | `50000` | Registrations accepted for new `trade_pubkey`s. When full, `/api/register` answers `429`; refreshing an existing registration always succeeds. Must be `> 0` |
+| `TOKEN_STORE_PATH`        | unset   | SQLite file persisting registrations across restarts (`/app/data/tokens.db` on Fly). Unset keeps them in memory only |
+| `TOKEN_STORE_KEY`         | unset   | 32-byte hex key sealing the persisted device tokens (`openssl rand -hex 32`). Required with `TOKEN_STORE_PATH`; the server refuses to start without a valid one. Never logged |
 
 ## HTTP rate limiters
 
@@ -147,6 +150,9 @@ FIREBASE_SERVICE_ACCOUNT_PATH=/app/secrets/firebase-service-account.json
 # Token store
 TOKEN_TTL_HOURS=48
 CLEANUP_INTERVAL_HOURS=1
+MAX_TOKENS=50000
+TOKEN_STORE_PATH=/app/data/tokens.db
+# TOKEN_STORE_KEY comes from a secret, never from a committed file
 
 # /api/notify rate limiter (Fly.io defaults)
 NOTIFY_RATE_PER_PUBKEY_PER_MIN=30

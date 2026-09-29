@@ -61,7 +61,9 @@ curl http://localhost:8080/api/status
 
 ## POST /api/register
 
-Registers a device token for a `trade_pubkey`. The token is stored in plaintext in memory; HTTPS is the only confidentiality layer in transit.
+Registers a device token for a `trade_pubkey`. The token is held in plaintext in memory and, when persistence is enabled, encrypted on disk; HTTPS protects it in transit. Registering an already registered `trade_pubkey` replaces its token and restarts its TTL.
+
+When the store holds `MAX_TOKENS` registrations, a new `trade_pubkey` is answered with the same `429` body as the rate limiter (`{"success":false,"message":"rate limited"}`, `Retry-After: 3600`); refreshing an existing one always succeeds.
 
 Request:
 
@@ -228,7 +230,7 @@ curl -i -X POST http://localhost:8080/api/notify \
 | 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
 | 202    | `/api/notify` on parse-valid input                                            |
 | 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint |
-| 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits                 |
+| 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits; `/api/register` when the token store is full |
 | 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
 
 ### Push endpoint validation
@@ -290,7 +292,7 @@ on unauthenticated endpoints is a free memory-amplification primitive.
 
 The `token` field of a registration is bounded separately at **4096 bytes**. The
 body cap stops an enormous request; the field cap stops a merely large one from
-being retained in the in-memory token store for its whole TTL.
+being retained in the token store for its whole TTL.
 
 Exceeding either limit is reported as `400 Bad Request`, **not** `413 Payload
 Too Large`:
@@ -327,7 +329,7 @@ failure keeps its previous behaviour.
 ## Rate limiting
 
 `/api/register` and `/api/unregister` share a per-IP limit to protect the
-in-memory token store from registration churn:
+token store from registration churn (`MAX_TOKENS` bounds its total size):
 
 - Per-IP: `120/min`, burst `100`
 
