@@ -9,7 +9,7 @@ For deeper context (data flow, components, ops): [docs/architecture.md](docs/arc
 - **Language**: Rust, edition 2021. MSRV 1.75 (Docker builder pinned to 1.90).
 - **Async runtime**: Tokio 1.35 (`full`).
 - **HTTP**: `actix-web 4.9` (built with `default-features = false`; the `compress-brotli`/`compress-gzip`/`compress-zstd` features are deliberately off), `actix-rt 2.9`. Actix decompresses request bodies inside the JSON extractor, before `JsonConfig::limit` is consulted, into an unbounded buffer — 316 bytes of brotli decode to 382 MB — so the body caps would guard the wrong side of the decompressor. Do NOT re-enable those features; `compressed_bodies_are_refused_rather_than_decompressed` in `src/api/routes.rs` fails if you do.
-- **Nostr**: `nostr-sdk 0.27`.
+- **Nostr**: `nostr-sdk 0.45` (locked at 0.45.2).
 - **HTTP client**: shared `reqwest::Client` with explicit timeouts (2 s connect, 5 s total). UnifiedPush is the one exception: it builds its own via `UnifiedPushService::build_client()`, identical except that redirects and environment-configured proxies are refused. Its endpoint URL is attacker-supplied, and the SSRF guard only inspects the first hop.
 - **Rate limiting**: `governor 0.6` (already approved, dual-keyed limiter).
 - **Privacy hash**: `blake3` (salted truncated keyed hash for log correlators).
@@ -45,6 +45,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 
 - **Dispatch path is lock-free.** `PushDispatcher` (`src/push/dispatcher.rs`) owns an immutable `Arc<[Arc<dyn PushService>]>`. Do NOT add a `Mutex` around the dispatcher or its services slice.
 - **`/api/notify` spawn pile is capped at 50 permits.** This is intentionally distinct from `fly.toml`'s `hard_limit = 25` (inbound TCP connections vs in-flight outbound dispatch tasks).
+- **Listener dispatch is spawned, not awaited inline.** `EventHandler::handle` in `src/nostr/listener.rs` takes a permit from its own `Semaphore(50)` with `try_acquire_owned` (drops the push with a `warn!` when saturated; never `acquire().await`) and runs the push in a `tokio::spawn` task. Awaiting `dispatch` or a permit inside the notification loop would let one slow FCM/UnifiedPush call (UnifiedPush endpoints are registrant-chosen) stall events from every relay and overflow nostr-sdk's 4096-slot notification channel, which drops events without logging them.
 - **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so callers do not hold a guard across `await`.
 - **Per-IP key fail-closed.** If `extract_client_ip` fails, the middleware returns `500`. Never share a global bucket — that defeats per-IP rate limiting.
 - **`NOTIFY_TRUST_PROXY_HEADERS` defaults to `false`.** Set it to `true` only when a trusted proxy (e.g. Fly.io edge) overwrites `Fly-Client-IP` / `X-Forwarded-For`. Otherwise an attacker rotates those headers per request and bypasses the per-IP limiter.
