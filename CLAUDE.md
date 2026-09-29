@@ -33,9 +33,14 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 
    **Exception (off by default):** when `TRUSTED_WHITELIST_ENABLED=true` AND the embedded whitelist is non-empty, `/api/register` MAY return a new `403 Forbidden` with one of two distinct bodies — `{"success":false,"message":"Mostro instance pubkey required"}` (missing field) or `{"success":false,"message":"Mostro instance not trusted"}` (untrusted value). The flag defaults to `false` precisely so the byte-identical fixture set continues to hold for clients that pre-date the feature; only flip it after the mobile rollout.
 
-   **Exception (always on):** `/api/register` and `/api/unregister` are wrapped by `register_ip_rate_limit_mw` and MAY return `429 Too Many Requests` with the shared `rate_limited_response` body — `{"success":false,"message":"rate limited"}` plus a `Retry-After` header in whole seconds, `.max(1)` — or `500 Internal Server Error` with `{"success":false,"message":"internal error"}` when the per-IP key cannot be extracted (fail-closed, same rule as `/api/notify`). Both bodies keep the `success, message` field order. The `200` and `400` bodies are unchanged, so the pre-1.1 fixture set still holds for every request that is not rate-limited.
+   **Exception (always on):** `/api/register` and `/api/unregister` are wrapped by `register_ip_rate_limit_mw` and MAY return `429 Too Many Requests` with the shared `rate_limited_response` body — `{"success":false,"message":"rate limited"}` plus a `Retry-After` header in whole seconds, `.max(1)` — or `500 Internal Server Error` with `{"success":false,"message":"internal error"}` when the per-IP key cannot be extracted (fail-closed, same rule as `/api/notify`). `/api/register` also returns that same `429` body when the token store is full (`MAX_TOKENS`) and the `trade_pubkey` is new; refreshing an existing registration is always accepted. `/api/unregister` returns that same `500` body when the persisted row cannot be deleted: the registration is left untouched rather than acknowledged and restored on the next restart. Both bodies keep the `success, message` field order. The `200` and `400` bodies are unchanged, so the pre-1.1 fixture set still holds for every request that is not rate-limited.
 
-4. **Token store is in-memory only.** No persistence to disk for `trade_pubkey -> device_token`. UnifiedPush endpoints are the only on-disk state (atomic JSON write to `data/unifiedpush_endpoints.json`).
+4. **Persisted registrations are minimal, encrypted and short-lived.** With `TOKEN_STORE_PATH` set, `src/store/sqlite.rs` mirrors the in-memory map to SQLite so registrations survive restarts; without it the store is in-memory only. The rules below are the privacy contract of that file:
+   - Only live registrations are kept: rows expire with the TTL, are deleted on `unregister`, and are purged at startup. Deletion is real (`secure_delete = ON`, WAL truncated after each cleanup).
+   - `trade_pubkey` is stored in the clear (it is public on the relays); the device token is sealed with ChaCha20-Poly1305 (`src/store/cipher.rs`) under a key derived from `TOKEN_STORE_KEY`, with a **random nonce per row** so rows of one device cannot be grouped, and `trade_pubkey` as associated data.
+   - `TOKEN_STORE_KEY` never touches the disk or the logs (`config::Secret` redacts it in `Debug`). A changed key is detected through a stored fingerprint and wipes the rows instead of failing.
+   - Reads (listener, `/api/notify`) are served from memory and never touch the disk.
+   - The Fly volume holding the file has scheduled snapshots disabled. UnifiedPush endpoints are the other on-disk state (atomic JSON write to `data/unifiedpush_endpoints.json`).
 
 5. **Logs never carry raw pubkeys.** Every log site that touches a `trade_pubkey` goes through `crate::utils::log_pubkey::log_pubkey(salt, pubkey)`. The salt is a 32-byte random value generated once per process and never persisted.
 
@@ -46,7 +51,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 - **Dispatch path is lock-free.** `PushDispatcher` (`src/push/dispatcher.rs`) owns an immutable `Arc<[Arc<dyn PushService>]>`. Do NOT add a `Mutex` around the dispatcher or its services slice.
 - **`/api/notify` spawn pile is capped at 50 permits.** This is intentionally distinct from `fly.toml`'s `hard_limit = 25` (inbound TCP connections vs in-flight outbound dispatch tasks).
 - **Listener dispatch is spawned, not awaited inline.** `EventHandler::handle` in `src/nostr/listener.rs` takes a permit from its own `Semaphore(50)` with `try_acquire_owned` (drops the push with a `warn!` when saturated; never `acquire().await`) and runs the push in a `tokio::spawn` task. Awaiting `dispatch` or a permit inside the notification loop would let one slow FCM/UnifiedPush call (UnifiedPush endpoints are registrant-chosen) stall events from every relay and overflow nostr-sdk's 4096-slot notification channel, which drops events without logging them.
-- **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so callers do not hold a guard across `await`.
+- **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so callers do not hold a guard across `await`. Mutations take the separate `write_order` mutex across the in-memory change and its SQLite write, so the database sees changes in memory order while readers never wait on the disk.
 - **Per-IP key fail-closed.** If `extract_client_ip` fails, the middleware returns `500`. Never share a global bucket — that defeats per-IP rate limiting.
 - **`NOTIFY_TRUST_PROXY_HEADERS` defaults to `false`.** Set it to `true` only when a trusted proxy (e.g. Fly.io edge) overwrites `Fly-Client-IP` / `X-Forwarded-For`. Otherwise an attacker rotates those headers per request and bypasses the per-IP limiter.
 
@@ -78,7 +83,10 @@ src/
 │   ├── endpoint_guard.rs # SSRF guard for UnifiedPush endpoint URLs
 │   ├── fcm.rs           # FCM v1, OAuth2 service-account JWT
 │   └── unifiedpush.rs   # UnifiedPush backend, persistent endpoint store
-├── store/mod.rs         # In-memory TokenStore + TTL cleanup
+├── store/
+│   ├── mod.rs           # TokenStore (in-memory map, TTL cleanup, MAX_TOKENS cap)
+│   ├── sqlite.rs        # Optional SQLite persistence (TOKEN_STORE_PATH)
+│   └── cipher.rs        # Device-token encryption at rest (TOKEN_STORE_KEY)
 ├── crypto/mod.rs        # Reserved (gated #[allow(dead_code)])
 └── utils/
     ├── log_pubkey.rs    # Salted BLAKE3 keyed hash

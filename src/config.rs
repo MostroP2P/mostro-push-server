@@ -1,6 +1,7 @@
 use log::info;
 use serde::Deserialize;
 use std::env;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -83,6 +84,32 @@ pub struct CryptoConfig {
 pub struct StoreConfig {
     pub token_ttl_hours: u64,
     pub cleanup_interval_hours: u64,
+    /// `TOKEN_STORE_PATH`: SQLite file that persists registrations across
+    /// restarts. Unset keeps them in memory only.
+    pub path: Option<PathBuf>,
+    /// `TOKEN_STORE_KEY`: 32-byte hex key sealing the persisted device
+    /// tokens. Required when `path` is set.
+    pub key: Option<Secret>,
+    /// `MAX_TOKENS`: registrations accepted for new trade pubkeys.
+    pub max_tokens: usize,
+}
+
+/// A configuration value that must never reach a log. `Config` derives
+/// `Debug`, so this type prints as redacted instead of its content.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
 }
 
 impl Config {
@@ -91,6 +118,27 @@ impl Config {
             .split(',')
             .map(|s| s.trim().to_string())
             .collect();
+
+        let token_store_path = env::var("TOKEN_STORE_PATH")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from);
+        let token_store_key = env::var("TOKEN_STORE_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .map(Secret);
+        // Persisting without the key would either fail later or store tokens
+        // in the clear; refuse to start instead.
+        if token_store_path.is_some() && token_store_key.is_none() {
+            return Err("TOKEN_STORE_KEY must be set when TOKEN_STORE_PATH is".into());
+        }
+        let max_tokens: usize = match env::var("MAX_TOKENS") {
+            Ok(s) => s.parse()?,
+            Err(_) => crate::store::DEFAULT_MAX_TOKENS,
+        };
+        if max_tokens == 0 {
+            return Err("MAX_TOKENS must be > 0, got 0".into());
+        }
 
         Ok(Config {
             nostr: NostrConfig {
@@ -141,6 +189,9 @@ impl Config {
                 cleanup_interval_hours: env::var("CLEANUP_INTERVAL_HOURS")
                     .unwrap_or_else(|_| "1".to_string())
                     .parse()?,
+                path: token_store_path,
+                key: token_store_key,
+                max_tokens,
             },
             notify_rate_limit: NotifyRateLimitConfig {
                 per_pubkey_per_min: {
@@ -324,5 +375,59 @@ mod tests {
             config.push.fcm_enabled,
             "FCM_ENABLED MUST keep defaulting to true"
         );
+    }
+
+    #[test]
+    fn token_store_path_requires_a_key() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["TOKEN_STORE_PATH", "TOKEN_STORE_KEY", "NOSTR_RELAYS"]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::set_var("TOKEN_STORE_PATH", "/app/data/tokens.db");
+        std::env::remove_var("TOKEN_STORE_KEY");
+
+        let err = Config::from_env().expect_err("a store path without a key MUST be rejected");
+        assert!(err.to_string().contains("TOKEN_STORE_KEY must be set"));
+    }
+
+    #[test]
+    fn token_store_defaults_to_memory_only() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["TOKEN_STORE_PATH", "TOKEN_STORE_KEY", "NOSTR_RELAYS"]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::remove_var("TOKEN_STORE_PATH");
+        std::env::remove_var("TOKEN_STORE_KEY");
+
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
+        assert!(config.store.path.is_none());
+        assert!(config.store.key.is_none());
+    }
+
+    #[test]
+    fn token_store_key_never_appears_in_debug_output() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["TOKEN_STORE_PATH", "TOKEN_STORE_KEY", "NOSTR_RELAYS"]);
+        let key = "ab".repeat(32);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::set_var("TOKEN_STORE_PATH", "/app/data/tokens.db");
+        std::env::set_var("TOKEN_STORE_KEY", &key);
+
+        let config = Config::from_env().expect("path and key together MUST be accepted");
+        assert_eq!(config.store.key.as_ref().unwrap().expose(), key);
+        assert!(!format!("{:?}", config).contains(&key));
+    }
+
+    #[test]
+    fn max_tokens_defaults_and_rejects_zero() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["MAX_TOKENS", "NOSTR_RELAYS"]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        std::env::remove_var("MAX_TOKENS");
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
+        assert_eq!(config.store.max_tokens, crate::store::DEFAULT_MAX_TOKENS);
+
+        std::env::set_var("MAX_TOKENS", "0");
+        let err = Config::from_env().expect_err("MAX_TOKENS=0 MUST be rejected");
+        assert!(err.to_string().contains("MAX_TOKENS must be > 0"));
     }
 }

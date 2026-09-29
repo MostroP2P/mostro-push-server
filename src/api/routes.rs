@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
-use crate::api::rate_limit::{per_ip_rate_limit_mw, register_ip_rate_limit_mw, PerPubkeyLimiter};
+use crate::api::rate_limit::{
+    per_ip_rate_limit_mw, rate_limited_response, register_ip_rate_limit_mw, PerPubkeyLimiter,
+};
 use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::push::PushDispatcher;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
@@ -74,6 +76,10 @@ pub struct AppState {
 /// platform string, an optional 64-char Mostro pubkey and a device token of up
 /// to `MAX_TOKEN_BYTES`, with room to spare for whitespace and future fields.
 const MAX_REGISTER_BODY_BYTES: usize = 8 * 1024;
+
+/// `Retry-After` sent when the token store is full: entries expire on the
+/// hourly cleanup.
+const STORE_FULL_RETRY_AFTER_SECS: u64 = 3600;
 
 /// Upper bound on the JSON body accepted by /api/unregister.
 ///
@@ -306,14 +312,20 @@ async fn register_token(
     }
 
     // Store the token directly (no decryption in Phase 3)
-    state
+    if state
         .token_store
         .register(
             req.trade_pubkey.clone(),
             req.token.clone(),
             platform.clone(),
         )
-        .await;
+        .await
+        .is_err()
+    {
+        // Same body and header as the per-IP limiter, so the response contract
+        // gains no new shape. Space frees up as the cleanup expires entries.
+        return rate_limited_response(STORE_FULL_RETRY_AFTER_SECS);
+    }
 
     info!(
         "Successfully registered {} token pk={}",
@@ -346,7 +358,15 @@ async fn unregister_token(
         }));
     }
 
-    let removed = state.token_store.unregister(&req.trade_pubkey).await;
+    let Ok(removed) = state.token_store.unregister(&req.trade_pubkey).await else {
+        // The durable delete failed and the registration is still in place, so
+        // success would be a lie a restart exposes. Same body as the other
+        // fail-closed 500s, so the response contract gains no new shape.
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": "internal error"
+        }));
+    };
 
     if removed {
         HttpResponse::Ok().json(serde_json::json!({
@@ -1259,6 +1279,119 @@ mod tests {
                 StatusCode::BAD_REQUEST,
                 "{uri}: a compressed body must not be decompressed"
             );
+        }
+    }
+
+    /// A full store answers new pubkeys with the existing rate-limit body, so
+    /// the response contract gains no new shape, and still lets a device that
+    /// is already registered refresh its entry.
+    #[actix_web::test]
+    async fn register_on_a_full_store_returns_the_rate_limited_body() {
+        let mut c = make_test_components();
+        c.state.token_store = std::sync::Arc::new(
+            crate::store::TokenStore::new(48, c.state.notify_log_salt.clone()).with_max_tokens(1),
+        );
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let register = |pubkey: &str| {
+            atest::TestRequest::post()
+                .uri("/api/register")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({
+                    "trade_pubkey": pubkey,
+                    "token": "test_fcm_token",
+                    "platform": "android"
+                }))
+                .to_request()
+        };
+
+        let first = atest::call_service(&app, register(TEST_PUBKEY)).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let refused = atest::call_service(&app, register(TEST_PUBKEY_2)).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            refused.headers().get("Retry-After").unwrap(),
+            &super::STORE_FULL_RETRY_AFTER_SECS.to_string()
+        );
+        let body = atest::read_body(refused).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"rate limited"}"#
+        );
+
+        let refresh = atest::call_service(&app, register(TEST_PUBKEY)).await;
+        assert_eq!(refresh.status(), StatusCode::OK);
+    }
+
+    /// A durable delete that fails must not be acknowledged: the route answers
+    /// the existing fail-closed 500, the registration stays, and once the
+    /// fault clears the unregister succeeds and survives a restart.
+    #[actix_web::test]
+    async fn unregister_is_not_acknowledged_when_the_durable_delete_fails() {
+        use crate::store::cipher::TokenCipher;
+        use crate::store::sqlite::SqliteStore;
+        use crate::store::TokenStore;
+
+        const KEY: &str = "0303030303030303030303030303030303030303030303030303030303030303";
+        let path = std::env::temp_dir().join(format!(
+            "mostro-push-route-test-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let open_store = || {
+            let db = SqliteStore::open(&path, TokenCipher::from_hex(KEY).unwrap()).unwrap();
+            TokenStore::persistent(48, std::sync::Arc::new([1u8; 32]), db)
+                .unwrap()
+                .0
+        };
+        let sql = |statement: &str| {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute_batch(statement)
+                .unwrap();
+        };
+
+        let mut c = make_test_components();
+        c.state.token_store = std::sync::Arc::new(open_store());
+        let store = c.state.token_store.clone();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let unregister = || {
+            atest::TestRequest::post()
+                .uri("/api/unregister")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({ "trade_pubkey": TEST_PUBKEY }))
+                .to_request()
+        };
+        store
+            .register(
+                TEST_PUBKEY.into(),
+                "test_fcm_token".into(),
+                Platform::Android,
+            )
+            .await
+            .unwrap();
+
+        sql("CREATE TRIGGER fail_delete BEFORE DELETE ON tokens
+             BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;");
+        let failed = atest::call_service(&app, unregister()).await;
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = atest::read_body(failed).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"internal error"}"#
+        );
+        assert!(store.get(TEST_PUBKEY).await.is_some());
+
+        sql("DROP TRIGGER fail_delete;");
+        let ok = atest::call_service(&app, unregister()).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        drop(app);
+        drop(store);
+
+        let restarted = open_store();
+        assert!(restarted.get(TEST_PUBKEY).await.is_none());
+        drop(restarted);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
     }
 }

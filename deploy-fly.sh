@@ -10,9 +10,15 @@ REQUIRED_SECRETS=(
   NOSTR_RELAYS
   SERVER_PRIVATE_KEY
   FIREBASE_PROJECT_ID
+  TOKEN_STORE_KEY
 )
 
 FLY_CONFIG="${FLY_CONFIG:-fly.toml}"
+
+# fly.toml mounts this volume for the persisted token store. Without it the
+# deploy fails, and a volume created implicitly would keep scheduled snapshots
+# (copies of expired and unregistered rows), so it must exist beforehand.
+VOLUME_NAME="${FLY_VOLUME_NAME:-push_data}"
 
 # The Firebase credential no longer ships inside the image, so it must arrive at
 # runtime. On Fly a secret already *is* an environment variable, so the inline
@@ -69,6 +75,11 @@ if (( ${#missing_secrets[@]} > 0 )); then
     echo "Missing required Fly secrets for ${APP_NAME}:" >&2
     printf '  - %s\n' "${missing_secrets[@]}" >&2
     echo "Set them with flyctl secrets set before deploying. See docs/deployment.md." >&2
+    if printf '%s\n' "${missing_secrets[@]}" | grep -qx TOKEN_STORE_KEY; then
+        echo "TOKEN_STORE_KEY: generate it with 'openssl rand -hex 32' and set it with" >&2
+        echo "  flyctl secrets set --stage TOKEN_STORE_KEY=<key> -a ${APP_NAME}" >&2
+        echo "--stage stores it without restarting the running machine." >&2
+    fi
     exit 1
 fi
 
@@ -92,6 +103,20 @@ if [[ "${credential_present}" != true ]]; then
         echo "through [[files]], re-run with FLY_ALLOW_CREDENTIAL_PATH=1." >&2
     fi
     echo "The credential is no longer baked into the image. See docs/deployment.md." >&2
+    exit 1
+fi
+
+echo "Checking the token store volume..."
+
+if ! volumes_json="$(flyctl volumes list -a "${APP_NAME}" --json)"; then
+    die "failed to list Fly volumes for ${APP_NAME}"
+fi
+
+if ! grep -Eq "\"name\": *\"${VOLUME_NAME}\"" <<< "${volumes_json}"; then
+    region="$(awk -F"'" '/^primary_region/ { print $2 }' "${FLY_CONFIG}")"
+    echo "Fly volume ${VOLUME_NAME} does not exist for ${APP_NAME}." >&2
+    echo "The token store persists on it. Create it once with:" >&2
+    echo "  flyctl volumes create ${VOLUME_NAME} --region ${region:-<region>} --size 1 --scheduled-snapshots=false -a ${APP_NAME}" >&2
     exit 1
 fi
 
