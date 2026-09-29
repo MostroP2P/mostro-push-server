@@ -9,6 +9,18 @@ primary_region = 'gru'
 [build]
   dockerfile = 'Dockerfile'
 
+# Registrations survive restarts only on this volume. Create it once, before
+# the first deploy, with scheduled snapshots off so no copy of expired or
+# unregistered rows outlives them (see docs/deployment.md):
+#   flyctl volumes create push_data --region gru --size 1 --scheduled-snapshots=false
+[mounts]
+  source = 'push_data'
+  destination = '/app/data'
+
+[env]
+  # Requires the TOKEN_STORE_KEY secret; the server refuses to start without it.
+  TOKEN_STORE_PATH = '/app/data/tokens.db'
+
 [http_service]
   internal_port = 8080
   force_https = true

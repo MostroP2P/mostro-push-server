@@ -27,9 +27,11 @@ RUN groupadd --system --gid 10001 mostro \
        --uid 10001 --gid 10001 mostro
 
 COPY --from=builder /usr/src/app/target/release/mostro-push-backend /usr/local/bin/
+COPY docker-entrypoint.sh /usr/local/bin/
 
-# The token store is in memory, so the only thing the process ever writes is
-# the UnifiedPush endpoint file, resolved relative to the working directory.
+# The process writes only under /app/data: the persisted token store
+# (TOKEN_STORE_PATH) and the UnifiedPush endpoint file, the latter resolved
+# relative to the working directory.
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R 10001:10001 /app
 
@@ -41,9 +43,12 @@ RUN mkdir -p /app/data && chown -R 10001:10001 /app
 
 ENV RUST_LOG=info
 
-USER 10001:10001
+# No `USER` here: a volume mounted on /app/data is owned by root, so the
+# entrypoint starts as root, hands that directory to UID 10001 and then runs
+# the server as 10001 through setpriv (util-linux, already in the base image).
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${SERVER_PORT:-8080}/api/health" || exit 1
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["mostro-push-backend"]
