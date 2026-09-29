@@ -358,7 +358,15 @@ async fn unregister_token(
         }));
     }
 
-    let removed = state.token_store.unregister(&req.trade_pubkey).await;
+    let Ok(removed) = state.token_store.unregister(&req.trade_pubkey).await else {
+        // The durable delete failed and the registration is still in place, so
+        // success would be a lie a restart exposes. Same body as the other
+        // fail-closed 500s, so the response contract gains no new shape.
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": "internal error"
+        }));
+    };
 
     if removed {
         HttpResponse::Ok().json(serde_json::json!({
@@ -1313,5 +1321,77 @@ mod tests {
 
         let refresh = atest::call_service(&app, register(TEST_PUBKEY)).await;
         assert_eq!(refresh.status(), StatusCode::OK);
+    }
+
+    /// A durable delete that fails must not be acknowledged: the route answers
+    /// the existing fail-closed 500, the registration stays, and once the
+    /// fault clears the unregister succeeds and survives a restart.
+    #[actix_web::test]
+    async fn unregister_is_not_acknowledged_when_the_durable_delete_fails() {
+        use crate::store::cipher::TokenCipher;
+        use crate::store::sqlite::SqliteStore;
+        use crate::store::TokenStore;
+
+        const KEY: &str = "0303030303030303030303030303030303030303030303030303030303030303";
+        let path = std::env::temp_dir().join(format!(
+            "mostro-push-route-test-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let open_store = || {
+            let db = SqliteStore::open(&path, TokenCipher::from_hex(KEY).unwrap()).unwrap();
+            TokenStore::persistent(48, std::sync::Arc::new([1u8; 32]), db)
+                .unwrap()
+                .0
+        };
+        let sql = |statement: &str| {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute_batch(statement)
+                .unwrap();
+        };
+
+        let mut c = make_test_components();
+        c.state.token_store = std::sync::Arc::new(open_store());
+        let store = c.state.token_store.clone();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let unregister = || {
+            atest::TestRequest::post()
+                .uri("/api/unregister")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({ "trade_pubkey": TEST_PUBKEY }))
+                .to_request()
+        };
+        store
+            .register(
+                TEST_PUBKEY.into(),
+                "test_fcm_token".into(),
+                Platform::Android,
+            )
+            .await
+            .unwrap();
+
+        sql("CREATE TRIGGER fail_delete BEFORE DELETE ON tokens
+             BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;");
+        let failed = atest::call_service(&app, unregister()).await;
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = atest::read_body(failed).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"internal error"}"#
+        );
+        assert!(store.get(TEST_PUBKEY).await.is_some());
+
+        sql("DROP TRIGGER fail_delete;");
+        let ok = atest::call_service(&app, unregister()).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        drop(app);
+        drop(store);
+
+        let restarted = open_store();
+        assert!(restarted.get(TEST_PUBKEY).await.is_none());
+        drop(restarted);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 }

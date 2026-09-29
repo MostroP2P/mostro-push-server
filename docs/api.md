@@ -160,7 +160,7 @@ Request:
 { "trade_pubkey": "<64-char hex>" }
 ```
 
-Always `200 OK` on parse-valid input. The body distinguishes "removed" vs "was not registered":
+`200 OK` on parse-valid input. The body distinguishes "removed" vs "was not registered":
 
 ```json
 { "success": true, "message": "Token unregistered successfully" }
@@ -169,6 +169,8 @@ Always `200 OK` on parse-valid input. The body distinguishes "removed" vs "was n
 ```json
 { "success": true, "message": "Token not found (may have already been unregistered)" }
 ```
+
+With persistence enabled, the row is deleted from disk before memory. If that deletion fails, nothing is changed and the endpoint answers `500` with `{"success":false,"message":"internal error"}` rather than acknowledging an unregister that the next restart would undo. Retry once the store recovers.
 
 ## POST /api/notify
 
@@ -231,7 +233,7 @@ curl -i -X POST http://localhost:8080/api/notify \
 | 202    | `/api/notify` on parse-valid input                                            |
 | 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint |
 | 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits; `/api/register` when the token store is full |
-| 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted   |
+| 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted; `/api/unregister` when the persisted row cannot be deleted |
 
 ### Push endpoint validation
 

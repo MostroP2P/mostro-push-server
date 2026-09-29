@@ -50,7 +50,7 @@ Maps `trade_pubkey -> RegisteredToken { device_token, platform, registered_at }`
 Reads always come from memory. With `TOKEN_STORE_PATH` set, `store/sqlite.rs` mirrors the map to SQLite so registrations survive restarts:
 
 - **Startup:** check the key fingerprint (wipe every row if the key changed), delete expired rows, decrypt the rest into memory, drop rows that cannot be read.
-- **Register / unregister / cleanup:** the in-memory change and its SQLite write run under the `write_order` mutex, so the file sees changes in the same order as memory. A failed write is logged and the registration keeps working from memory until the next restart.
+- **Register / unregister / cleanup:** the in-memory change and its SQLite write run under the `write_order` mutex, so the file sees changes in the same order as memory. A failed register or cleanup write is logged and heals on its own (the client re-registers; expired rows are purged at startup). An unregister deletes from disk first and, if that fails, changes nothing and answers `500`, since a restart would otherwise restore an acknowledged opt-out.
 - **Row format:** `trade_pubkey` in the clear; the device token sealed by `store/cipher.rs` (ChaCha20-Poly1305, key derived with HKDF from `TOKEN_STORE_KEY`, random nonce per row, `trade_pubkey` as associated data).
 - **Deletion:** `secure_delete` zeroes deleted rows and every cleanup truncates the WAL.
 

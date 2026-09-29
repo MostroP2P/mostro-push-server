@@ -146,28 +146,34 @@ impl TokenStore {
         Ok(())
     }
 
-    pub async fn unregister(&self, trade_pubkey: &str) -> bool {
+    /// Removes `trade_pubkey` and reports whether it was registered.
+    ///
+    /// With persistence the row is deleted from disk first. If that fails,
+    /// memory is left untouched and the error is returned: acknowledging the
+    /// unregister anyway would let the next restart restore the registration.
+    pub async fn unregister(&self, trade_pubkey: &str) -> Result<bool, PersistError> {
         let _order = self.write_order.lock().await;
+        let log_pk = log_pubkey(&self.log_salt, trade_pubkey);
+
+        if let Some(db) = &self.persistence {
+            // Deleted even when absent from memory, so no stale row survives.
+            if let Err(e) = db.delete(trade_pubkey.to_string()).await {
+                error!("Failed to delete persisted token pk={}: {}", log_pk, e);
+                return Err(e);
+            }
+        }
+
         let (removed, total) = {
             let mut tokens = self.tokens.write().await;
             (tokens.remove(trade_pubkey).is_some(), tokens.len())
         };
-        let log_pk = log_pubkey(&self.log_salt, trade_pubkey);
-
         if removed {
             info!("Unregistered token pk={} (total: {})", log_pk, total);
         } else {
             debug!("Token not found pk={}", log_pk);
         }
 
-        if let Some(db) = &self.persistence {
-            // Deleted even when absent from memory, so no stale row survives.
-            if let Err(e) = db.delete(trade_pubkey.to_string()).await {
-                error!("Failed to delete persisted token pk={}: {}", log_pk, e);
-            }
-        }
-
-        removed
+        Ok(removed)
     }
 
     pub async fn get(&self, trade_pubkey: &str) -> Option<RegisteredToken> {
@@ -366,7 +372,7 @@ mod tests {
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
                 .await
                 .unwrap();
-            assert!(store.unregister(PK_A).await);
+            assert!(store.unregister(PK_A).await.unwrap());
         }
 
         let (store, report) = open(&db, KEY, 48);
@@ -502,7 +508,7 @@ mod tests {
                 .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
                 .await
                 .unwrap();
-            store.unregister(PK_A).await;
+            store.unregister(PK_A).await.unwrap();
         }
         // Reopening checkpoints the WAL into the file.
         drop(open(&db, KEY, 48));
@@ -520,7 +526,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.get(PK_A).await.unwrap().device_token, TOKEN_A);
-        assert!(store.unregister(PK_A).await);
+        assert!(store.unregister(PK_A).await.unwrap());
         assert!(store.get(PK_A).await.is_none());
     }
 
@@ -548,7 +554,7 @@ mod tests {
         assert_eq!(store.get(PK_A).await.unwrap().device_token, TOKEN_B);
 
         // Unregistering frees the slot.
-        store.unregister(PK_A).await;
+        store.unregister(PK_A).await.unwrap();
         store
             .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
             .await
@@ -575,5 +581,47 @@ mod tests {
 
         assert_eq!(report.restored, 1);
         assert!(store.get(PK_B).await.is_none());
+    }
+
+    /// Makes every DELETE on `tokens` fail, like a full or failing disk.
+    fn inject_delete_failure(db: &TempDb) {
+        rusqlite::Connection::open(&db.0)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_delete BEFORE DELETE ON tokens
+                 BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END;",
+            )
+            .unwrap();
+    }
+
+    fn clear_delete_failure(db: &TempDb) {
+        rusqlite::Connection::open(&db.0)
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_delete;")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_durable_delete_is_reported_and_changes_nothing() {
+        let db = TempDb::new();
+        let (store, _) = open(&db, KEY, 48);
+        store
+            .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
+            .await
+            .unwrap();
+
+        inject_delete_failure(&db);
+        assert!(store.unregister(PK_A).await.is_err());
+        // Still registered, in memory and on disk, so nothing claimed a
+        // deletion that a restart would undo.
+        assert!(store.get(PK_A).await.is_some());
+
+        clear_delete_failure(&db);
+        assert!(store.unregister(PK_A).await.unwrap());
+        drop(store);
+
+        let (store, report) = open(&db, KEY, 48);
+        assert_eq!(report.restored, 0);
+        assert!(store.get(PK_A).await.is_none());
     }
 }
