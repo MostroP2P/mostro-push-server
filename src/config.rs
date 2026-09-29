@@ -90,6 +90,8 @@ pub struct StoreConfig {
     /// `TOKEN_STORE_KEY`: 32-byte hex key sealing the persisted device
     /// tokens. Required when `path` is set.
     pub key: Option<Secret>,
+    /// `MAX_TOKENS`: registrations accepted for new trade pubkeys.
+    pub max_tokens: usize,
 }
 
 /// A configuration value that must never reach a log. `Config` derives
@@ -129,6 +131,13 @@ impl Config {
         // in the clear; refuse to start instead.
         if token_store_path.is_some() && token_store_key.is_none() {
             return Err("TOKEN_STORE_KEY must be set when TOKEN_STORE_PATH is".into());
+        }
+        let max_tokens: usize = match env::var("MAX_TOKENS") {
+            Ok(s) => s.parse()?,
+            Err(_) => crate::store::DEFAULT_MAX_TOKENS,
+        };
+        if max_tokens == 0 {
+            return Err("MAX_TOKENS must be > 0, got 0".into());
         }
 
         Ok(Config {
@@ -182,6 +191,7 @@ impl Config {
                     .parse()?,
                 path: token_store_path,
                 key: token_store_key,
+                max_tokens,
             },
             notify_rate_limit: NotifyRateLimitConfig {
                 per_pubkey_per_min: {
@@ -404,5 +414,20 @@ mod tests {
         let config = Config::from_env().expect("path and key together MUST be accepted");
         assert_eq!(config.store.key.as_ref().unwrap().expose(), key);
         assert!(!format!("{:?}", config).contains(&key));
+    }
+
+    #[test]
+    fn max_tokens_defaults_and_rejects_zero() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["MAX_TOKENS", "NOSTR_RELAYS"]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        std::env::remove_var("MAX_TOKENS");
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
+        assert_eq!(config.store.max_tokens, crate::store::DEFAULT_MAX_TOKENS);
+
+        std::env::set_var("MAX_TOKENS", "0");
+        let err = Config::from_env().expect_err("MAX_TOKENS=0 MUST be rejected");
+        assert!(err.to_string().contains("MAX_TOKENS must be > 0"));
     }
 }

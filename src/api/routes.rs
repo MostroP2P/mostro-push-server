@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::notify::{notify_token, request_id_mw};
-use crate::api::rate_limit::{per_ip_rate_limit_mw, register_ip_rate_limit_mw, PerPubkeyLimiter};
+use crate::api::rate_limit::{
+    per_ip_rate_limit_mw, rate_limited_response, register_ip_rate_limit_mw, PerPubkeyLimiter,
+};
 use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::push::PushDispatcher;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
@@ -74,6 +76,10 @@ pub struct AppState {
 /// platform string, an optional 64-char Mostro pubkey and a device token of up
 /// to `MAX_TOKEN_BYTES`, with room to spare for whitespace and future fields.
 const MAX_REGISTER_BODY_BYTES: usize = 8 * 1024;
+
+/// `Retry-After` sent when the token store is full: entries expire on the
+/// hourly cleanup.
+const STORE_FULL_RETRY_AFTER_SECS: u64 = 3600;
 
 /// Upper bound on the JSON body accepted by /api/unregister.
 ///
@@ -306,14 +312,20 @@ async fn register_token(
     }
 
     // Store the token directly (no decryption in Phase 3)
-    state
+    if state
         .token_store
         .register(
             req.trade_pubkey.clone(),
             req.token.clone(),
             platform.clone(),
         )
-        .await;
+        .await
+        .is_err()
+    {
+        // Same body and header as the per-IP limiter, so the response contract
+        // gains no new shape. Space frees up as the cleanup expires entries.
+        return rate_limited_response(STORE_FULL_RETRY_AFTER_SECS);
+    }
 
     info!(
         "Successfully registered {} token pk={}",
@@ -1260,5 +1272,46 @@ mod tests {
                 "{uri}: a compressed body must not be decompressed"
             );
         }
+    }
+
+    /// A full store answers new pubkeys with the existing rate-limit body, so
+    /// the response contract gains no new shape, and still lets a device that
+    /// is already registered refresh its entry.
+    #[actix_web::test]
+    async fn register_on_a_full_store_returns_the_rate_limited_body() {
+        let mut c = make_test_components();
+        c.state.token_store = std::sync::Arc::new(
+            crate::store::TokenStore::new(48, c.state.notify_log_salt.clone()).with_max_tokens(1),
+        );
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let register = |pubkey: &str| {
+            atest::TestRequest::post()
+                .uri("/api/register")
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json(serde_json::json!({
+                    "trade_pubkey": pubkey,
+                    "token": "test_fcm_token",
+                    "platform": "android"
+                }))
+                .to_request()
+        };
+
+        let first = atest::call_service(&app, register(TEST_PUBKEY)).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let refused = atest::call_service(&app, register(TEST_PUBKEY_2)).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            refused.headers().get("Retry-After").unwrap(),
+            &super::STORE_FULL_RETRY_AFTER_SECS.to_string()
+        );
+        let body = atest::read_body(refused).await;
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"success":false,"message":"rate limited"}"#
+        );
+
+        let refresh = atest::call_service(&app, register(TEST_PUBKEY)).await;
+        assert_eq!(refresh.status(), StatusCode::OK);
     }
 }

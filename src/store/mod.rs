@@ -45,7 +45,26 @@ pub struct TokenStore {
     /// and unregister calls reach the database in the order they changed
     /// memory. Readers only take `tokens` and never wait on the disk.
     write_order: Mutex<()>,
+    /// Registrations accepted for new trade pubkeys. Bounds memory and disk
+    /// use against unauthenticated floods of made-up pubkeys.
+    max_tokens: usize,
 }
+
+/// Default for `MAX_TOKENS`, well above the ~800 live registrations seen in
+/// production.
+pub const DEFAULT_MAX_TOKENS: usize = 50_000;
+
+/// A new trade pubkey was refused because the store holds `max_tokens`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StoreFull;
+
+impl std::fmt::Display for StoreFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "token store is full")
+    }
+}
+
+impl std::error::Error for StoreFull {}
 
 impl TokenStore {
     /// In-memory store: registrations are lost on restart.
@@ -56,6 +75,7 @@ impl TokenStore {
             log_salt,
             persistence: None,
             write_order: Mutex::new(()),
+            max_tokens: DEFAULT_MAX_TOKENS,
         }
     }
 
@@ -74,24 +94,47 @@ impl TokenStore {
             log_salt,
             persistence: Some(db),
             write_order: Mutex::new(()),
+            max_tokens: DEFAULT_MAX_TOKENS,
         };
         Ok((store, report))
     }
 
-    pub async fn register(&self, trade_pubkey: String, device_token: String, platform: Platform) {
+    /// Caps registrations for new trade pubkeys; see [`StoreFull`].
+    pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Registers or refreshes `trade_pubkey`. Refreshing an existing entry is
+    /// always accepted, so a full store never cuts off a device already
+    /// registered; only new pubkeys are refused.
+    pub async fn register(
+        &self,
+        trade_pubkey: String,
+        device_token: String,
+        platform: Platform,
+    ) -> Result<(), StoreFull> {
         let token = RegisteredToken {
             device_token,
             platform,
             registered_at: Utc::now(),
         };
+        let log_pk = log_pubkey(&self.log_salt, &trade_pubkey);
 
         let _order = self.write_order.lock().await;
         let total = {
             let mut tokens = self.tokens.write().await;
+            if tokens.len() >= self.max_tokens && !tokens.contains_key(&trade_pubkey) {
+                warn!(
+                    "Token store full ({} entries), refusing pk={}",
+                    tokens.len(),
+                    log_pk
+                );
+                return Err(StoreFull);
+            }
             tokens.insert(trade_pubkey.clone(), token.clone());
             tokens.len()
         };
-        let log_pk = log_pubkey(&self.log_salt, &trade_pubkey);
         info!("Registered token pk={} (total: {})", log_pk, total);
 
         if let Some(db) = &self.persistence {
@@ -100,6 +143,7 @@ impl TokenStore {
                 error!("Failed to persist token pk={}: {}", log_pk, e);
             }
         }
+        Ok(())
     }
 
     pub async fn unregister(&self, trade_pubkey: &str) -> bool {
@@ -273,10 +317,12 @@ mod tests {
             let (store, _) = open(&db, KEY, 48);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             store
                 .register(PK_B.into(), TOKEN_B.into(), Platform::Ios)
-                .await;
+                .await
+                .unwrap();
         }
 
         let (store, report) = open(&db, KEY, 48);
@@ -297,10 +343,12 @@ mod tests {
             let (store, _) = open(&db, KEY, 48);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             store
                 .register(PK_A.into(), TOKEN_B.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
         }
 
         let (store, report) = open(&db, KEY, 48);
@@ -316,7 +364,8 @@ mod tests {
             let (store, _) = open(&db, KEY, 48);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             assert!(store.unregister(PK_A).await);
         }
 
@@ -361,7 +410,8 @@ mod tests {
             let (store, _) = open(&db, KEY, 0);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
             assert_eq!(store.cleanup_expired().await, 1);
         }
@@ -379,7 +429,8 @@ mod tests {
             let (store, _) = open(&db, KEY, 48);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
         }
 
         let (store, report) = open(&db, OTHER_KEY, 48);
@@ -400,10 +451,12 @@ mod tests {
             let (store, _) = open(&db, KEY, 48);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             store
                 .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
         }
         rusqlite::Connection::open(&db.0)
             .unwrap()
@@ -427,7 +480,8 @@ mod tests {
         let (store, _) = open(&db, KEY, 48);
         store
             .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-            .await;
+            .await
+            .unwrap();
 
         // Checked while the connection is open, WAL included.
         assert!(!contains(&db.all_bytes(), TOKEN_A));
@@ -442,10 +496,12 @@ mod tests {
             let (store, _) = open(&db, KEY, 48);
             store
                 .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             store
                 .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
-                .await;
+                .await
+                .unwrap();
             store.unregister(PK_A).await;
         }
         // Reopening checkpoints the WAL into the file.
@@ -461,9 +517,63 @@ mod tests {
         let store = TokenStore::new(48, salt());
         store
             .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
-            .await;
+            .await
+            .unwrap();
         assert_eq!(store.get(PK_A).await.unwrap().device_token, TOKEN_A);
         assert!(store.unregister(PK_A).await);
         assert!(store.get(PK_A).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_full_store_refuses_new_pubkeys_but_accepts_refreshes() {
+        let store = TokenStore::new(48, salt()).with_max_tokens(1);
+        store
+            .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
+                .await,
+            Err(StoreFull)
+        );
+        assert!(store.get(PK_B).await.is_none());
+
+        // A registered device can always refresh, even with the store full.
+        store
+            .register(PK_A.into(), TOKEN_B.into(), Platform::Android)
+            .await
+            .unwrap();
+        assert_eq!(store.get(PK_A).await.unwrap().device_token, TOKEN_B);
+
+        // Unregistering frees the slot.
+        store.unregister(PK_A).await;
+        store
+            .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_is_not_persisted() {
+        let db = TempDb::new();
+        {
+            let (store, _) = open(&db, KEY, 48);
+            let store = store.with_max_tokens(1);
+            store
+                .register(PK_A.into(), TOKEN_A.into(), Platform::Android)
+                .await
+                .unwrap();
+            assert!(store
+                .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
+                .await
+                .is_err());
+        }
+
+        let (store, report) = open(&db, KEY, 48);
+
+        assert_eq!(report.restored, 1);
+        assert!(store.get(PK_B).await.is_none());
     }
 }

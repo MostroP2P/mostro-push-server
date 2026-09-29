@@ -323,14 +323,16 @@ mod tests {
                 SLOW_DEVICE.to_string(),
                 Platform::Android,
             )
-            .await;
+            .await
+            .unwrap();
         store
             .register(
                 fast_recipient.public_key().to_hex(),
                 FAST_DEVICE.to_string(),
                 Platform::Android,
             )
-            .await;
+            .await
+            .unwrap();
 
         Fixture {
             handler: EventHandler::new(dispatcher, store, salt, max_in_flight),

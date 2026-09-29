@@ -288,5 +288,6 @@ pub async fn register_test_pubkey(state: &AppState, pubkey: &str) {
             "test_fcm_token".to_string(),
             Platform::Android,
         )
-        .await;
+        .await
+        .unwrap();
 }

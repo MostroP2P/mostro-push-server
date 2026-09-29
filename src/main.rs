@@ -284,7 +284,8 @@ fn open_token_store(config: &config::StoreConfig, log_salt: Arc<[u8; 32]>) -> To
         log::warn!(
             "TOKEN_STORE_PATH not set: registrations are kept in memory only and lost on restart"
         );
-        return TokenStore::new(config.token_ttl_hours, log_salt);
+        return TokenStore::new(config.token_ttl_hours, log_salt)
+            .with_max_tokens(config.max_tokens);
     };
 
     let key = config
@@ -296,6 +297,7 @@ fn open_token_store(config: &config::StoreConfig, log_salt: Arc<[u8; 32]>) -> To
         .unwrap_or_else(|e| panic!("Failed to open token store {}: {}", path.display(), e));
     let (store, report) = TokenStore::persistent(config.token_ttl_hours, log_salt, db)
         .unwrap_or_else(|e| panic!("Failed to load token store {}: {}", path.display(), e));
+    let store = store.with_max_tokens(config.max_tokens);
 
     if report.key_changed {
         log::warn!("TOKEN_STORE_KEY changed: discarded every persisted registration");

@@ -247,6 +247,7 @@ mod tests {
                 cleanup_interval_hours: 1,
                 path: None,
                 key: None,
+                max_tokens: 50_000,
             },
             notify_rate_limit: NotifyRateLimitConfig {
                 per_pubkey_per_min: 30,
