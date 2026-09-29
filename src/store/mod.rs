@@ -7,6 +7,9 @@ use tokio::sync::RwLock;
 
 use crate::utils::log_pubkey::log_pubkey;
 
+#[allow(dead_code)]
+pub mod cipher;
+
 /// Platform identifier for push notifications
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Platform {
