@@ -245,6 +245,8 @@ mod tests {
             store: StoreConfig {
                 token_ttl_hours: 48,
                 cleanup_interval_hours: 1,
+                path: None,
+                key: None,
             },
             notify_rate_limit: NotifyRateLimitConfig {
                 per_pubkey_per_min: 30,

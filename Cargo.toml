@@ -75,6 +75,7 @@ jsonwebtoken = "9"
 
 # Identifiers
 uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 mockito = "1.2"

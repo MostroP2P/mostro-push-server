@@ -25,6 +25,8 @@ use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
 use push::{FcmPush, PushDispatcher, PushService, UnifiedPushService};
+use store::cipher::TokenCipher;
+use store::sqlite::SqliteStore;
 use store::TokenStore;
 
 #[actix_web::main]
@@ -51,10 +53,7 @@ async fn main() -> std::io::Result<()> {
     let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
 
     // Initialize token store
-    let token_store = Arc::new(TokenStore::new(
-        config.store.token_ttl_hours,
-        notify_log_salt.clone(),
-    ));
+    let token_store = Arc::new(open_token_store(&config.store, notify_log_salt.clone()));
 
     // Start cleanup task
     store::start_cleanup_task(token_store.clone(), config.store.cleanup_interval_hours);
@@ -275,4 +274,43 @@ async fn main() -> std::io::Result<()> {
     .bind(server_addr)?
     .run()
     .await
+}
+
+/// Opens the persistent store when `TOKEN_STORE_PATH` is set. A configured
+/// store that cannot be opened stops the server: running from memory instead
+/// would silently lose every registration on the next restart.
+fn open_token_store(config: &config::StoreConfig, log_salt: Arc<[u8; 32]>) -> TokenStore {
+    let Some(path) = &config.path else {
+        log::warn!(
+            "TOKEN_STORE_PATH not set: registrations are kept in memory only and lost on restart"
+        );
+        return TokenStore::new(config.token_ttl_hours, log_salt);
+    };
+
+    let key = config
+        .key
+        .as_ref()
+        .expect("Config::from_env requires TOKEN_STORE_KEY with TOKEN_STORE_PATH");
+    let cipher = TokenCipher::from_hex(key.expose()).expect("Invalid TOKEN_STORE_KEY");
+    let db = SqliteStore::open(path, cipher)
+        .unwrap_or_else(|e| panic!("Failed to open token store {}: {}", path.display(), e));
+    let (store, report) = TokenStore::persistent(config.token_ttl_hours, log_salt, db)
+        .unwrap_or_else(|e| panic!("Failed to load token store {}: {}", path.display(), e));
+
+    if report.key_changed {
+        log::warn!("TOKEN_STORE_KEY changed: discarded every persisted registration");
+    }
+    if report.discarded > 0 {
+        log::warn!(
+            "Discarded {} unreadable persisted registrations",
+            report.discarded
+        );
+    }
+    info!(
+        "Token store persisted at {} ({} restored, {} expired removed)",
+        path.display(),
+        report.restored,
+        report.expired
+    );
+    store
 }
