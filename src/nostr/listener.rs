@@ -1,11 +1,14 @@
 use futures::StreamExt;
+use governor::{Quota, RateLimiter};
 use log::{debug, error, info, warn};
 use nostr_sdk::prelude::*;
 use std::collections::HashSet;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 
+use crate::api::rate_limit::{start_keyed_limiter_cleanup_task, PerPubkeyLimiter};
 use crate::config::Config;
 use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
 use crate::store::{RegisteredToken, TokenStore};
@@ -14,6 +17,13 @@ use crate::utils::log_pubkey::log_pubkey;
 /// Upper bound on push dispatches the listener keeps in flight. Separate
 /// from the `/api/notify` semaphore so neither path can starve the other.
 const MAX_IN_FLIGHT_DISPATCHES: usize = 50;
+
+/// Pushes one trade pubkey may trigger per minute, also the burst. A real
+/// trade gets about ten updates over its whole life and two or three in the
+/// same minute at most; the limit only stops a node or relay replaying one
+/// trade's events in a loop. Nodes are not limited: every trade has its own
+/// budget.
+const PUSHES_PER_TRADE_PER_MIN: u32 = 10;
 
 pub struct NostrListener {
     config: Config,
@@ -45,6 +55,15 @@ impl NostrListener {
     }
 
     pub async fn start(&self) {
+        // Only registered pubkeys ever get a bucket, so the map stays bounded
+        // by MAX_TOKENS; the sweep drops buckets that refilled.
+        start_keyed_limiter_cleanup_task(
+            self.handler.per_trade_limiter.clone(),
+            Duration::from_secs(self.config.notify_rate_limit.cleanup_interval_secs),
+            self.config.notify_rate_limit.pubkey_limiter_soft_cap,
+            "listener-trade",
+        );
+
         loop {
             match self.connect_and_listen().await {
                 Ok(_) => {
@@ -164,6 +183,7 @@ struct EventHandler {
     /// Checked again per event: a relay may ignore the subscription filter.
     trusted_authors: HashSet<PublicKey>,
     permits: Arc<Semaphore>,
+    per_trade_limiter: Arc<PerPubkeyLimiter>,
 }
 
 impl EventHandler {
@@ -180,6 +200,9 @@ impl EventHandler {
             log_salt,
             trusted_authors,
             permits: Arc::new(Semaphore::new(max_in_flight)),
+            per_trade_limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+                NonZeroU32::new(PUSHES_PER_TRADE_PER_MIN).expect("non-zero constant"),
+            ))),
         }
     }
 
@@ -208,6 +231,13 @@ impl EventHandler {
             debug!("No registered token pk={}", log_pk);
             return;
         };
+        if self.per_trade_limiter.check_key(&trade_pubkey).is_err() {
+            warn!(
+                "Push limit reached for pk={}, dropping event {}",
+                log_pk, event.id
+            );
+            return;
+        }
         info!(
             "MATCH! Found registered token pk={}, sending push to {} device",
             log_pk, registered_token.platform
@@ -561,5 +591,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(extract_recipient(&event), None);
+    }
+
+    #[tokio::test]
+    async fn pushes_per_trade_are_limited_per_minute() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        for _ in 0..PUSHES_PER_TRADE_PER_MIN {
+            f.handler.handle(f.update_to(&f.fast_recipient)).await;
+        }
+        for _ in 0..PUSHES_PER_TRADE_PER_MIN {
+            let got = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+            assert_eq!(got.unwrap().as_deref(), Some(FAST_DEVICE));
+        }
+
+        // One more within the same minute is dropped.
+        f.handler.handle(f.update_to(&f.fast_recipient)).await;
+        let dropped = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(
+            dropped.is_err(),
+            "the burst above the limit must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_per_trade_not_per_node() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+        for _ in 0..PUSHES_PER_TRADE_PER_MIN {
+            f.handler.handle(f.update_to(&f.fast_recipient)).await;
+            tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv())
+                .await
+                .unwrap();
+        }
+
+        // The same node still reaches every other trade.
+        f.release.notify_one();
+        f.handler.handle(f.update_to(&f.slow_recipient)).await;
+        let got = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(got.unwrap().as_deref(), Some(SLOW_DEVICE));
     }
 }
