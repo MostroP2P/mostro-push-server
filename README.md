@@ -2,7 +2,7 @@
 
 Privacy-preserving push notification backend for the [Mostro](https://mostro.network/) P2P trading ecosystem.
 
-The server observes Nostr Gift Wrap events (`kind 1059`, Mostro protocol v1) and NIP-44 direct messages (`kind 14`, Mostro protocol v2), looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush so Mostro Mobile clients can wake up and process trade events. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
+The server observes the NIP-44 direct messages (`kind 14`, Mostro protocol v2) that trusted Mostro nodes address to a `trade_pubkey`, looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush so Mostro Mobile clients can wake up and process trade events. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
 
 ## How it works
 
@@ -17,15 +17,16 @@ The server observes Nostr Gift Wrap events (`kind 1059`, Mostro protocol v1) and
 │                 │       trade_pubkey                 │                  │
 └─────────────────┘                                    └────────┬─────────┘
                                                                 │
-┌─────────────────┐    2. Publishes kind 1059 / 14     ┌────────▼─────────┐
+┌─────────────────┐    2. Publishes kind 14            ┌────────▼─────────┐
 │  Mostro Daemon  │ ──────────────────────────────────▶│  Nostr Relay     │
-│  / dispute      │       p: trade_pubkey              │                  │
-│  admin / peer   │                                    └────────┬─────────┘
+│  (trusted node) │       p: trade_pubkey              │                  │
+│                 │                                    └────────┬─────────┘
 └─────────────────┘                                             │
                                                        ┌────────▼─────────┐
                                                        │  Push Server     │
-                                                       │  observes event  │
-                                                       │  looks up token  │
+                                                       │  keeps trusted   │
+                                                       │  authors, looks  │
+                                                       │  up the token    │
                                                        └────────┬─────────┘
                                                                 │
                                                        ┌────────▼─────────┐
@@ -41,8 +42,8 @@ The server observes Nostr Gift Wrap events (`kind 1059`, Mostro protocol v1) and
 
 Two ingress paths feed the same dispatcher:
 
-1. **Listener path** — the Nostr listener subscribes to `kind 1059` (protocol v1 Gift Wrap) and `kind 14` (protocol v2 NIP-44 direct) on configured relays and dispatches when a `p` tag matches a registered `trade_pubkey`.
-2. **Sender-triggered path** — `POST /api/notify` lets a sender ask the server to wake the recipient when an event was sent peer-to-peer without going through the Mostro daemon (e.g. dispute admin DMs).
+1. **Listener path** — the Nostr listener subscribes to `kind 14` (protocol v2 NIP-44 direct) authored by the trusted Mostro nodes in `config/trusted_mostro_pubkeys.json`, and dispatches when a `p` tag matches a registered `trade_pubkey`, at most 10 times per minute per `trade_pubkey`.
+2. **Sender-triggered path** — `POST /api/notify` lets a sender ask the server to wake the recipient when an event was sent peer-to-peer without going through the Mostro daemon (P2P and dispute chat).
 
 ## Privacy properties
 
@@ -51,9 +52,9 @@ Two ingress paths feed the same dispatcher:
 - `/api/notify` always returns `202` on parse-valid input. Registered and unregistered pubkeys are indistinguishable in status, body, and headers; rate-limit responses are byte-identical between the per-IP and per-pubkey paths. The endpoint cannot be used as an enumeration oracle.
 - Inbound `X-Request-Id` on `/api/notify` is stripped; the server generates its own UUIDv4 per request.
 - All `trade_pubkey`s in logs go through a salted truncated BLAKE3 keyed hash (`log_pubkey`), with a per-process random salt that is never persisted.
-- The Nostr listener does **not** filter by `authors`. Gift Wrap uses an ephemeral outer key, and admin DMs in disputes are user-to-user — an author filter would silently drop them.
+- The Nostr listener only accepts kind-14 events signed by a trusted Mostro node (signatures are verified), so nobody else can trigger a push by tagging a registered `trade_pubkey`. Chat envelopes are addressed to a conversation key, not a `trade_pubkey`, and go through `/api/notify`.
 
-What the server *does* see: a mapping of `trade_pubkey -> device_token` for live registrations, and timing of incoming Gift Wrap events. It does not see message content, sender identity, or peer relationships.
+What the server *does* see: a mapping of `trade_pubkey -> device_token` for live registrations, and timing of the trade updates Mostro nodes publish. It does not see message content, sender identity, or peer relationships.
 
 ## Requirements
 
@@ -105,7 +106,7 @@ docker-compose logs -f
 - [docs/configuration.md](docs/configuration.md) — environment variables
 - [docs/deployment.md](docs/deployment.md) — Fly.io, Docker, nginx, systemd
 - [docs/unifiedpush.md](docs/unifiedpush.md) — UnifiedPush backend notes
-- [docs/verification/dispute-chat.md](docs/verification/dispute-chat.md) — end-to-end runbook for the listener path
+- [docs/verification/trade-update.md](docs/verification/trade-update.md) — end-to-end runbook for the listener path
 
 ## Development
 
