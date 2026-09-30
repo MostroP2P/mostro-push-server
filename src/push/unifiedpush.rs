@@ -226,7 +226,7 @@ mod tests {
             nostr: NostrConfig {
                 relays: vec!["wss://relay.example.com".to_string()],
                 subscription_id: "test".to_string(),
-                event_kinds: vec![1059, 14],
+                event_kinds: vec![14],
             },
             push: PushConfig {
                 fcm_enabled: false,
