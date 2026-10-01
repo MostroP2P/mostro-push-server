@@ -17,6 +17,8 @@ use sqlite::{LoadReport, PersistError, SqliteStore};
 pub enum Platform {
     Android,
     Ios,
+    /// A browser registered through FCM Web Push; delivered by FCM only.
+    Web,
 }
 
 impl std::fmt::Display for Platform {
@@ -24,6 +26,7 @@ impl std::fmt::Display for Platform {
         match self {
             Platform::Android => write!(f, "android"),
             Platform::Ios => write!(f, "ios"),
+            Platform::Web => write!(f, "web"),
         }
     }
 }
@@ -219,11 +222,13 @@ impl TokenStore {
         let tokens = self.tokens.read().await;
         let mut android_count = 0;
         let mut ios_count = 0;
+        let mut web_count = 0;
 
         for token in tokens.values() {
             match token.platform {
                 Platform::Android => android_count += 1,
                 Platform::Ios => ios_count += 1,
+                Platform::Web => web_count += 1,
             }
         }
 
@@ -231,6 +236,7 @@ impl TokenStore {
             total: tokens.len(),
             android: android_count,
             ios: ios_count,
+            web: web_count,
         }
     }
 }
@@ -240,6 +246,14 @@ pub struct TokenStoreStats {
     pub total: usize,
     pub android: usize,
     pub ios: usize,
+    /// Omitted while zero, so `/api/status` stays byte-identical to the
+    /// pre-1.1 fixtures until a browser actually registers (hard constraint 3).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub web: usize,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 pub fn start_cleanup_task(store: std::sync::Arc<TokenStore>, interval_hours: u64) {
@@ -340,6 +354,67 @@ mod tests {
         let b = store.get(PK_B).await.unwrap();
         assert_eq!(b.device_token, TOKEN_B);
         assert_eq!(b.platform, Platform::Ios);
+    }
+
+    #[tokio::test]
+    async fn a_web_registration_survives_a_restart() {
+        let db = TempDb::new();
+        {
+            let (store, _) = open(&db, KEY, 48);
+            store
+                .register(PK_A.into(), TOKEN_A.into(), Platform::Web)
+                .await
+                .unwrap();
+        }
+
+        let (store, report) = open(&db, KEY, 48);
+
+        assert_eq!(report.restored, 1);
+        assert_eq!(report.discarded, 0);
+        let a = store.get(PK_A).await.unwrap();
+        assert_eq!(a.device_token, TOKEN_A);
+        assert_eq!(a.platform, Platform::Web);
+    }
+
+    #[tokio::test]
+    async fn stats_count_each_platform() {
+        let store = TokenStore::new(48, salt());
+        store
+            .register(PK_A.into(), TOKEN_A.into(), Platform::Web)
+            .await
+            .unwrap();
+        store
+            .register(PK_B.into(), TOKEN_B.into(), Platform::Android)
+            .await
+            .unwrap();
+
+        let stats = store.get_stats().await;
+
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.android, 1);
+        assert_eq!(stats.ios, 0);
+        assert_eq!(stats.web, 1);
+    }
+
+    #[test]
+    fn stats_omit_web_only_while_it_is_zero() {
+        let mut stats = TokenStoreStats {
+            total: 1,
+            android: 1,
+            ios: 0,
+            web: 0,
+        };
+        assert_eq!(
+            serde_json::to_string(&stats).unwrap(),
+            r#"{"total":1,"android":1,"ios":0}"#
+        );
+
+        stats.total = 2;
+        stats.web = 1;
+        assert_eq!(
+            serde_json::to_string(&stats).unwrap(),
+            r#"{"total":2,"android":1,"ios":0,"web":1}"#
+        );
     }
 
     #[tokio::test]

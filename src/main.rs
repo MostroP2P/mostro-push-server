@@ -261,6 +261,13 @@ async fn main() -> std::io::Result<()> {
         trust_proxy_headers.0
     );
 
+    let cors_allowed_origins = config.cors_allowed_origins.clone();
+    if cors_allowed_origins.is_disabled() {
+        info!("CORS disabled (CORS_ALLOWED_ORIGINS is empty)");
+    } else {
+        info!("CORS allowed origins: {:?}", cors_allowed_origins);
+    }
+
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
@@ -269,6 +276,7 @@ async fn main() -> std::io::Result<()> {
                 register_ip_limiter.clone(),
             )))
             .app_data(web::Data::new(trust_proxy_headers))
+            .app_data(web::Data::new(cors_allowed_origins.clone()))
             .configure(api::routes::configure)
     })
     .bind(server_addr)?

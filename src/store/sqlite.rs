@@ -266,6 +266,7 @@ fn platform_to_db(platform: &Platform) -> i64 {
     match platform {
         Platform::Android => 0,
         Platform::Ios => 1,
+        Platform::Web => 2,
     }
 }
 
@@ -273,6 +274,7 @@ fn platform_from_db(value: i64) -> Option<Platform> {
     match value {
         0 => Some(Platform::Android),
         1 => Some(Platform::Ios),
+        2 => Some(Platform::Web),
         _ => None,
     }
 }

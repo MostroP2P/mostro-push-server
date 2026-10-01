@@ -67,6 +67,19 @@ To turn the filter on/off without rebuilding, flip
 | `SERVER_HOST` | `0.0.0.0`   | Bind address                                 |
 | `SERVER_PORT` | `8080`      | Bind port                                    |
 
+## CORS
+
+`/api/register`, `/api/unregister` and `/api/notify` answer CORS so a browser
+client (the Mostro web app) can register its FCM Web Push token. See
+[api.md](./api.md#cors-browser-clients) for the headers.
+
+| Variable               | Default                  | Description |
+|------------------------|--------------------------|-------------|
+| `CORS_ALLOWED_ORIGINS` | `https://mostro.network` | Comma-separated origins, matched exactly against the `Origin` header (scheme, host and port, no trailing slash, e.g. `http://localhost:5173`). `*` allows any origin; the endpoints carry no credentials, so that is safe. An empty value disables CORS. |
+
+Requests from origins that are not listed, and requests without `Origin`, get
+no CORS headers and are answered exactly as before.
+
 ## Push backends
 
 | Variable                        | Default | Description                                                                                |
@@ -160,6 +173,9 @@ NOTIFY_RATE_PER_IP_PER_MIN=120
 NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS=60
 NOTIFY_PUBKEY_LIMITER_SOFT_CAP=100000
 NOTIFY_TRUST_PROXY_HEADERS=true
+
+# CORS for the web client (default https://mostro.network)
+CORS_ALLOWED_ORIGINS=https://mostro.network
 
 # Logging
 RUST_LOG=info

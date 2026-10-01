@@ -340,8 +340,10 @@ impl FcmPush {
     /// - When app is alive: background service shows detailed notification with same tag,
     ///   which REPLACES the generic FCM notification
     /// - When app is killed: FCM shows generic notification as fallback
-    fn build_payload_for_token(device_token: &str) -> serde_json::Value {
-        json!({
+    /// - Web tokens also get a `webpush` tag, so repeated pushes replace each
+    ///   other in the browser the way `apns-collapse-id` does on iOS
+    fn build_payload_for_token(device_token: &str, platform: &Platform) -> serde_json::Value {
+        let mut payload = json!({
             "message": {
                 "token": device_token,
                 // Notification field - shown by FCM when app is killed (fallback)
@@ -386,7 +388,17 @@ impl FcmPush {
                     }
                 }
             }
-        })
+        });
+        // Added only for web tokens so the Android and iOS payloads stay
+        // exactly as they were.
+        if *platform == Platform::Web {
+            payload["message"]["webpush"] = json!({
+                "notification": {
+                    "tag": "mostro-trade"
+                }
+            });
+        }
+        payload
     }
 
     /// Silent push payload for the /api/notify chat-wake path.
@@ -440,7 +452,7 @@ impl PushService for FcmPush {
             self.project_id
         );
 
-        let payload = Self::build_payload_for_token(device_token);
+        let payload = Self::build_payload_for_token(device_token, platform);
 
         debug!(
             "Sending FCM to token: {}...",
@@ -503,7 +515,7 @@ impl PushService for FcmPush {
     }
 
     fn supports_platform(&self, platform: &Platform) -> bool {
-        matches!(platform, Platform::Android | Platform::Ios)
+        matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
     }
 }
 
@@ -589,6 +601,34 @@ mod tests {
     }
 
     const TOKEN_BODY: &str = r#"{"access_token":"ya29.test","expires_in":3600}"#;
+
+    #[test]
+    fn fcm_supports_every_platform() {
+        let service = test_service("http://127.0.0.1:9/token".to_string());
+        assert!(service.supports_platform(&Platform::Android));
+        assert!(service.supports_platform(&Platform::Ios));
+        assert!(service.supports_platform(&Platform::Web));
+    }
+
+    #[test]
+    fn web_payload_carries_a_webpush_tag() {
+        let payload = FcmPush::build_payload_for_token("web-token", &Platform::Web);
+        assert_eq!(
+            payload["message"]["webpush"],
+            json!({"notification": {"tag": "mostro-trade"}})
+        );
+        assert_eq!(payload["message"]["token"], "web-token");
+    }
+
+    #[test]
+    fn mobile_payloads_carry_no_webpush_block() {
+        for platform in [Platform::Android, Platform::Ios] {
+            let payload = FcmPush::build_payload_for_token("mobile-token", &platform);
+            assert!(payload["message"].get("webpush").is_none(), "{platform}");
+            assert!(payload["message"].get("android").is_some());
+            assert!(payload["message"].get("apns").is_some());
+        }
+    }
 
     #[tokio::test]
     async fn retries_a_transient_failure_and_then_succeeds() {

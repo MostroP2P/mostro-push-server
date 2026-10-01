@@ -1,5 +1,7 @@
 use log::info;
 use serde::Deserialize;
+
+use crate::api::cors::{AllowedOrigins, DEFAULT_ALLOWED_ORIGINS};
 use std::env;
 use std::path::PathBuf;
 
@@ -25,6 +27,11 @@ pub struct Config {
     /// indirection lets the binary ship with the JSON populated while
     /// keeping the new 403 path off until the mobile client is rolled out.
     pub trusted_whitelist_enabled: bool,
+    /// `CORS_ALLOWED_ORIGINS`: comma-separated origins allowed to call
+    /// `/api/register`, `/api/unregister` and `/api/notify` from a browser.
+    /// `*` allows any origin; an empty value disables CORS. Defaults to
+    /// [`DEFAULT_ALLOWED_ORIGINS`].
+    pub cors_allowed_origins: AllowedOrigins,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -241,6 +248,10 @@ impl Config {
             trusted_whitelist_enabled: env::var("TRUSTED_WHITELIST_ENABLED")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse()?,
+            cors_allowed_origins: AllowedOrigins::parse(
+                &env::var("CORS_ALLOWED_ORIGINS")
+                    .unwrap_or_else(|_| DEFAULT_ALLOWED_ORIGINS.to_string()),
+            ),
         })
     }
 }
@@ -414,6 +425,48 @@ mod tests {
         let config = Config::from_env().expect("path and key together MUST be accepted");
         assert_eq!(config.store.key.as_ref().unwrap().expose(), key);
         assert!(!format!("{:?}", config).contains(&key));
+    }
+
+    #[test]
+    fn cors_allowed_origins_default_to_the_mostro_web_client() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["CORS_ALLOWED_ORIGINS", "NOSTR_RELAYS"]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+        std::env::remove_var("CORS_ALLOWED_ORIGINS");
+
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
+        assert_eq!(
+            config.cors_allowed_origins,
+            AllowedOrigins::List(vec!["https://mostro.network".to_string()])
+        );
+    }
+
+    #[test]
+    fn cors_allowed_origins_parse_lists_wildcard_and_empty() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&["CORS_ALLOWED_ORIGINS", "NOSTR_RELAYS"]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        std::env::set_var(
+            "CORS_ALLOWED_ORIGINS",
+            "https://mostro.network, http://localhost:5173",
+        );
+        let config = Config::from_env().expect("a list MUST be accepted");
+        assert_eq!(
+            config.cors_allowed_origins,
+            AllowedOrigins::List(vec![
+                "https://mostro.network".to_string(),
+                "http://localhost:5173".to_string(),
+            ])
+        );
+
+        std::env::set_var("CORS_ALLOWED_ORIGINS", "*");
+        let config = Config::from_env().expect("a wildcard MUST be accepted");
+        assert_eq!(config.cors_allowed_origins, AllowedOrigins::Any);
+
+        std::env::set_var("CORS_ALLOWED_ORIGINS", "");
+        let config = Config::from_env().expect("an empty value MUST be accepted");
+        assert!(config.cors_allowed_origins.is_disabled());
     }
 
     #[test]
