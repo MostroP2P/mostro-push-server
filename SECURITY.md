@@ -80,9 +80,10 @@ privacy or availability impact beyond what is described here is welcome.
 - `/api/notify` always returns `202` on parse-valid input. Registered and
   unregistered pubkeys are intended to be indistinguishable in status, body,
   headers, and timing. A measurable distinguisher is a valid finding.
-- The Nostr listener does not filter by `authors`. Gift Wrap uses an ephemeral
-  outer key per event and dispute admin messages are user-to-user, so an author
-  filter would silently drop legitimate events.
+- The Nostr listener only pushes for kind-14 events authored by the Mostro
+  nodes in `config/trusted_mostro_pubkeys.json`. Users of a node missing from
+  that list get no trade-update pushes. A trusted node can still push to any
+  registered `trade_pubkey`, bounded to 10 pushes per minute per pubkey.
 - Registrations are persisted to disk when `TOKEN_STORE_PATH` is set, so they
   survive restarts. `trade_pubkey` is stored in the clear (it is public on the
   relays); device tokens are encrypted with a key held only in the

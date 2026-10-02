@@ -207,31 +207,31 @@ async fn main() -> std::io::Result<()> {
         config.notify_rate_limit.pubkey_limiter_soft_cap,
     );
 
+    // Trusted Mostro nodes embedded at compile time. The Nostr listener only
+    // pushes for kind-14 events they author, and refuses to start without
+    // any. The /api/register filter additionally activates only when the
+    // runtime flag (`TRUSTED_WHITELIST_ENABLED`) is true; otherwise
+    // `mostro_pubkey` is ignored there.
+    let trusted_mostro_pubkeys = Arc::new(trusted_pubkeys::load());
+    info!(
+        "Loaded {} trusted Mostro nodes (register whitelist enabled: {})",
+        trusted_mostro_pubkeys.len(),
+        config.trusted_whitelist_enabled
+    );
+
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
         config.clone(),
         dispatcher.clone(),
         token_store.clone(),
         notify_log_salt.clone(),
+        &trusted_mostro_pubkeys,
     )
     .expect("Failed to initialize Nostr listener");
 
     tokio::spawn(async move {
         nostr_listener.start().await;
     });
-
-    // Trusted Mostro instance whitelist embedded at compile time.
-    // The /api/register filter activates only when BOTH the runtime feature
-    // flag (`TRUSTED_WHITELIST_ENABLED`) is true AND the embedded list is
-    // non-empty; otherwise `mostro_pubkey` is ignored. Logging both the
-    // count and the flag at boot lets operators tell apart "shipped without
-    // entries" from "flag forgotten" without grepping config.
-    let trusted_mostro_pubkeys = Arc::new(trusted_pubkeys::load());
-    info!(
-        "Loaded trusted-Mostro whitelist with {} pubkeys (enabled: {})",
-        trusted_mostro_pubkeys.len(),
-        config.trusted_whitelist_enabled
-    );
 
     // Create app state for HTTP handlers
     let app_state = AppState {

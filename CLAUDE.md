@@ -1,6 +1,6 @@
 # Mostro Push Server
 
-Privacy-preserving push notification backend for the Mostro P2P trading ecosystem. Rust + Actix-web + Tokio. The server observes Nostr Gift Wrap events (`kind 1059`, Mostro protocol v1) and NIP-44 direct messages (`kind 14`, Mostro protocol v2) on configured relays, looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
+Privacy-preserving push notification backend for the Mostro P2P trading ecosystem. Rust + Actix-web + Tokio. The server observes the NIP-44 direct messages (`kind 14`, Mostro protocol v2) that trusted Mostro nodes publish on configured relays, looks up registered device tokens by `trade_pubkey`, and dispatches silent push notifications via Firebase Cloud Messaging (FCM) and UnifiedPush. Inspired by [MIP-05](https://github.com/MostroP2P/MIPs).
 
 For deeper context (data flow, components, ops): [docs/architecture.md](docs/architecture.md), [docs/api.md](docs/api.md), [docs/configuration.md](docs/configuration.md).
 
@@ -19,7 +19,11 @@ For deeper context (data flow, components, ops): [docs/architecture.md](docs/arc
 
 These are the privacy and compatibility invariants of the project. Reintroducing any of them is a regression.
 
-1. **No author filter on the Nostr listener.** `src/nostr/listener.rs::Filter::new()` MUST NOT call `.authors(...)`. Gift Wrap uses an ephemeral outer key per event, and admin DMs in disputes are sent user-to-user — an author filter would silently drop those. The forbidden line is guarded by a comment block above `Filter::new()`.
+1. **The Nostr listener only pushes for kind-14 events authored by a trusted Mostro node.** `subscription_filter` in `src/nostr/listener.rs` asks relays for `kind 14` with `.authors(...)` set to `config/trusted_mostro_pubkeys.json`, and `EventHandler::handle` checks the author again (a relay may ignore the filter). nostr-sdk verifies every event's id and signature before delivering it, so the author cannot be forged. Do NOT drop the author filter nor re-add `kind 1059`:
+   - Without it anyone could trigger a visible push by tagging a registered (public) `trade_pubkey`, and relays stream every kind-14 DM on the network.
+   - Gift Wrap (NIP-59, `kind 1059`, protocol v1) is no longer used by any Mostro node nor the mobile app; every community node advertises `protocol_version = 2`.
+   - P2P and dispute chat envelopes are addressed to a conversation key, never a `trade_pubkey`, so the listener never matched them; they reach devices through `/api/notify`.
+   - The listener refuses to start with an empty trusted list, and allows each `trade_pubkey` at most `PUSHES_PER_TRADE_PER_MIN` (10) pushes per minute; nodes themselves are not limited.
 
 2. **`/api/notify` is the *only* unauthenticated entry point with a strict privacy contract**:
    - Always `202 { "accepted": true }` on parse-valid input. Registered vs unregistered pubkeys MUST be indistinguishable (status, body, headers, timing).
@@ -76,7 +80,7 @@ src/
 │   ├── notify.rs        # /api/notify handler + request_id_mw
 │   ├── rate_limit.rs    # per-IP / per-pubkey limiter middleware (governor)
 │   └── test_support.rs  # In-process test fixtures
-├── nostr/listener.rs    # Persistent subscription, kind 1059 / kind 14 dispatch
+├── nostr/listener.rs    # Kind-14 subscription from trusted Mostro nodes, per-trade push limit
 ├── push/
 │   ├── mod.rs           # PushService trait
 │   ├── dispatcher.rs    # PushDispatcher (lock-free)
@@ -93,30 +97,34 @@ src/
     └── batching.rs      # Reserved (unused at runtime)
 
 config/
-└── trusted_mostro_pubkeys.json  # JSON array of 64-hex pubkeys; mirrors mobile/lib/core/config/communities.dart
+└── trusted_mostro_pubkeys.json  # Trusted Mostro nodes (64-hex); includes every community in mobile/lib/core/config/communities.dart
 ```
 
-## Trusted Mostro instance whitelist
+## Trusted Mostro nodes
 
-`/api/register` filters registrations against a compile-time whitelist of
-trusted Mostro instance pubkeys, embedded into the binary via
-`include_str!("../config/trusted_mostro_pubkeys.json")`. The mobile client is
-expected to send the pubkey of the selected Mostro instance in the
-`mostro_pubkey` field of the registration body.
+`config/trusted_mostro_pubkeys.json` lists the trusted Mostro nodes, embedded
+into the binary via `include_str!`. It must include every community of the
+mobile app (`lib/core/config/communities.dart`) and may list other nodes the
+team trusts; adding a node means editing the file and deploying. It has two
+consumers:
 
-- An empty JSON array disables the whitelist (permissive mode); the field
-  is then ignored.
-- A non-empty array activates the filter; missing or unknown
-  `mostro_pubkey` values are rejected with `403 Forbidden`. Malformed
-  values (length or hex) return `400 Bad Request`.
-- This filter is honour-system only — the device cryptographically proves
-  nothing about which Mostro instance it actually uses. It will be hardened
-  in a future phase. Do NOT remove the whitelist code on the basis that it
+- **The Nostr listener (always):** only kind-14 events authored by these nodes
+  trigger a push (hard constraint 1). The server refuses to start with an
+  empty list. Users of a node missing from the list get no trade-update
+  pushes; `/api/notify` (chat) still works for them.
+- **`/api/register` (only with `TRUSTED_WHITELIST_ENABLED=true`):** the mobile
+  client sends the selected node in `mostro_pubkey`; missing or unknown
+  values are rejected with `403 Forbidden`, malformed ones with
+  `400 Bad Request`. Keep the flag off unless every user's node is listed:
+  a rejected registration also loses the `/api/notify` chat pushes.
+- The `/api/register` filter is honour-system only — the device
+  cryptographically proves nothing about which Mostro instance it uses. It
+  will be hardened in a future phase. Do NOT remove the whitelist code on the basis that it
   "isn't really enforcing anything"; it deliberately blocks well-behaved
   clients from arbitrary instances and the harder protocol depends on this
   field staying in the request shape.
 - The previous `MOSTRO_PUBKEY` environment variable has been removed; it
-  was only used as log context and was never an authors filter.
+  was only used as log context.
 
 ## Common commands
 

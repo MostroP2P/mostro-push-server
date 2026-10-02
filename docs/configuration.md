@@ -12,36 +12,45 @@ cp .env.example .env
 
 | Variable        | Description                                                                                  |
 |-----------------|----------------------------------------------------------------------------------------------|
-| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kinds 1059 and 14. |
+| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kind 14 from the trusted Mostro nodes. |
 
 `NOSTR_RELAYS` is the only variable without a default; the server fails to boot if it is unset.
 
 ## Nostr listener
 
-The listener has no instance-specific configuration. It does NOT filter
-events by `authors` (privacy invariant; see [architecture.md](./architecture.md)).
+The listener only pushes for `kind 14` events authored by the trusted Mostro
+nodes listed in `config/trusted_mostro_pubkeys.json` (see below and
+[architecture.md](./architecture.md)). It refuses to start when that list is
+empty. Each registered `trade_pubkey` may trigger at most 10 pushes per
+minute; the limiter map is swept with `NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS`
+and `NOTIFY_PUBKEY_LIMITER_SOFT_CAP`, like the `/api/notify` limiters.
 
-## Trusted Mostro instance whitelist
+## Trusted Mostro nodes
 
-The set of Mostro instance pubkeys allowed to register devices is compiled
-into the binary from `config/trusted_mostro_pubkeys.json` at build time.
-Activation is gated by a runtime feature flag, so the JSON can ship
-populated while the filter stays inert until the mobile rollout is ready.
+The trusted Mostro node pubkeys are compiled into the binary from
+`config/trusted_mostro_pubkeys.json` at build time. It must include every
+community of the mobile app (`lib/core/config/communities.dart`) and may list
+other nodes the team trusts.
+
+- **Nostr listener (always on):** only these nodes' kind-14 events trigger a
+  push. Users of a node missing from the list get no trade-update pushes.
+- **`/api/register` (behind a flag):** activation is gated by a runtime flag,
+  so the JSON can ship populated while the register filter stays inert.
 
 | Variable                     | Default | Description                                                                                                                |
 |------------------------------|---------|----------------------------------------------------------------------------------------------------------------------------|
 | `TRUSTED_WHITELIST_ENABLED`  | `false` | When `true`, `/api/register` rejects requests whose declared `mostro_pubkey` is missing or not on the embedded whitelist.  |
 
-Activation rule: the filter on `/api/register` only fires when **both**
-`TRUSTED_WHITELIST_ENABLED=true` **and** the embedded whitelist is
-non-empty. Either side off => permissive mode and the `mostro_pubkey`
-field is ignored.
+With the flag off (the default) the `mostro_pubkey` field is ignored on
+`/api/register`. Keep it off unless every user's node is on the list: a
+rejected registration also loses the `/api/notify` chat pushes.
 
 About the embedded JSON:
 
 - The file must contain a JSON array of 64-character hex pubkeys
   (lowercase preferred; `load()` canonicalizes to lowercase regardless).
-- An empty array keeps the filter permissive even when the flag is on.
+- An empty array stops the server from starting: the listener would never
+  send a push.
 - The file is parsed at startup; malformed JSON or any entry that is not
   64 hex characters causes the process to panic immediately (fail-fast).
 - Editing the list requires a rebuild because the JSON is embedded at
@@ -56,7 +65,8 @@ distinct bodies (see [api.md](./api.md) for the wire details):
 - `{"success":false,"message":"Mostro instance not trusted"}` when the
   field is present but its value is not on the whitelist.
 
-To change the list, edit `config/trusted_mostro_pubkeys.json` and rebuild.
+To change the list, edit `config/trusted_mostro_pubkeys.json`, rebuild and
+deploy (registrations survive the restart when `TOKEN_STORE_PATH` is set).
 To turn the filter on/off without rebuilding, flip
 `TRUSTED_WHITELIST_ENABLED`.
 
