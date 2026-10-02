@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use governor::{Quota, RateLimiter};
 use rand::RngCore;
 
+use crate::api::cors::{AllowedOrigins, DEFAULT_ALLOWED_ORIGINS};
 use crate::api::rate_limit::{
     PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
     REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
@@ -228,6 +229,23 @@ pub fn build_test_actix_app(
         InitError = (),
     >,
 > {
+    build_test_actix_app_with_origins(c, AllowedOrigins::parse(DEFAULT_ALLOWED_ORIGINS))
+}
+
+/// [`build_test_actix_app`] with an explicit CORS allow-list in place of the
+/// production default.
+pub fn build_test_actix_app_with_origins(
+    c: TestAppComponents,
+    allowed_origins: AllowedOrigins,
+) -> App<
+    impl actix_web::dev::ServiceFactory<
+        actix_web::dev::ServiceRequest,
+        Config = (),
+        Response = actix_web::dev::ServiceResponse<actix_web::body::BoxBody>,
+        Error = actix_web::Error,
+        InitError = (),
+    >,
+> {
     App::new()
         .app_data(web::Data::new(c.state))
         .app_data(web::Data::new(c.per_ip_limiter))
@@ -237,6 +255,7 @@ pub fn build_test_actix_app(
         // the proxy-trust flag here. Tests covering the default-false bypass
         // guard build their own App and override this with `false`.
         .app_data(web::Data::new(TrustProxyHeaders(true)))
+        .app_data(web::Data::new(allowed_origins))
         .configure(configure)
 }
 

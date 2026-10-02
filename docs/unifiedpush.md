@@ -34,7 +34,7 @@ The endpoint store is loaded once at startup. Failures to read or parse the file
 
 ## Platform support
 
-`UnifiedPushService::supports_platform` returns `true` only for `Platform::Android`. iOS clients are FCM-only.
+`UnifiedPushService::supports_platform` returns `true` only for `Platform::Android`. iOS and web clients are FCM-only.
 
 If `UNIFIEDPUSH_ENABLED=false`, the service is not added to the dispatcher slice. Existing entries in `data/unifiedpush_endpoints.json` are ignored at runtime but not deleted.
 

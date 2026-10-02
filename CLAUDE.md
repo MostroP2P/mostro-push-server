@@ -31,6 +31,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
    - `429` body MUST be byte-identical between the per-IP middleware and the per-pubkey check inside the handler. `Retry-After` is whole seconds, `.max(1)`.
    - No `sender_pubkey`, no signature, no `Authorization` header, no `Idempotency-Key`. Anything that lets the operator correlate sender and recipient is rejected.
    - Inbound `X-Request-Id` is stripped; server generates UUIDv4 per request.
+   - CORS headers (`src/api/cors.rs`) depend only on the request's `Origin`, never on the pubkey or on registration state.
    - Dispatch happens in a `tokio::spawn` task detached from the response, bounded by `Arc<Semaphore>(50)`.
 
 3. **Backwards compatibility of the existing endpoints.** `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` response bodies are byte-identical to fixtures captured before v1.1. Field order on `RegisterResponse` is `success, message, platform`. The `mostro_pubkey` field added to `RegisterTokenRequest` is request-only and does not change response shapes.
@@ -38,6 +39,10 @@ These are the privacy and compatibility invariants of the project. Reintroducing
    **Exception (off by default):** when `TRUSTED_WHITELIST_ENABLED=true` AND the embedded whitelist is non-empty, `/api/register` MAY return a new `403 Forbidden` with one of two distinct bodies — `{"success":false,"message":"Mostro instance pubkey required"}` (missing field) or `{"success":false,"message":"Mostro instance not trusted"}` (untrusted value). The flag defaults to `false` precisely so the byte-identical fixture set continues to hold for clients that pre-date the feature; only flip it after the mobile rollout.
 
    **Exception (always on):** `/api/register` and `/api/unregister` are wrapped by `register_ip_rate_limit_mw` and MAY return `429 Too Many Requests` with the shared `rate_limited_response` body — `{"success":false,"message":"rate limited"}` plus a `Retry-After` header in whole seconds, `.max(1)` — or `500 Internal Server Error` with `{"success":false,"message":"internal error"}` when the per-IP key cannot be extracted (fail-closed, same rule as `/api/notify`). `/api/register` also returns that same `429` body when the token store is full (`MAX_TOKENS`) and the `trade_pubkey` is new; refreshing an existing registration is always accepted. `/api/unregister` returns that same `500` body when the persisted row cannot be deleted: the registration is left untouched rather than acknowledged and restored on the next restart. Both bodies keep the `success, message` field order. The `200` and `400` bodies are unchanged, so the pre-1.1 fixture set still holds for every request that is not rate-limited.
+
+   **Platform `web` (additive):** `/api/register` accepts `"platform": "web"` (FCM Web Push tokens from browsers). The invalid-platform `400` message is unchanged and still names only `android` and `ios`. `/api/status` appends `"web": n` after `ios` only while `n > 0`, so a store holding no web registrations, which is every state a pre-web server could reach, still serves the fixture body byte for byte.
+
+   **CORS (headers only):** `/api/register`, `/api/unregister` and `/api/notify` answer preflights from origins in `CORS_ALLOWED_ORIGINS` with `204` and add `Access-Control-Allow-Origin` + `Vary: Origin` to their responses. Bodies are untouched, and requests without an allowed `Origin` are answered exactly as before. `cors_mw` is hand-rolled on `middleware::from_fn` because `actix-cors` would be a new dependency (constraint 6).
 
 4. **Persisted registrations are minimal, encrypted and short-lived.** With `TOKEN_STORE_PATH` set, `src/store/sqlite.rs` mirrors the in-memory map to SQLite so registrations survive restarts; without it the store is in-memory only. The rules below are the privacy contract of that file:
    - Only live registrations are kept: rows expire with the TTL, are deleted on `unregister`, and are purged at startup. Deletion is real (`secure_delete = ON`, WAL truncated after each cleanup).
@@ -76,6 +81,7 @@ src/
 ├── config.rs            # Config::from_env (typed env-var loader)
 ├── trusted_pubkeys.rs   # Compile-time whitelist (include_str! the JSON below)
 ├── api/
+│   ├── cors.rs          # CORS middleware for /register, /unregister, /notify
 │   ├── routes.rs        # /health, /info, /status, /register, /unregister + AppState
 │   ├── notify.rs        # /api/notify handler + request_id_mw
 │   ├── rate_limit.rs    # per-IP / per-pubkey limiter middleware (governor)
