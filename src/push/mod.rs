@@ -12,11 +12,6 @@ pub use unifiedpush::UnifiedPushService;
 
 use crate::store::Platform;
 
-// `#[async_trait]` marks each generated method `#[must_use]` although the
-// boxed future it returns already is; clippy 1.99 reports that as
-// `double_must_use` on code this crate does not write. The trait stays on
-// async_trait because the dispatcher holds it as `dyn PushService`.
-#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PushService: Send + Sync {
     async fn send_to_token(
