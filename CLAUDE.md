@@ -97,15 +97,16 @@ src/
     └── batching.rs      # Reserved (unused at runtime)
 
 config/
-└── trusted_mostro_pubkeys.json  # Trusted Mostro nodes (64-hex); mirrors mobile/lib/core/config/communities.dart
+└── trusted_mostro_pubkeys.json  # Trusted Mostro nodes (64-hex); includes every community in mobile/lib/core/config/communities.dart
 ```
 
 ## Trusted Mostro nodes
 
 `config/trusted_mostro_pubkeys.json` lists the trusted Mostro nodes, embedded
-into the binary via `include_str!`. Keep it in sync with the communities in
-the mobile app (`lib/core/config/communities.dart`); adding a node means
-editing the file and deploying. It has two consumers:
+into the binary via `include_str!`. It must include every community of the
+mobile app (`lib/core/config/communities.dart`) and may list other nodes the
+team trusts; adding a node means editing the file and deploying. It has two
+consumers:
 
 - **The Nostr listener (always):** only kind-14 events authored by these nodes
   trigger a push (hard constraint 1). The server refuses to start with an

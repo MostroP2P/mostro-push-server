@@ -28,8 +28,9 @@ and `NOTIFY_PUBKEY_LIMITER_SOFT_CAP`, like the `/api/notify` limiters.
 ## Trusted Mostro nodes
 
 The trusted Mostro node pubkeys are compiled into the binary from
-`config/trusted_mostro_pubkeys.json` at build time. Keep the list in sync
-with the communities in the mobile app (`lib/core/config/communities.dart`).
+`config/trusted_mostro_pubkeys.json` at build time. It must include every
+community of the mobile app (`lib/core/config/communities.dart`) and may list
+other nodes the team trusts.
 
 - **Nostr listener (always on):** only these nodes' kind-14 events trigger a
   push. Users of a node missing from the list get no trade-update pushes.
