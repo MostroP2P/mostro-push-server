@@ -297,7 +297,9 @@ those cross-origin `POST`s after a successful preflight, so `/api/register`,
 
 The push sent to a web token sets no click target (`webpush.fcm_options.link`):
 the web client's service worker must handle `notificationclick` itself, or a
-tap on the notification opens nothing.
+tap on the notification opens nothing. Register that listener before importing
+the FCM libraries, as Firebase's documentation asks: the SDK adds its own
+`notificationclick` listener, and one registered after it may never run.
 
 Preflight from an allowed origin — `204 No Content`, empty body:
 
