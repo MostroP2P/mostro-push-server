@@ -341,7 +341,9 @@ impl FcmPush {
     ///   which REPLACES the generic FCM notification
     /// - When app is killed: FCM shows generic notification as fallback
     /// - Web tokens also get a `webpush` tag, so repeated pushes replace each
-    ///   other in the browser the way `apns-collapse-id` does on iOS
+    ///   other in the browser the way `apns-collapse-id` does on iOS, with
+    ///   `renotify` so each replacement alerts again instead of swapping the
+    ///   text silently
     fn build_payload_for_token(device_token: &str, platform: &Platform) -> serde_json::Value {
         let mut payload = json!({
             "message": {
@@ -394,7 +396,8 @@ impl FcmPush {
         if *platform == Platform::Web {
             payload["message"]["webpush"] = json!({
                 "notification": {
-                    "tag": "mostro-trade"
+                    "tag": "mostro-trade",
+                    "renotify": true
                 }
             });
         }
@@ -613,9 +616,12 @@ mod tests {
     #[test]
     fn web_payload_carries_a_webpush_tag() {
         let payload = FcmPush::build_payload_for_token("web-token", &Platform::Web);
+        // `renotify`: a browser replaces a notification with the same tag
+        // silently unless told to alert again, and the next trade step is
+        // often the one with a deadline.
         assert_eq!(
             payload["message"]["webpush"],
-            json!({"notification": {"tag": "mostro-trade"}})
+            json!({"notification": {"tag": "mostro-trade", "renotify": true}})
         );
         assert_eq!(payload["message"]["token"], "web-token");
     }

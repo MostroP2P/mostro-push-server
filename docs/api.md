@@ -295,6 +295,10 @@ those cross-origin `POST`s after a successful preflight, so `/api/register`,
 [configuration.md](./configuration.md#cors)). `/api/health`, `/api/info` and
 `/api/status` do not.
 
+The push sent to a web token sets no click target (`webpush.fcm_options.link`):
+the web client's service worker must handle `notificationclick` itself, or a
+tap on the notification opens nothing.
+
 Preflight from an allowed origin — `204 No Content`, empty body:
 
 ```
