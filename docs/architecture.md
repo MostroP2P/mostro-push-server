@@ -9,6 +9,7 @@ src/
 ├── main.rs                 # Boot: loads config, wires services, spawns tasks, starts HTTP server
 ├── config.rs               # Typed env-var config (Config::from_env)
 ├── api/
+│   ├── cors.rs             # CORS middleware for the browser-facing endpoints (CORS_ALLOWED_ORIGINS)
 │   ├── routes.rs           # /api/health|info|status|register|unregister wiring + AppState
 │   ├── notify.rs           # /api/notify handler + x-request-id middleware
 │   ├── rate_limit.rs       # Per-IP and per-pubkey limiter middleware (governor)
@@ -35,7 +36,7 @@ src/
 
 ### HTTP server (`actix-web`)
 
-Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister`) plus `/api/notify`. `/api/register` and `/api/unregister` share a per-IP middleware to bound token-store churn. `/api/notify` has its own middleware stack: `request_id_mw` (outermost) and `per_ip_rate_limit_mw`.
+Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister`) plus `/api/notify`. `/api/register` and `/api/unregister` share a per-IP middleware to bound token-store churn. `/api/notify` has its own middleware stack: `request_id_mw` (outermost), `cors_mw` and `per_ip_rate_limit_mw`. `cors_mw` also wraps `/api/register` and `/api/unregister`, outside their limiter, so CORS preflights from browser clients are answered without spending a rate-limit token.
 
 ### Nostr listener (`nostr-sdk`)
 
@@ -65,7 +66,7 @@ Two entry points:
 
 ### FCM backend (`reqwest` + `jsonwebtoken`)
 
-Builds an RS256 JWT from the Firebase service-account JSON, exchanges it for a short-lived access token, and caches the token under an `RwLock<Option<CachedToken>>` until 60 seconds before expiry. Sends to `fcm.googleapis.com/v1/projects/{project}/messages:send`. Supports both `Platform::Android` and `Platform::Ios`.
+Builds an RS256 JWT from the Firebase service-account JSON, exchanges it for a short-lived access token, and caches the token under an `RwLock<Option<CachedToken>>` until 60 seconds before expiry. Sends to `fcm.googleapis.com/v1/projects/{project}/messages:send`. Supports `Platform::Android`, `Platform::Ios` and `Platform::Web` (a browser's FCM Web Push token). Web tokens get a `webpush.notification.tag` of `mostro-trade` on the listener-path payload, so repeated pushes replace each other in the browser, and `renotify: true`, so each replacement alerts again: without it the browser swaps the text silently and a user who never opened the first notice misses the next one. It also carries `webpush.headers.Urgency: high`, matching `android.priority: high` and `apns-priority: 10`: Web Push defaults to `normal` (RFC 8030 §5.3), which a phone in Doze may defer. The data-only `chat_wake` push from `/api/notify` gets the same `Urgency: high` for web tokens, since the web client shows a notice for each one. The payload sets no `webpush.fcm_options.link`; a tap is the web client's own service worker's to handle (`notificationclick`).
 
 The token exchange is serialised by a `Mutex` so only one refresh runs at a time; concurrent dispatches that miss the cache wait for that result instead of each calling Google. When a refresh exhausts its attempts, the failure is shared for a 10-second window, so the callers queued behind it fail with the same cause rather than each re-running the sequence against a dependency that is still down. It retries transient failures (5xx, 429, network errors, including a connection that dies while the response body is read) up to three times with exponential backoff and jitter. It fails fast on 4xx, which signal wrong credentials, clock or scope, and on a body that arrived in full but does not parse; repeating the request cannot fix either.
 

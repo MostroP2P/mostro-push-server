@@ -1,3 +1,4 @@
+pub mod cors;
 pub mod notify;
 pub mod rate_limit;
 pub mod routes;

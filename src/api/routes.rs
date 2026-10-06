@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+use crate::api::cors::cors_mw;
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::api::rate_limit::{
     per_ip_rate_limit_mw, rate_limited_response, register_ip_rate_limit_mw, PerPubkeyLimiter,
@@ -122,6 +123,10 @@ fn json_config(limit: usize) -> web::JsonConfig {
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // actix-web wraps in reverse-registration order: the last `.wrap()` is
+    // the outermost. `cors_mw` sits outside the rate limiters on every
+    // browser-facing resource, so a CORS preflight is answered before it can
+    // spend a rate-limit token or reach a handler.
     cfg.service(
         web::scope("/api")
             .route("/health", web::get().to(health_check))
@@ -130,23 +135,26 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::resource("/register")
                     .app_data(json_config(MAX_REGISTER_BODY_BYTES))
                     .wrap(from_fn(register_ip_rate_limit_mw))
+                    .wrap(from_fn(cors_mw))
                     .route(web::post().to(register_token)),
             )
             .service(
                 web::resource("/unregister")
                     .app_data(json_config(MAX_UNREGISTER_BODY_BYTES))
                     .wrap(from_fn(register_ip_rate_limit_mw))
+                    .wrap(from_fn(cors_mw))
                     .route(web::post().to(unregister_token)),
             )
             .route("/info", web::get().to(server_info))
             .service(
                 web::resource("/notify")
                     .app_data(crate::api::notify::json_config())
-                    // Order matters: actix-web wraps in reverse-registration order, so the
-                    // last `.wrap()` is the outermost. `request_id_mw` MUST be outermost so
-                    // it runs even when `per_ip_rate_limit_mw` short-circuits with 429,
-                    // keeping x-request-id present on both 429 paths (anti-RL-2 oracle).
+                    // `request_id_mw` MUST be outermost so it runs even when
+                    // `per_ip_rate_limit_mw` short-circuits with 429, keeping
+                    // x-request-id present on both 429 paths (anti-RL-2 oracle),
+                    // and on CORS preflights too. `cors_mw` goes between them.
                     .wrap(from_fn(per_ip_rate_limit_mw))
+                    .wrap(from_fn(cors_mw))
                     .wrap(from_fn(request_id_mw))
                     .route(web::post().to(notify_token)),
             ),
@@ -240,8 +248,11 @@ async fn register_token(
     let platform = match req.platform.to_lowercase().as_str() {
         "android" => Platform::Android,
         "ios" => Platform::Ios,
+        "web" => Platform::Web,
         _ => {
             warn!("Invalid platform: {}", req.platform);
+            // The message predates `web` and stays as it is: 400 bodies are
+            // frozen against the pre-1.1 fixtures (hard constraint 3).
             return HttpResponse::BadRequest().json(RegisterResponse {
                 success: false,
                 message: format!(
@@ -550,6 +561,130 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(body_str, expected);
+    }
+
+    /// POSTs `body` as JSON from a fixed IP and returns the status and body.
+    /// A macro because the request type lives in `actix-http`, which is not
+    /// a direct dependency and so cannot be named in a helper's bounds.
+    macro_rules! post_json {
+        ($app:expr, $uri:expr, $body:expr $(,)?) => {{
+            let req = atest::TestRequest::post()
+                .uri($uri)
+                .insert_header(("Fly-Client-IP", "8.8.8.8"))
+                .set_json($body)
+                .to_request();
+            let resp = atest::call_service($app, req).await;
+            let status = resp.status();
+            let body = atest::read_body(resp).await;
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        }};
+    }
+
+    #[actix_web::test]
+    async fn register_accepts_the_web_platform_in_any_case() {
+        let c = make_test_components();
+        let store = c.state.token_store.clone();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        for (pubkey, platform) in [(TEST_PUBKEY, "web"), (TEST_PUBKEY_2, "WeB")] {
+            let (status, body) = post_json!(
+                &app,
+                "/api/register",
+                serde_json::json!({
+                    "trade_pubkey": pubkey,
+                    "token": "fcm_web_token",
+                    "platform": platform
+                }),
+            );
+            assert_eq!(status, StatusCode::OK, "{platform}");
+            assert_eq!(
+                body,
+                r#"{"success":true,"message":"Token registered successfully","platform":"web"}"#
+            );
+            assert_eq!(
+                store.get(pubkey).await.unwrap().platform,
+                Platform::Web,
+                "{platform}"
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn a_web_registration_can_be_unregistered() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        post_json!(
+            &app,
+            "/api/register",
+            serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "fcm_web_token",
+                "platform": "web"
+            }),
+        );
+
+        let (status, body) = post_json!(
+            &app,
+            "/api/unregister",
+            serde_json::json!({ "trade_pubkey": TEST_PUBKEY }),
+        );
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"success":true,"message":"Token unregistered successfully"}"#
+        );
+    }
+
+    /// An unknown platform still gets the pre-1.1 400 body, byte for byte.
+    #[actix_web::test]
+    async fn register_unknown_platform_body_is_byte_identical() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        let (status, body) = post_json!(
+            &app,
+            "/api/register",
+            serde_json::json!({
+                "trade_pubkey": TEST_PUBKEY,
+                "token": "t",
+                "platform": "windows"
+            }),
+        );
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            r#"{"success":false,"message":"Invalid platform 'windows' (expected 'android' or 'ios')"}"#
+        );
+    }
+
+    /// `web` is appended to the token counts only once a browser registers,
+    /// so the body above stays the pre-1.1 fixture until then.
+    #[actix_web::test]
+    async fn status_counts_web_registrations() {
+        let c = make_test_components();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        for (pubkey, platform) in [(TEST_PUBKEY, "web"), (TEST_PUBKEY_2, "android")] {
+            post_json!(
+                &app,
+                "/api/register",
+                serde_json::json!({
+                    "trade_pubkey": pubkey,
+                    "token": "t",
+                    "platform": platform
+                }),
+            );
+        }
+
+        let req = atest::TestRequest::get().uri("/api/status").to_request();
+        let body = atest::read_body(atest::call_service(&app, req).await).await;
+
+        let expected = format!(
+            r#"{{"status":"running","version":"{}","tokens":{{"total":2,"android":1,"ios":0,"web":1}}}}"#,
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(std::str::from_utf8(&body).unwrap(), expected);
     }
 
     /// D-25 anti-DEPLOY-3 / LIMIT-03 structural lock:

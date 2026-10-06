@@ -23,6 +23,9 @@ services:
       # Without this line Compose never passes it in and FCM starts disabled.
       - FIREBASE_SERVICE_ACCOUNT_JSON
       - RUST_LOG=info
+      # Browser origins allowed to register (CORS). Defaults to
+      # https://mostro.network; add your own for a local web client.
+      # - CORS_ALLOWED_ORIGINS=https://mostro.network,http://localhost:5173
       # Persist registrations across restarts in ./data (uncomment both). The
       # key is forwarded from the host shell like the credential above; the
       # server refuses to start with the path but no key.

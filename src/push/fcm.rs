@@ -340,8 +340,14 @@ impl FcmPush {
     /// - When app is alive: background service shows detailed notification with same tag,
     ///   which REPLACES the generic FCM notification
     /// - When app is killed: FCM shows generic notification as fallback
-    fn build_payload_for_token(device_token: &str) -> serde_json::Value {
-        json!({
+    /// - Web tokens also get a `webpush` tag, so repeated pushes replace each
+    ///   other in the browser the way `apns-collapse-id` does on iOS, with
+    ///   `renotify` so each replacement alerts again instead of swapping the
+    ///   text silently, and `Urgency: high` to match the Android and iOS
+    ///   priority: Web Push defaults to `normal` (RFC 8030 §5.3), which a
+    ///   dozing phone may defer
+    fn build_payload_for_token(device_token: &str, platform: &Platform) -> serde_json::Value {
+        let mut payload = json!({
             "message": {
                 "token": device_token,
                 // Notification field - shown by FCM when app is killed (fallback)
@@ -386,7 +392,21 @@ impl FcmPush {
                     }
                 }
             }
-        })
+        });
+        // Added only for web tokens so the Android and iOS payloads stay
+        // exactly as they were.
+        if *platform == Platform::Web {
+            payload["message"]["webpush"] = json!({
+                "headers": {
+                    "Urgency": "high"
+                },
+                "notification": {
+                    "tag": "mostro-trade",
+                    "renotify": true
+                }
+            });
+        }
+        payload
     }
 
     /// Silent push payload for the /api/notify chat-wake path.
@@ -398,8 +418,15 @@ impl FcmPush {
     /// apns-priority: 10 with an alert fallback). Do NOT merge:
     /// the two paths have fundamentally different frequency profiles
     /// (chat = continuous, daemon events = sporadic).
-    fn build_silent_payload_for_notify(device_token: &str) -> serde_json::Value {
-        json!({
+    ///
+    /// Web tokens also get `Urgency: high`, matching `android.priority`:
+    /// the web client shows a notice for each `chat_wake`, and Web Push
+    /// defaults to `normal`.
+    fn build_silent_payload_for_notify(
+        device_token: &str,
+        platform: &Platform,
+    ) -> serde_json::Value {
+        let mut payload = json!({
             "message": {
                 "token": device_token,
                 "data": {
@@ -422,7 +449,17 @@ impl FcmPush {
                     }
                 }
             }
-        })
+        });
+        // Added only for web tokens so the Android and iOS payloads stay
+        // exactly as they were.
+        if *platform == Platform::Web {
+            payload["message"]["webpush"] = json!({
+                "headers": {
+                    "Urgency": "high"
+                }
+            });
+        }
+        payload
     }
 }
 
@@ -440,7 +477,7 @@ impl PushService for FcmPush {
             self.project_id
         );
 
-        let payload = Self::build_payload_for_token(device_token);
+        let payload = Self::build_payload_for_token(device_token, platform);
 
         debug!(
             "Sending FCM to token: {}...",
@@ -477,7 +514,7 @@ impl PushService for FcmPush {
             self.project_id
         );
 
-        let payload = Self::build_silent_payload_for_notify(device_token);
+        let payload = Self::build_silent_payload_for_notify(device_token, platform);
 
         debug!(
             "Sending FCM silent to token: {}...",
@@ -503,7 +540,7 @@ impl PushService for FcmPush {
     }
 
     fn supports_platform(&self, platform: &Platform) -> bool {
-        matches!(platform, Platform::Android | Platform::Ios)
+        matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
     }
 }
 
@@ -589,6 +626,64 @@ mod tests {
     }
 
     const TOKEN_BODY: &str = r#"{"access_token":"ya29.test","expires_in":3600}"#;
+
+    #[test]
+    fn fcm_supports_every_platform() {
+        let service = test_service("http://127.0.0.1:9/token".to_string());
+        assert!(service.supports_platform(&Platform::Android));
+        assert!(service.supports_platform(&Platform::Ios));
+        assert!(service.supports_platform(&Platform::Web));
+    }
+
+    #[test]
+    fn web_payload_carries_a_webpush_tag() {
+        let payload = FcmPush::build_payload_for_token("web-token", &Platform::Web);
+        // `renotify`: a browser replaces a notification with the same tag
+        // silently unless told to alert again, and the next trade step is
+        // often the one with a deadline. `Urgency: high` for the same reason:
+        // Web Push defaults to `normal`, which a dozing phone may defer.
+        assert_eq!(
+            payload["message"]["webpush"],
+            json!({
+                "headers": {"Urgency": "high"},
+                "notification": {"tag": "mostro-trade", "renotify": true}
+            })
+        );
+        assert_eq!(payload["message"]["token"], "web-token");
+    }
+
+    #[test]
+    fn mobile_payloads_carry_no_webpush_block() {
+        for platform in [Platform::Android, Platform::Ios] {
+            let payload = FcmPush::build_payload_for_token("mobile-token", &platform);
+            assert!(payload["message"].get("webpush").is_none(), "{platform}");
+            assert!(payload["message"].get("android").is_some());
+            assert!(payload["message"].get("apns").is_some());
+        }
+    }
+
+    #[test]
+    fn web_silent_payload_asks_for_high_urgency() {
+        let payload = FcmPush::build_silent_payload_for_notify("web-token", &Platform::Web);
+        // The web client shows a notice for every `chat_wake`, and a counterparty
+        // waiting on a reply is as time-bound as a trade step.
+        assert_eq!(
+            payload["message"]["webpush"],
+            json!({"headers": {"Urgency": "high"}})
+        );
+        assert_eq!(payload["message"]["data"]["type"], "chat_wake");
+        assert!(payload["message"].get("notification").is_none());
+    }
+
+    #[test]
+    fn mobile_silent_payloads_carry_no_webpush_block() {
+        for platform in [Platform::Android, Platform::Ios] {
+            let payload = FcmPush::build_silent_payload_for_notify("mobile-token", &platform);
+            assert!(payload["message"].get("webpush").is_none(), "{platform}");
+            assert_eq!(payload["message"]["android"]["priority"], "high");
+            assert_eq!(payload["message"]["apns"]["headers"]["apns-priority"], "5");
+        }
+    }
 
     #[tokio::test]
     async fn retries_a_transient_failure_and_then_succeeds() {

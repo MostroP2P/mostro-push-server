@@ -257,6 +257,7 @@ mod tests {
                 trust_proxy_headers: false,
             },
             trusted_whitelist_enabled: false,
+            cors_allowed_origins: crate::api::cors::AllowedOrigins::List(Vec::new()),
         }
     }
 
@@ -361,6 +362,7 @@ mod tests {
         let service = test_service();
         assert!(service.supports_platform(&Platform::Android));
         assert!(!service.supports_platform(&Platform::Ios));
+        assert!(!service.supports_platform(&Platform::Web));
     }
 
     // ---------------------------------------------------------------------

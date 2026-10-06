@@ -1,6 +1,6 @@
 # API Reference
 
-All endpoints are mounted under `/api`. Bodies and responses are JSON unless noted otherwise.
+All endpoints are mounted under `/api`. Bodies and responses are JSON unless noted otherwise. `/api/register`, `/api/unregister` and `/api/notify` can also be called from a browser; see [CORS](#cors-browser-clients).
 
 | Method | Path             | Purpose                                                |
 |--------|------------------|--------------------------------------------------------|
@@ -59,6 +59,8 @@ curl http://localhost:8080/api/status
 }
 ```
 
+A `web` count is appended after `ios` once at least one browser is registered (`"web": 1`). While there are none the field is omitted, so the body is byte-identical to the one served before web clients existed.
+
 ## POST /api/register
 
 Registers a device token for a `trade_pubkey`. The token is held in plaintext in memory and, when persistence is enabled, encrypted on disk; HTTPS protects it in transit. Registering an already registered `trade_pubkey` replaces its token and restarts its TTL.
@@ -80,7 +82,7 @@ Request:
 |-----------------|--------|------------------------------------------------------------------------------------------------------------------------|
 | `trade_pubkey`  | string | 64 hex characters                                                                                                      |
 | `token`         | string | FCM device token, or UnifiedPush endpoint URL. Non-empty, at most 4096 bytes. If it parses as an `http`/`https` URL it must be `https` and point at a public address (see below). |
-| `platform`      | string | `"android"` or `"ios"`                                                                                                 |
+| `platform`      | string | `"android"`, `"ios"` or `"web"`, case-insensitive. `web` is a browser registered through FCM Web Push; its token is an ordinary FCM registration token and is delivered by FCM only. |
 | `mostro_pubkey` | string | 64 hex characters. Optional on the wire; required when the trusted-instance whitelist is non-empty (see below). |
 
 Success — `200 OK`:
@@ -107,7 +109,7 @@ Possible validation errors:
 - `trade_pubkey` not 64 hex characters
 - `token` empty, or longer than 4096 bytes
 - `token` rejected as a push endpoint (see below)
-- `platform` not `"android"` or `"ios"`
+- `platform` not `"android"`, `"ios"` or `"web"`. The message still reads `Invalid platform '<value>' (expected 'android' or 'ios')`: the `400` bodies are frozen against the pre-1.1 fixtures.
 - `mostro_pubkey` present but not 64 hex characters
 
 Trusted-instance filter — `403 Forbidden`:
@@ -183,8 +185,9 @@ Sender-triggered silent push to the device registered for `trade_pubkey`. Used b
 - Always `202 Accepted` on parse-valid input. The response body is identical for registered and unregistered pubkeys, so this endpoint cannot be used as an enumeration oracle.
 - The dispatch happens in a `tokio::spawn` task detached from the response. The 202 means "accepted for dispatch", not "delivered". FCM `200` further along the pipeline only means Google accepted the request, not that the device woke.
 - No authentication, no `sender_pubkey`, no signature, no `Idempotency-Key`. Adding any of these would let the operator correlate sender and recipient.
-- Every response (202 / 400 / 429) carries a server-generated UUIDv4 `x-request-id` header. Any inbound `X-Request-Id` from the client is stripped first; a client cannot pin its own correlator into server logs.
+- Every response (202 / 400 / 429, and CORS preflights) carries a server-generated UUIDv4 `x-request-id` header. Any inbound `X-Request-Id` from the client is stripped first; a client cannot pin its own correlator into server logs.
 - Rate-limit responses are byte-identical between the per-IP and per-pubkey paths so the two cannot be distinguished by callers.
+- CORS headers depend only on the request's `Origin`, never on the pubkey, so they cannot tell a registered pubkey from an unregistered one either.
 
 ### Request
 
@@ -233,6 +236,7 @@ curl -i -X POST http://localhost:8080/api/notify \
 |--------|-------------------------------------------------------------------------------|
 | 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
 | 202    | `/api/notify` on parse-valid input                                            |
+| 204    | CORS preflight (`OPTIONS`) from an allowed origin on `/api/register`, `/api/unregister`, `/api/notify` |
 | 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint |
 | 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits; `/api/register` when the token store is full |
 | 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted; `/api/unregister` when the persisted row cannot be deleted |
@@ -282,6 +286,57 @@ Registration performs the checks above without touching the network. The
 authoritative check runs again immediately before the outbound POST and
 additionally resolves domain hosts, refusing the endpoint if any resolved
 address is non-public.
+
+## CORS (browser clients)
+
+A web client, such as the Mostro web app at `https://mostro.network/app/`,
+registers its FCM Web Push token with `platform: "web"`. Browsers only send
+those cross-origin `POST`s after a successful preflight, so `/api/register`,
+`/api/unregister` and `/api/notify` answer CORS for the origins listed in
+`CORS_ALLOWED_ORIGINS` (default `https://mostro.network`; see
+[configuration.md](./configuration.md#cors)). `/api/health`, `/api/info` and
+`/api/status` do not.
+
+The push sent to a web token sets no click target (`webpush.fcm_options.link`):
+the web client's service worker must handle `notificationclick` itself, or a
+tap on the notification opens nothing. Register that listener before importing
+the FCM libraries, as Firebase's documentation asks: the SDK adds its own
+`notificationclick` listener, and one registered after it may never run.
+
+That push is sent with `webpush.headers.Urgency: high`, matching the Android and
+iOS priority, and sets no `webpush.notification.icon` or `badge`. The FCM SDK
+renders it from `notification.title` and `body` alone, so a web client cannot
+brand it with its own icon today.
+
+The data-only `chat_wake` push sent through `/api/notify` carries the same
+`webpush.headers.Urgency: high` for web tokens, and nothing else in a `webpush`
+block: the client's service worker builds that notice itself.
+
+Preflight from an allowed origin — `204 No Content`, empty body:
+
+```
+Access-Control-Allow-Origin: https://mostro.network
+Access-Control-Allow-Methods: POST, OPTIONS
+Access-Control-Allow-Headers: Content-Type
+Access-Control-Max-Age: 86400
+Vary: Origin
+```
+
+The preflight is answered before the rate limiters, so it never spends a
+rate-limit token and never reaches a handler.
+
+Every other response to a request from an allowed origin — `200`, `202`,
+`400`, `403`, `429`, `500` — carries `Access-Control-Allow-Origin`,
+`Access-Control-Expose-Headers: Retry-After` and `Vary: Origin`. The allowed
+origin is echoed back; with `CORS_ALLOWED_ORIGINS=*` the value is `*`.
+`Retry-After` is not CORS-safelisted, so without the expose header a browser
+would hide it from a web client backing off a `429`. `Access-Control-Allow-Credentials` is never sent: none of
+these endpoints uses cookies or authentication.
+
+A request with no `Origin`, or from an origin that is not allowed, gets no CORS
+headers and exactly the response it got before CORS existed. That includes a
+preflight, which then goes through the rate limiter and is answered `405 Method
+Not Allowed`, so the browser blocks the call.
 
 ## Request size limits
 
