@@ -301,6 +301,15 @@ tap on the notification opens nothing. Register that listener before importing
 the FCM libraries, as Firebase's documentation asks: the SDK adds its own
 `notificationclick` listener, and one registered after it may never run.
 
+That push is sent with `webpush.headers.Urgency: high`, matching the Android and
+iOS priority, and sets no `webpush.notification.icon` or `badge`. The FCM SDK
+renders it from `notification.title` and `body` alone, so a web client cannot
+brand it with its own icon today.
+
+The data-only `chat_wake` push sent through `/api/notify` carries the same
+`webpush.headers.Urgency: high` for web tokens, and nothing else in a `webpush`
+block: the client's service worker builds that notice itself.
+
 Preflight from an allowed origin — `204 No Content`, empty body:
 
 ```
@@ -315,9 +324,11 @@ The preflight is answered before the rate limiters, so it never spends a
 rate-limit token and never reaches a handler.
 
 Every other response to a request from an allowed origin — `200`, `202`,
-`400`, `403`, `429`, `500` — carries `Access-Control-Allow-Origin` and
-`Vary: Origin`. The allowed origin is echoed back; with `CORS_ALLOWED_ORIGINS=*`
-the value is `*`. `Access-Control-Allow-Credentials` is never sent: none of
+`400`, `403`, `429`, `500` — carries `Access-Control-Allow-Origin`,
+`Access-Control-Expose-Headers: Retry-After` and `Vary: Origin`. The allowed
+origin is echoed back; with `CORS_ALLOWED_ORIGINS=*` the value is `*`.
+`Retry-After` is not CORS-safelisted, so without the expose header a browser
+would hide it from a web client backing off a `429`. `Access-Control-Allow-Credentials` is never sent: none of
 these endpoints uses cookies or authentication.
 
 A request with no `Origin`, or from an origin that is not allowed, gets no CORS

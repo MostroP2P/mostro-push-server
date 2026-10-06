@@ -13,7 +13,8 @@ use actix_web::{
     http::{
         header::{
             HeaderValue, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
-            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ORIGIN, VARY,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
+            ORIGIN, VARY,
         },
         Method,
     },
@@ -77,6 +78,9 @@ impl AllowedOrigins {
 
 /// Answers preflights and tags responses for allowed origins.
 ///
+/// Actual responses expose `Retry-After`, which is not CORS-safelisted, so a
+/// web client can honour a `429`'s backoff the way the native client does.
+///
 /// Wrapped outside the rate limiters, so a preflight neither reaches a
 /// handler nor spends a rate-limit token. A request with no `Origin`, or
 /// from an origin that is not allowed, passes through untouched: it gets no
@@ -109,6 +113,10 @@ pub async fn cors_mw(
     let mut res = next.call(req).await?;
     let headers = res.headers_mut();
     headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
+    headers.insert(
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("Retry-After"),
+    );
     headers.append(VARY, HeaderValue::from_static("Origin"));
     Ok(res.map_into_boxed_body())
 }
@@ -187,8 +195,8 @@ mod http_tests {
     };
     use actix_web::http::header::{
         HeaderMap, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
-        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, ORIGIN,
-        VARY,
+        ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
+        ACCESS_CONTROL_MAX_AGE, ORIGIN, VARY,
     };
     use actix_web::http::{Method, StatusCode};
     use actix_web::test::{self, TestRequest};
@@ -236,6 +244,7 @@ mod http_tests {
             ACCESS_CONTROL_ALLOW_HEADERS,
             ACCESS_CONTROL_MAX_AGE,
             ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            ACCESS_CONTROL_EXPOSE_HEADERS,
             VARY,
         ] {
             assert!(!headers.contains_key(&name), "{context}: unexpected {name}");
@@ -413,6 +422,15 @@ mod http_tests {
         let limited = limited.expect("the register limiter must answer 429");
         assert_actual_cors_headers(limited.headers(), ALLOWED, "429");
         assert!(limited.headers().contains_key("retry-after"));
+        // `Retry-After` is not CORS-safelisted: without this a browser hides
+        // it and the web client falls back to its generic backoff.
+        assert_eq!(
+            limited
+                .headers()
+                .get(ACCESS_CONTROL_EXPOSE_HEADERS)
+                .unwrap(),
+            "Retry-After"
+        );
 
         // No proxy header and no peer address: the per-IP key cannot be
         // extracted and the limiter fails closed.
