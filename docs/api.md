@@ -143,6 +143,8 @@ the whitelist.
 The whitelist is compiled into the binary from
 `config/trusted_mostro_pubkeys.json`. The filter is honour-system: there
 is no cryptographic proof binding the device to the declared instance.
+The same list also restricts the Nostr listener, which only pushes for
+events signed by these nodes whatever the flag says.
 
 **Mobile client compatibility.** The `mostro_pubkey` field is supported
 by mobile client `vX.Y.Z` and later (TODO: pin the released version once

@@ -1,10 +1,14 @@
 use futures::StreamExt;
+use governor::{Quota, RateLimiter};
 use log::{debug, error, info, warn};
 use nostr_sdk::prelude::*;
+use std::collections::HashSet;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 
+use crate::api::rate_limit::{start_keyed_limiter_cleanup_task, PerPubkeyLimiter};
 use crate::config::Config;
 use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
 use crate::store::{RegisteredToken, TokenStore};
@@ -14,25 +18,52 @@ use crate::utils::log_pubkey::log_pubkey;
 /// from the `/api/notify` semaphore so neither path can starve the other.
 const MAX_IN_FLIGHT_DISPATCHES: usize = 50;
 
+/// Pushes one trade pubkey may trigger per minute, also the burst. A real
+/// trade gets about ten updates over its whole life and two or three in the
+/// same minute at most; the limit only stops a node or relay replaying one
+/// trade's events in a loop. Nodes are not limited: every trade has its own
+/// budget.
+const PUSHES_PER_TRADE_PER_MIN: u32 = 10;
+
 pub struct NostrListener {
     config: Config,
     handler: EventHandler,
 }
 
 impl NostrListener {
+    /// `trusted_mostro_pubkeys` are the Mostro nodes whose events may trigger a
+    /// push (`config/trusted_mostro_pubkeys.json`). An empty list is an error:
+    /// the listener would subscribe to nothing and silently send no push.
     pub fn new(
         config: Config,
         dispatcher: Arc<PushDispatcher>,
         token_store: Arc<TokenStore>,
         log_salt: Arc<[u8; 32]>,
+        trusted_mostro_pubkeys: &HashSet<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let trusted_authors = parse_trusted_authors(trusted_mostro_pubkeys)?;
         Ok(Self {
             config,
-            handler: EventHandler::new(dispatcher, token_store, log_salt, MAX_IN_FLIGHT_DISPATCHES),
+            handler: EventHandler::new(
+                dispatcher,
+                token_store,
+                log_salt,
+                trusted_authors,
+                MAX_IN_FLIGHT_DISPATCHES,
+            ),
         })
     }
 
     pub async fn start(&self) {
+        // Only registered pubkeys ever get a bucket, so the map stays bounded
+        // by MAX_TOKENS; the sweep drops buckets that refilled.
+        start_keyed_limiter_cleanup_task(
+            self.handler.per_trade_limiter.clone(),
+            Duration::from_secs(self.config.notify_rate_limit.cleanup_interval_secs),
+            self.config.notify_rate_limit.pubkey_limiter_soft_cap,
+            "listener-trade",
+        );
+
         loop {
             match self.connect_and_listen().await {
                 Ok(_) => {
@@ -65,20 +96,16 @@ impl NostrListener {
         // Connect to all relays
         client.connect().await;
 
-        // DO NOT add .authors(...) to this Filter. Two reasons:
-        //  1. Gift Wrap (NIP-59, kind 1059) wraps each event with an EPHEMERAL outer key.
-        //     The outer pubkey is never the Mostro daemon — filtering by author would drop everything.
-        //  2. Admin DMs in disputes are sent directly user-to-user, NOT through the Mostro daemon.
-        //     A mostro_pubkey author filter would silently drop every dispute notification.
-        // See PROJECT.md anti-requirement OOS-19 / PITFALLS CRIT-1.
-        //
-        // Kind 14 is Mostro protocol v2 (NIP-44 direct): daemons advertising
-        // protocol_version=2 address the trade pubkey in the `p` tag of a
-        // signed kind-14 event instead of a Gift Wrap. It is matched by `p`
-        // tag only, like kind 1059 — pushes fire solely for registered trade
-        // pubkeys, so no author filter is needed here either.
+        // Only Mostro nodes on the trusted list address trade updates to a
+        // trade pubkey, and nostr-sdk verifies every event's id and signature
+        // before delivering it, so the author cannot be forged. Filtering here
+        // keeps relays from streaming every other kind-14 DM on the network,
+        // and stops anyone else from triggering a push by tagging a
+        // registered trade pubkey. Chat envelopes are addressed to a
+        // conversation key, not a trade pubkey, and reach devices through
+        // `/api/notify` instead.
         let since = Timestamp::now() - Duration::from_secs(60);
-        let filter = Filter::new().kinds(watched_kinds()).since(since);
+        let filter = subscription_filter(self.handler.trusted_authors.iter().copied(), since);
 
         // Open the notification channel BEFORE subscribing: the stream only
         // carries what arrives after this call, so subscribing first would
@@ -110,7 +137,7 @@ fn ensure_subscribed(
         warn!("Subscription failed on relay {}: {}", relay, reason);
     }
     info!(
-        "Subscribed to kind 1059 (Gift Wrap) and kind 14 (protocol v2) events on {} of {} relays",
+        "Subscribed to kind 14 events from trusted Mostro nodes on {} of {} relays",
         output.success.len(),
         output.success.len() + output.failed.len()
     );
@@ -120,12 +147,43 @@ fn ensure_subscribed(
     Ok(())
 }
 
+/// Parses the trusted list into public keys, rejecting an empty list.
+fn parse_trusted_authors(
+    trusted_mostro_pubkeys: &HashSet<String>,
+) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
+    if trusted_mostro_pubkeys.is_empty() {
+        return Err(
+            "no trusted Mostro nodes in config/trusted_mostro_pubkeys.json: \
+             the listener would never send a push"
+                .into(),
+        );
+    }
+    trusted_mostro_pubkeys
+        .iter()
+        .map(|pk| {
+            PublicKey::from_hex(pk)
+                .map_err(|e| format!("invalid trusted Mostro pubkey {}: {}", pk, e).into())
+        })
+        .collect()
+}
+
+/// Kind-14 events authored by the trusted Mostro nodes, from `since` on.
+fn subscription_filter(authors: impl IntoIterator<Item = PublicKey>, since: Timestamp) -> Filter {
+    Filter::new()
+        .kind(Kind::PrivateDirectMessage)
+        .authors(authors)
+        .since(since)
+}
+
 /// Matches a watched event to a registered device and dispatches its push.
 struct EventHandler {
     dispatcher: Arc<PushDispatcher>,
     token_store: Arc<TokenStore>,
     log_salt: Arc<[u8; 32]>,
+    /// Checked again per event: a relay may ignore the subscription filter.
+    trusted_authors: HashSet<PublicKey>,
     permits: Arc<Semaphore>,
+    per_trade_limiter: Arc<PerPubkeyLimiter>,
 }
 
 impl EventHandler {
@@ -133,13 +191,18 @@ impl EventHandler {
         dispatcher: Arc<PushDispatcher>,
         token_store: Arc<TokenStore>,
         log_salt: Arc<[u8; 32]>,
+        trusted_authors: HashSet<PublicKey>,
         max_in_flight: usize,
     ) -> Self {
         Self {
             dispatcher,
             token_store,
             log_salt,
+            trusted_authors,
             permits: Arc::new(Semaphore::new(max_in_flight)),
+            per_trade_limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+                NonZeroU32::new(PUSHES_PER_TRADE_PER_MIN).expect("non-zero constant"),
+            ))),
         }
     }
 
@@ -147,14 +210,17 @@ impl EventHandler {
         if !is_watched_kind(event.kind) {
             return;
         }
-        info!("Received {} event: {}", kind_label(event.kind), event.id);
-
-        let Some(trade_pubkey) = extract_recipient(&event) else {
-            warn!(
-                "No 'p' tag found in {} event {}",
-                kind_label(event.kind),
+        if !self.trusted_authors.contains(&event.pubkey) {
+            debug!(
+                "Ignoring kind 14 event {} from an untrusted author",
                 event.id
             );
+            return;
+        }
+        info!("Received protocol v2 (kind 14) event: {}", event.id);
+
+        let Some(trade_pubkey) = extract_recipient(&event) else {
+            warn!("No 'p' tag found in kind 14 event {}", event.id);
             return;
         };
 
@@ -165,6 +231,13 @@ impl EventHandler {
             debug!("No registered token pk={}", log_pk);
             return;
         };
+        if self.per_trade_limiter.check_key(&trade_pubkey).is_err() {
+            warn!(
+                "Push limit reached for pk={}, dropping event {}",
+                log_pk, event.id
+            );
+            return;
+        }
         info!(
             "MATCH! Found registered token pk={}, sending push to {} device",
             log_pk, registered_token.platform
@@ -210,42 +283,19 @@ async fn dispatch_and_log(
     }
 }
 
-/// Watched kinds are held as `u16` because nostr-sdk parses 1059 and 14 into
-/// the named `Kind::GiftWrap` and `Kind::PrivateDirectMessage` variants. A
-/// `Kind::Custom(14)` *pattern* therefore never matches an inbound event, even
-/// though `Kind`'s `PartialEq` compares the two as equal (it compares
-/// `as_u16()`). Matching on the number keeps equality and pattern matching
-/// from disagreeing.
-const KIND_GIFT_WRAP: u16 = 1059;
+/// Matched on the number because nostr-sdk parses 14 into the named
+/// `Kind::PrivateDirectMessage` variant, which a `Kind::Custom(14)` pattern
+/// would never match even though `PartialEq` treats the two as equal.
 const KIND_PROTOCOL_V2: u16 = 14;
 
-/// Event kinds the listener subscribes to and dispatches on:
-/// - 1059 — Gift Wrap (NIP-59), Mostro protocol v1 and dispute admin DMs.
-/// - 14 — NIP-44 direct message, Mostro protocol v2 (daemons advertising
-///   `protocol_version=2` reply with signed kind-14 events addressed to the
-///   trade pubkey in the `p` tag instead of a Gift Wrap).
-fn watched_kinds() -> Vec<Kind> {
-    vec![
-        Kind::from_u16(KIND_GIFT_WRAP),
-        Kind::from_u16(KIND_PROTOCOL_V2),
-    ]
-}
-
+/// Mostro protocol v2: nodes address trade updates to the trade pubkey in the
+/// `p` tag of a signed kind-14 event. Gift Wrap (kind 1059, protocol v1) is no
+/// longer used by any Mostro node nor the mobile app.
 fn is_watched_kind(kind: Kind) -> bool {
-    matches!(kind.as_u16(), KIND_GIFT_WRAP | KIND_PROTOCOL_V2)
+    kind.as_u16() == KIND_PROTOCOL_V2
 }
 
-fn kind_label(kind: Kind) -> &'static str {
-    match kind.as_u16() {
-        KIND_GIFT_WRAP => "Gift Wrap (kind 1059)",
-        KIND_PROTOCOL_V2 => "protocol v2 (kind 14)",
-        _ => "unexpected kind",
-    }
-}
-
-/// Extracts the recipient trade pubkey from the first `p` tag, shared by both
-/// watched kinds (v1 Gift Wrap and v2 NIP-44 direct address the recipient the
-/// same way).
+/// Extracts the recipient trade pubkey from the event's first `p` tag.
 fn extract_recipient(event: &Event) -> Option<String> {
     event.tags.iter().find_map(|tag| {
         let tag_slice = tag.as_slice();
@@ -300,6 +350,8 @@ mod tests {
         handler: EventHandler,
         release: Arc<Notify>,
         delivered: mpsc::UnboundedReceiver<String>,
+        /// The only trusted Mostro node.
+        node: Keys,
         slow_recipient: Keys,
         fast_recipient: Keys,
     }
@@ -334,20 +386,31 @@ mod tests {
             .await
             .unwrap();
 
+        let node = Keys::generate();
+        let trusted = HashSet::from([node.public_key()]);
         Fixture {
-            handler: EventHandler::new(dispatcher, store, salt, max_in_flight),
+            handler: EventHandler::new(dispatcher, store, salt, trusted, max_in_flight),
             release,
             delivered,
+            node,
             slow_recipient,
             fast_recipient,
         }
     }
 
-    fn gift_wrap_to(recipient: &Keys) -> Event {
-        EventBuilder::new(Kind::GiftWrap, "ciphertext")
+    /// An event of `kind` signed by `author` and addressed to `recipient`.
+    fn event(kind: Kind, author: &Keys, recipient: &Keys) -> Event {
+        EventBuilder::new(kind, "ciphertext")
             .tags([Tag::public_key(recipient.public_key())])
-            .finalize(&Keys::generate())
+            .finalize(author)
             .unwrap()
+    }
+
+    impl Fixture {
+        /// A trade update from the trusted node to `recipient`.
+        fn update_to(&self, recipient: &Keys) -> Event {
+            event(Kind::PrivateDirectMessage, &self.node, recipient)
+        }
     }
 
     #[tokio::test]
@@ -355,8 +418,8 @@ mod tests {
         let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
 
         tokio::time::timeout(DELIVERY_WAIT, async {
-            f.handler.handle(gift_wrap_to(&f.slow_recipient)).await;
-            f.handler.handle(gift_wrap_to(&f.fast_recipient)).await;
+            f.handler.handle(f.update_to(&f.slow_recipient)).await;
+            f.handler.handle(f.update_to(&f.fast_recipient)).await;
         })
         .await
         .expect("handle() must not wait for the push to finish");
@@ -372,11 +435,11 @@ mod tests {
     #[tokio::test]
     async fn saturated_dispatch_drops_the_push_without_blocking() {
         let mut f = fixture(1).await;
-        f.handler.handle(gift_wrap_to(&f.slow_recipient)).await;
+        f.handler.handle(f.update_to(&f.slow_recipient)).await;
 
         tokio::time::timeout(
             DELIVERY_WAIT,
-            f.handler.handle(gift_wrap_to(&f.fast_recipient)),
+            f.handler.handle(f.update_to(&f.fast_recipient)),
         )
         .await
         .expect("a saturated dispatcher must not block the notification loop");
@@ -387,7 +450,7 @@ mod tests {
         let slow = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
         assert_eq!(slow.unwrap().as_deref(), Some(SLOW_DEVICE));
 
-        f.handler.handle(gift_wrap_to(&f.fast_recipient)).await;
+        f.handler.handle(f.update_to(&f.fast_recipient)).await;
         let fast = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
         assert_eq!(fast.unwrap().as_deref(), Some(FAST_DEVICE));
     }
@@ -420,41 +483,89 @@ mod tests {
     async fn unregistered_recipient_dispatches_nothing() {
         let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
 
-        f.handler.handle(gift_wrap_to(&Keys::generate())).await;
+        f.handler.handle(f.update_to(&Keys::generate())).await;
 
         let got = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
         assert!(got.is_err());
     }
 
+    #[tokio::test]
+    async fn event_from_an_untrusted_author_is_ignored() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        // Anyone can tag a registered trade pubkey; only the node may wake it.
+        let forged = event(
+            Kind::PrivateDirectMessage,
+            &Keys::generate(),
+            &f.fast_recipient,
+        );
+        f.handler.handle(forged).await;
+
+        let got = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(got.is_err(), "untrusted authors must not trigger a push");
+    }
+
+    #[tokio::test]
+    async fn gift_wrap_from_a_trusted_node_is_ignored() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        let gift_wrap = event(Kind::GiftWrap, &f.node, &f.fast_recipient);
+        f.handler.handle(gift_wrap).await;
+
+        let got = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(got.is_err(), "protocol v1 Gift Wraps are no longer watched");
+    }
+
+    #[tokio::test]
+    async fn trade_update_from_the_trusted_node_is_delivered() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        f.handler.handle(f.update_to(&f.fast_recipient)).await;
+
+        let got = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(got.unwrap().as_deref(), Some(FAST_DEVICE));
+    }
+
     #[test]
-    fn watched_kinds_include_gift_wrap_and_protocol_v2() {
-        assert!(is_watched_kind(Kind::Custom(1059)));
-        assert!(is_watched_kind(Kind::Custom(14)));
-        // Inbound events arrive as the named variants, not as Custom.
-        assert!(is_watched_kind(Kind::from_u16(1059)));
+    fn subscription_asks_only_for_kind_14_from_trusted_nodes() {
+        let node = Keys::generate().public_key();
+        let since = Timestamp::from(1_700_000_000);
+
+        let filter = subscription_filter([node], since);
+
+        assert_eq!(
+            filter.kinds,
+            Some([Kind::PrivateDirectMessage].into_iter().collect())
+        );
+        assert_eq!(filter.authors, Some([node].into_iter().collect()));
+        assert_eq!(filter.since, Some(since));
+    }
+
+    #[test]
+    fn an_empty_trusted_list_is_rejected() {
+        assert!(parse_trusted_authors(&HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn a_trusted_key_that_is_not_a_pubkey_is_rejected() {
+        let invalid = HashSet::from(["zz".repeat(32)]);
+        assert!(parse_trusted_authors(&invalid).is_err());
+    }
+
+    #[test]
+    fn the_embedded_trusted_list_parses() {
+        let trusted = parse_trusted_authors(&crate::trusted_pubkeys::load()).unwrap();
+        assert!(!trusted.is_empty());
+    }
+
+    #[test]
+    fn only_protocol_v2_kind_is_watched() {
+        // Inbound events arrive as the named variant, not as Custom.
         assert!(is_watched_kind(Kind::from_u16(14)));
-    }
-
-    /// Regression guard for the 0.45 migration: `kind_label` used to match on
-    /// `Kind::Custom(..)` patterns, which never match the named variants the
-    /// SDK produces for inbound events. Every watched event logged as
-    /// "unexpected kind" while still dispatching correctly.
-    #[test]
-    fn kind_label_names_both_watched_kinds_however_constructed() {
-        for kind in [Kind::from_u16(1059), Kind::Custom(1059)] {
-            assert_eq!(kind_label(kind), "Gift Wrap (kind 1059)");
-        }
-        for kind in [Kind::from_u16(14), Kind::Custom(14)] {
-            assert_eq!(kind_label(kind), "protocol v2 (kind 14)");
-        }
-        assert_eq!(kind_label(Kind::from_u16(1)), "unexpected kind");
-    }
-
-    #[test]
-    fn unrelated_kinds_are_not_watched() {
+        assert!(is_watched_kind(Kind::Custom(14)));
+        assert!(!is_watched_kind(Kind::from_u16(1059)));
         assert!(!is_watched_kind(Kind::Custom(1)));
         assert!(!is_watched_kind(Kind::Custom(38385)));
-        assert!(!is_watched_kind(Kind::Custom(10002)));
     }
 
     #[test]
@@ -480,5 +591,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(extract_recipient(&event), None);
+    }
+
+    #[tokio::test]
+    async fn pushes_per_trade_are_limited_per_minute() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+
+        for _ in 0..PUSHES_PER_TRADE_PER_MIN {
+            f.handler.handle(f.update_to(&f.fast_recipient)).await;
+        }
+        for _ in 0..PUSHES_PER_TRADE_PER_MIN {
+            let got = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+            assert_eq!(got.unwrap().as_deref(), Some(FAST_DEVICE));
+        }
+
+        // One more within the same minute is dropped.
+        f.handler.handle(f.update_to(&f.fast_recipient)).await;
+        let dropped = tokio::time::timeout(BLOCKED_WAIT, f.delivered.recv()).await;
+        assert!(
+            dropped.is_err(),
+            "the burst above the limit must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_per_trade_not_per_node() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+        for _ in 0..PUSHES_PER_TRADE_PER_MIN {
+            f.handler.handle(f.update_to(&f.fast_recipient)).await;
+            tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv())
+                .await
+                .unwrap();
+        }
+
+        // The same node still reaches every other trade.
+        f.release.notify_one();
+        f.handler.handle(f.update_to(&f.slow_recipient)).await;
+        let got = tokio::time::timeout(DELIVERY_WAIT, f.delivered.recv()).await;
+        assert_eq!(got.unwrap().as_deref(), Some(SLOW_DEVICE));
     }
 }

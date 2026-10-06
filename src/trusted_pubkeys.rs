@@ -2,12 +2,12 @@ use std::collections::HashSet;
 
 const TRUSTED_PUBKEYS_JSON: &str = include_str!("../config/trusted_mostro_pubkeys.json");
 
-/// Load the trusted Mostro instance pubkeys embedded at compile time from
+/// Load the trusted Mostro node pubkeys embedded at compile time from
 /// `config/trusted_mostro_pubkeys.json`.
 ///
-/// An empty list disables the whitelist (permissive mode). A non-empty list
-/// activates the filter on `/api/register`: clients must declare a
-/// `mostro_pubkey` matching one of the entries.
+/// The Nostr listener only pushes for events these nodes author and refuses
+/// to start without any. With `TRUSTED_WHITELIST_ENABLED`, `/api/register`
+/// also requires a declared `mostro_pubkey` matching one of the entries.
 ///
 /// Panics at startup if the JSON is malformed or any entry is not 64 hex
 /// characters. Failing fast at boot is preferable to silently shipping a
@@ -35,10 +35,8 @@ pub fn load() -> HashSet<String> {
 mod tests {
     use super::*;
 
-    /// `load()` must succeed and yield only valid 64-hex entries. An empty
-    /// array is the documented permissive-mode configuration, so cardinality
-    /// is intentionally not asserted — operators who edit the embedded JSON
-    /// must not be forced to keep at least one entry just to satisfy tests.
+    /// `load()` must succeed and yield only valid 64-hex entries. Emptiness is
+    /// checked where it matters, when the listener is built.
     #[test]
     fn embedded_json_parses_with_valid_entries() {
         let set = load();

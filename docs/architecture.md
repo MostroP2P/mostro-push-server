@@ -15,7 +15,7 @@ src/
 │   ├── rate_limit.rs       # Per-IP and per-pubkey limiter middleware (governor)
 │   └── test_support.rs     # In-process test fixtures (StubPushService, app factory)
 ├── nostr/
-│   └── listener.rs         # Persistent Nostr subscription, kind 1059 dispatch
+│   └── listener.rs         # Kind-14 subscription from trusted Mostro nodes, per-trade push limit
 ├── push/
 │   ├── mod.rs              # PushService trait + Arc<T> blanket impls
 │   ├── dispatcher.rs       # PushDispatcher (lock-free Arc<[Arc<dyn PushService>]>)
@@ -40,7 +40,7 @@ Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/regis
 
 ### Nostr listener (`nostr-sdk`)
 
-Connects to all configured relays, subscribes to `kind 1059` (Mostro protocol v1 Gift Wrap) and `kind 14` (Mostro protocol v2 NIP-44 direct) events with no author filter, and reconnects automatically on close (5 s) or error (10 s). For each event it extracts the `p` tag and looks up the corresponding token in the store; on hit it calls `PushDispatcher::dispatch` in a spawned task, so a slow push backend never stalls events arriving from other relays. The listener caps in-flight dispatches at 50 with its own `Semaphore`, separate from the `/api/notify` one; when all permits are taken it drops the push with a `warn!` rather than waiting, because a blocked loop would let nostr-sdk's bounded notification channel overflow and silently discard events from every relay. Relays on which the subscription fails are logged at `warn!`; if it fails on every relay, the listener reconnects, because nostr-sdk never resends a subscription that failed.
+Connects to all configured relays, subscribes to `kind 14` (Mostro protocol v2 NIP-44 direct) events authored by the trusted Mostro nodes (`config/trusted_mostro_pubkeys.json`), and reconnects automatically on close (5 s) or error (10 s). It refuses to start with an empty trusted list. For each event it checks the author again (a relay may ignore the filter; nostr-sdk has already verified the signature), extracts the `p` tag and looks up the corresponding token in the store. A registered `trade_pubkey` may trigger at most 10 pushes per minute (`PUSHES_PER_TRADE_PER_MIN`, a keyed `governor` limiter swept by the same cleanup task as the `/api/notify` limiters); nodes are not limited as such, every trade has its own budget. On hit it calls `PushDispatcher::dispatch` in a spawned task, so a slow push backend never stalls events arriving from other relays. The listener caps in-flight dispatches at 50 with its own `Semaphore`, separate from the `/api/notify` one; when all permits are taken it drops the push with a `warn!` rather than waiting, because a blocked loop would let nostr-sdk's bounded notification channel overflow and silently discard events from every relay. Relays on which the subscription fails are logged at `warn!`; if it fails on every relay, the listener reconnects, because nostr-sdk never resends a subscription that failed.
 
 The listener uses `Client::new()` with no signer: it only subscribes and never publishes, so it holds no keys and nothing it sends identifies a user.
 
@@ -82,20 +82,21 @@ A salted truncated BLAKE3 keyed hash. The salt is a 32-byte random value generat
 
 ## Data flow
 
-### Listener path (`kind 1059` / `kind 14` from a relay)
+### Listener path (`kind 14` from a trusted Mostro node)
 
 ```
-Sender (any Nostr client)
+Trusted Mostro node
     │
-    │  publish kind 1059 or kind 14 (p tag = trade_pubkey)
+    │  publish kind 14 (p tag = trade_pubkey)
     ▼
 Nostr relay
     │
-    │  delivered to subscription
+    │  delivered to subscription (kind 14, authors = trusted nodes)
     ▼
 NostrListener.connect_and_listen
     │
-    │  extract p tag, lookup TokenStore
+    │  check author, extract p tag, lookup TokenStore
+    │  per-trade limit (10/min; drop if exceeded)
     │  try listener permit (50; drop if full), tokio::spawn
     ▼
 PushDispatcher.dispatch(token)
@@ -134,7 +135,7 @@ notify_token handler
 
 ### Token-store update (`POST /api/register` / `unregister`)
 
-Synchronous write under `RwLock::write`, then `200`. No fan-out; the next `kind 1059` for that `trade_pubkey` will pick up the new token via the listener path.
+Synchronous write under `RwLock::write`, then `200`. No fan-out; the next `kind 14` for that `trade_pubkey` will pick up the new token via the listener path.
 
 ## Concurrency model
 
@@ -166,7 +167,7 @@ The 50-permit semaphore is intentionally distinct from the `fly.toml` `hard_limi
 
 These are non-negotiable; reintroducing any of them is treated as a regression.
 
-1. The Nostr listener's `Filter` MUST NOT call `.authors(...)`. Gift Wrap uses an ephemeral outer key; admin DMs in disputes are user-to-user, not Mostro-daemon-signed.
+1. The Nostr listener MUST only push for `kind 14` events authored by a trusted Mostro node: filtered with `.authors(...)` in the subscription and checked again per event. Otherwise anyone could trigger a visible push by tagging a registered (public) `trade_pubkey`. Chat envelopes are addressed to a conversation key and go through `/api/notify`.
 2. `/api/notify` always returns `202` on parse-valid input. It MUST NOT distinguish registered vs unregistered pubkeys in status code, body, headers, or timing.
 3. `/api/notify` MUST NOT accept a `sender_pubkey`, signature, `Authorization` header, or `Idempotency-Key`. Anything that would let the operator correlate sender and recipient is out of scope.
 4. Per-IP and per-pubkey 429 bodies MUST be byte-identical so a client cannot distinguish which limiter it tripped.

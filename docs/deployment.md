@@ -225,7 +225,7 @@ curl https://mostro-push-server.fly.dev/api/info
 curl https://mostro-push-server.fly.dev/api/status
 ```
 
-After every deploy, also run the [dispute-chat verification runbook](./verification/dispute-chat.md) to confirm the Nostr listener path still delivers a silent push end-to-end.
+After every deploy, also run the [trade-update verification runbook](./verification/trade-update.md) to confirm the Nostr listener path still delivers a push end-to-end.
 
 ## Docker
 
@@ -426,4 +426,4 @@ Either the per-IP or per-pubkey limiter is hitting. Check `Retry-After` and the 
 
 ### Listener silently drops events
 
-Run the [dispute-chat verification runbook](./verification/dispute-chat.md). The most likely regression is a re-introduced `.authors(...)` filter on the Nostr `Filter`; the runbook includes a grep that fails if that line is present.
+Run the [trade-update verification runbook](./verification/trade-update.md). The most likely causes are a Mostro node missing from `config/trusted_mostro_pubkeys.json` (its events are filtered out by author) or no relay in `NOSTR_RELAYS` that the node publishes to. Check the startup line `Subscribed to kind 14 events from trusted Mostro nodes on N of M relays`.
