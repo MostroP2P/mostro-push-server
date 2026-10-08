@@ -149,6 +149,45 @@ flyctl logs -a mostro-push-server | grep -i "FCM service initialized"
 An `FCM notifications are DISABLED` line at `error` level means the credential
 did not arrive.
 
+### Migrate a credential baked into an older image
+
+An instance deployed before the credential left the image still reads it from
+the file named by `FIREBASE_SERVICE_ACCOUNT_PATH`. Copy that file into
+`FIREBASE_SERVICE_ACCOUNT_JSON` before deploying a current image, without
+printing it and without leaving a copy on disk:
+
+```bash
+umask 077
+sa="$(mktemp)"
+flyctl ssh console -a mostro-push-server -C 'sh -c "cat \"$FIREBASE_SERVICE_ACCOUNT_PATH\""' > "${sa}" 2>/dev/null
+
+# Validate without showing the key: prints "service_account <project> <client_email>".
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["type"], d["project_id"], d["client_email"])' "${sa}"
+
+flyctl secrets set --stage -a mostro-push-server FIREBASE_SERVICE_ACCOUNT_JSON="$(cat "${sa}")"
+flyctl secrets list -a mostro-push-server | grep FIREBASE_SERVICE_ACCOUNT_JSON   # check before deleting
+shred -u "${sa}"
+unset sa
+```
+
+`--stage` applies the secret with the next deploy instead of restarting the
+running machine. Leave `FIREBASE_SERVICE_ACCOUNT_PATH` set until you no longer
+need to roll back to the old image, which depends on it; the new server prefers
+the JSON form.
+
+Every image built with the credential inside still contains it, and those
+images remain in the Fly registry. Once the new deploy is stable, rotate the
+key: generate a new one in Firebase Console (Project settings → Service
+accounts), set it as `FIREBASE_SERVICE_ACCOUNT_JSON`, confirm
+`FCM service initialized successfully` in the logs, and only then revoke the
+old key in Google Cloud (IAM → Service accounts → Keys). Rotation changes
+nothing on the clients: apps keep their Firebase config and their device
+tokens stay valid. Then drop the unused secret:
+
+```bash
+flyctl secrets unset --stage -a mostro-push-server FIREBASE_SERVICE_ACCOUNT_PATH
+```
+
 ### Rotate `SERVER_PRIVATE_KEY`
 
 If a `SERVER_PRIVATE_KEY` value has ever been committed, pasted into issue
@@ -196,6 +235,12 @@ flyctl volumes create push_data -a mostro-push-server --region gru --size 1 --sc
 # 3. Deploy (fly.toml already mounts the volume and sets TOKEN_STORE_PATH).
 ./deploy-fly.sh
 ```
+
+Fly can only attach a volume to a new machine, so this first deploy
+**replaces** the machine instead of updating it: note the new machine ID in
+`flyctl status`. A `Failed to clear lease for <old-id>: lease not found` line
+during the deploy is harmless; it refers to the machine that was destroyed.
+Later deploys update the machine in place.
 
 Then confirm registrations survive a restart:
 
@@ -406,6 +451,14 @@ at `info`:
 flyctl secrets set -a mostro-push-server RUST_LOG="debug"   # restarts the machines
 flyctl logs -a mostro-push-server
 flyctl secrets set -a mostro-push-server RUST_LOG="info"    # restore when done
+```
+
+Do not leave production at `debug`. At that level dependencies log every Nostr
+event they receive, including the raw `trade_pubkey` tags that the server's own
+log lines always hash. Check the current value after any debugging session:
+
+```bash
+flyctl ssh console -a mostro-push-server -C 'sh -c "echo \$RUST_LOG"'
 ```
 
 `FCM notifications are DISABLED` is preceded by the actual cause. Distinguish
