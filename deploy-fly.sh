@@ -60,7 +60,9 @@ fi
 
 echo "Checking required Fly secrets..."
 
-if ! configured_secret_names="$(flyctl secrets list -a "${APP_NAME}" | awk 'NR > 1 { print $1 }')"; then
+# Staged secrets (`flyctl secrets set --stage`) are listed with a leading `*`,
+# either as its own column or glued to the name.
+if ! configured_secret_names="$(flyctl secrets list -a "${APP_NAME}" | awk 'NR > 1 { name = ($1 == "*") ? $2 : $1; sub(/^\*/, "", name); print name }')"; then
     die "failed to list Fly secrets for ${APP_NAME}"
 fi
 
