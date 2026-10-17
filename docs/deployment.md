@@ -464,7 +464,12 @@ flyctl ssh console -a mostro-push-server -C 'sh -c "echo \$RUST_LOG"'
 `FCM notifications are DISABLED` is preceded by the actual cause. Distinguish
 the two cases by whether a `Loaded Firebase service account for ...` line
 appears first: without it no credential resolved at all, with it the credential
-arrived and was rejected downstream (bad key, OAuth refusal).
+arrived but its private key cannot sign.
+
+A failed token exchange at startup (Google unreachable, OAuth refusal) does not
+disable FCM. It logs `No FCM access token at startup (...)` and every push
+retries the exchange, so delivery resumes on its own once Google answers. If the
+cause is a refused credential, each push keeps failing with the OAuth error.
 
 There is no `/secrets` inside the container any more. With the inline form the
 credential is an environment variable, so that startup line is the confirmation

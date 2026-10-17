@@ -133,13 +133,22 @@ impl FcmPush {
         }
     }
 
-    /// Initialize FCM service - validates that we can get an access token
+    /// Validates the credential and tries to fetch a first access token.
+    ///
+    /// Fails only when no assertion can be signed, which no retry can fix. A
+    /// failed exchange is logged and left to the next push to retry: a machine
+    /// whose network is not up yet after a host reboot must not boot with FCM
+    /// off until someone restarts it.
     pub async fn init(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if self.service_account.is_none() {
-            return Err("No service account configured".into());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        self.build_jwt(now)?;
+
+        if let Err(e) = self.get_access_token().await {
+            error!(
+                "No FCM access token at startup ({}); the next push will retry",
+                e
+            );
         }
-        // Try to get an access token to validate credentials
-        self.get_access_token().await?;
         Ok(())
     }
 
@@ -949,6 +958,76 @@ mod tests {
             err.to_string().contains("No service account configured"),
             "an expired window must attempt a fresh exchange; got: {err}"
         );
+    }
+
+    /// Throwaway key generated for these tests only; it signs nothing real.
+    const TEST_PRIVATE_KEY: &str = include_str!("testdata/throwaway_rsa_key.pem");
+
+    fn service_with_key(oauth_token_url: String, private_key: &str) -> FcmPush {
+        FcmPush {
+            service_account: Some(ServiceAccount {
+                client_email: "push@example.iam.gserviceaccount.com".to_string(),
+                private_key: private_key.to_string(),
+                project_id: "test-project".to_string(),
+            }),
+            ..test_service(oauth_token_url)
+        }
+    }
+
+    /// A host reboot can start the machine before its network works. Failing
+    /// init there kept FCM off until a manual restart, dropping every push.
+    #[tokio::test]
+    async fn init_survives_an_unreachable_token_endpoint_and_recovers_later() {
+        let mut server = mockito::Server::new_async().await;
+        let down = server
+            .mock("POST", "/token")
+            .with_status(503)
+            .expect(OAUTH_MAX_ATTEMPTS as usize)
+            .create_async()
+            .await;
+
+        let service = service_with_key(format!("{}/token", server.url()), TEST_PRIVATE_KEY);
+        service
+            .init()
+            .await
+            .expect("an unreachable token endpoint must not disable FCM");
+        down.assert_async().await;
+
+        down.remove_async().await;
+        let _up = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(TOKEN_BODY)
+            .create_async()
+            .await;
+        service
+            .refresh_lock
+            .lock()
+            .await
+            .as_mut()
+            .expect("the startup failure must be recorded")
+            .at = Instant::now()
+            .checked_sub(OAUTH_FAILURE_COOLDOWN + Duration::from_secs(1))
+            .expect("monotonic clock predates the cooldown window");
+
+        assert_eq!(service.get_access_token().await.unwrap(), "ya29.test");
+    }
+
+    #[tokio::test]
+    async fn init_fails_without_a_credential() {
+        let service = test_service("http://unused.invalid/token".to_string());
+        let err = service.init().await.expect_err("nothing to sign with");
+        assert!(err.to_string().contains("No service account configured"));
+    }
+
+    #[tokio::test]
+    async fn init_fails_with_a_key_that_cannot_sign() {
+        let service = service_with_key(
+            "http://unused.invalid/token".to_string(),
+            "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+        );
+        assert!(service.init().await.is_err());
     }
 
     #[test]
