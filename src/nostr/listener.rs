@@ -273,8 +273,12 @@ async fn dispatch_and_log(
         Ok(DispatchOutcome::Delivered { backend: _ }) => {
             info!("Push sent successfully for event {}", event_id);
         }
-        // Silent on purpose: no backend is configured for the platform.
-        Err(DispatchError::NoBackendForPlatform) => {}
+        Err(DispatchError::NoBackendForPlatform) => {
+            error!(
+                "Push dropped for event {}: no backend for {} devices",
+                event_id, registered_token.platform
+            );
+        }
         Err(DispatchError::AllBackendsFailed { errors }) => {
             for err in errors {
                 error!("Failed to send push: {}", err);
