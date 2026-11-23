@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
-use super::{PushError, PushErrorKind, PushKind, PushService};
+use super::{token_prefix, PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -542,7 +542,7 @@ impl PushService for FcmPush {
         debug!(
             "Sending {} to token: {}...",
             label,
-            &device_token[..20.min(device_token.len())]
+            token_prefix(device_token, 20)
         );
 
         let response = self

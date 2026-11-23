@@ -122,3 +122,30 @@ impl PushService for Arc<FcmPush> {
         (**self).supports(kind, platform)
     }
 }
+
+/// The start of a token, for a debug line: at most `max_bytes` of it, cut
+/// back to a character boundary. A token is whatever a client registered,
+/// and slicing a `str` inside a multibyte character panics.
+pub(crate) fn token_prefix(token: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(token.len());
+    while !token.is_char_boundary(end) {
+        end -= 1;
+    }
+    &token[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_prefix;
+
+    #[test]
+    fn a_token_prefix_never_cuts_a_character() {
+        assert_eq!(token_prefix("abcdef", 4), "abcd");
+        assert_eq!(token_prefix("abc", 4), "abc");
+        assert_eq!(token_prefix("", 4), "");
+        // "é" is two bytes, at 3..5: a cut at byte 4 falls inside it.
+        assert_eq!(token_prefix("abcédef", 4), "abc");
+        assert_eq!(token_prefix("abcédef", 5), "abcé");
+        assert_eq!(token_prefix("日本", 2), "");
+    }
+}
