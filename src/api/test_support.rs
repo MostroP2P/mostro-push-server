@@ -20,11 +20,13 @@ use crate::store::{Platform, TokenStore};
 /// Stub PushService recording every dispatch call (D-23).
 ///
 /// `calls`: shared record of (device_token, platform, kind) per invocation.
-/// `supports`: platforms for which `supports` returns true, whatever the kind.
+/// `supports`: platforms for which `supports` returns true.
+/// `unsupported_kinds`: kinds for which it returns false on every platform.
 /// `fail`: when true, `send` returns an error.
 pub struct StubPushService {
     pub calls: Arc<Mutex<Vec<(String, Platform, PushKind)>>>,
     pub supports: Vec<Platform>,
+    pub unsupported_kinds: Vec<PushKind>,
     pub fail: bool,
 }
 
@@ -33,6 +35,7 @@ impl StubPushService {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             supports,
+            unsupported_kinds: Vec::new(),
             fail: false,
         }
     }
@@ -57,8 +60,8 @@ impl PushService for StubPushService {
         }
     }
 
-    fn supports(&self, _kind: PushKind, platform: &Platform) -> bool {
-        self.supports.contains(platform)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        self.supports.contains(platform) && !self.unsupported_kinds.contains(&kind)
     }
 }
 
