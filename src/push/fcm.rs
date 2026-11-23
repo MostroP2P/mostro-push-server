@@ -560,12 +560,15 @@ impl PushService for FcmPush {
             Ok(())
         } else {
             // A body that cannot be read leaves the HTTP status to sort
-            // the error by.
+            // the error by, and to name it in the log.
             let error_text = response.text().await.unwrap_or_default();
-            error!("{} error for {} device: {}", label, platform, error_text);
+            error!(
+                "{} error for {} device: {} {}",
+                label, platform, status, error_text
+            );
             Err(PushError::new(
                 classify_fcm_error(status.as_u16(), &error_text),
-                format!("{} send failed: {}", label, error_text),
+                format!("{} send failed: {} {}", label, status, error_text),
             ))
         }
     }
@@ -584,7 +587,9 @@ impl PushService for FcmPush {
 /// Sorts an FCM v1 error response (`messages:send`) into a [`PushErrorKind`].
 ///
 /// FCM's own `errorCode` (in `error.details`) is read first, then the
-/// canonical `error.status`, then the HTTP status.
+/// canonical `error.status`, then the HTTP status. A value this does not
+/// know is passed over, so the next one decides: a `503` stays `Unavailable`
+/// whatever name FCM gives it.
 ///
 /// A token is `Unregistered` only when FCM says so by name. A bare `404` is
 /// also what a wrong `FIREBASE_PROJECT_ID` answers, and callers delete the
@@ -603,16 +608,14 @@ fn classify_fcm_error(http_status: u16, body: &str) -> PushErrorKind {
         Some("SENDER_ID_MISMATCH") => return PushErrorKind::SenderMismatch,
         Some("INVALID_ARGUMENT") => return PushErrorKind::InvalidArgument,
         Some("QUOTA_EXCEEDED" | "UNAVAILABLE" | "INTERNAL") => return PushErrorKind::Unavailable,
-        Some(_) => return PushErrorKind::Other,
-        None => {}
+        _ => {}
     }
     match error["status"].as_str() {
         Some("INVALID_ARGUMENT") => return PushErrorKind::InvalidArgument,
         Some("RESOURCE_EXHAUSTED" | "UNAVAILABLE" | "INTERNAL" | "DEADLINE_EXCEEDED") => {
             return PushErrorKind::Unavailable
         }
-        Some(_) => return PushErrorKind::Other,
-        None => {}
+        _ => {}
     }
     match http_status {
         400 => PushErrorKind::InvalidArgument,
@@ -819,6 +822,22 @@ mod tests {
             let body = fcm_error(http, status, None);
             assert_eq!(classify_fcm_error(http, &body), expected, "{status}");
         }
+    }
+
+    /// A name this server does not know must not hide a status that says to
+    /// try again.
+    #[test]
+    fn an_unknown_fcm_error_name_leaves_the_next_level_to_decide() {
+        // An unknown `errorCode`: `error.status` decides.
+        let body = fcm_error(503, "UNAVAILABLE", Some("UNSPECIFIED_ERROR"));
+        assert_eq!(classify_fcm_error(503, &body), PushErrorKind::Unavailable);
+        // Both unknown: the HTTP status decides.
+        let body = fcm_error(500, "UNKNOWN", Some("UNSPECIFIED_ERROR"));
+        assert_eq!(classify_fcm_error(500, &body), PushErrorKind::Unavailable);
+        let body = fcm_error(500, "UNKNOWN", None);
+        assert_eq!(classify_fcm_error(500, &body), PushErrorKind::Unavailable);
+        let body = fcm_error(403, "PERMISSION_DENIED", Some("UNSPECIFIED_ERROR"));
+        assert_eq!(classify_fcm_error(403, &body), PushErrorKind::Other);
     }
 
     /// A `404` with no `UNREGISTERED` is what a wrong project id answers:
