@@ -33,8 +33,12 @@ pub enum PushErrorKind {
     /// The token no longer names a device (FCM `UNREGISTERED`). It will not
     /// work again.
     Unregistered,
-    /// The backend refused the request as malformed, the token included (FCM
-    /// `INVALID_ARGUMENT`).
+    /// The backend refused the request as malformed (FCM `INVALID_ARGUMENT`).
+    ///
+    /// It does not blame the token by itself: FCM answers the same for a
+    /// token it cannot read and for a message field it does not accept, so a
+    /// payload this server built wrong reads the same for every device. Never
+    /// delete a token for it.
     InvalidArgument,
     /// The token was issued for another sender (FCM `SENDER_ID_MISMATCH`):
     /// it belongs to another Firebase project.
