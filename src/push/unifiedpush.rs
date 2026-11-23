@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::RwLock;
 
+use super::endpoint_guard::EndpointRejection;
 use super::{PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
@@ -181,7 +182,7 @@ impl PushService for UnifiedPushService {
         if let Err(reason) = crate::push::endpoint_guard::validate_endpoint(device_token).await {
             warn!("UnifiedPush endpoint refused: {}", reason);
             return Err(PushError::new(
-                PushErrorKind::InvalidArgument,
+                refusal_kind(reason),
                 format!("UnifiedPush endpoint refused: {}", reason),
             ));
         }
@@ -212,7 +213,7 @@ impl PushService for UnifiedPushService {
             let error_text = response.text().await.unwrap_or_default();
             error!("UnifiedPush error: {} - {}", status, error_text);
             Err(PushError::new(
-                PushErrorKind::Other,
+                status_kind(status.as_u16()),
                 format!("UnifiedPush send failed: {}", status),
             ))
         }
@@ -223,6 +224,31 @@ impl PushService for UnifiedPushService {
         // Its one payload is a wake for a Mostro client, so a new dispute,
         // which is for another app, is not sent through it.
         matches!(platform, Platform::Android) && kind != PushKind::DisputeNew
+    }
+}
+
+/// Sorts a refusal of the endpoint guard into a [`PushErrorKind`].
+///
+/// A name that did not resolve, or not in time, may resolve on the next
+/// push, so it says nothing about the endpoint. Every other refusal is about
+/// the endpoint as it was registered.
+fn refusal_kind(reason: EndpointRejection) -> PushErrorKind {
+    match reason {
+        EndpointRejection::UnresolvableHost => PushErrorKind::Unavailable,
+        EndpointRejection::InsecureScheme
+        | EndpointRejection::MissingHost
+        | EndpointRejection::NonPublicAddress => PushErrorKind::InvalidArgument,
+    }
+}
+
+/// Sorts the HTTP status a push server refused a push with.
+///
+/// No status is read as `Unregistered`: UnifiedPush defines none for an
+/// endpoint that is gone, and each push server answers in its own way.
+fn status_kind(http_status: u16) -> PushErrorKind {
+    match http_status {
+        429 | 500..=599 => PushErrorKind::Unavailable,
+        _ => PushErrorKind::Other,
     }
 }
 
@@ -324,6 +350,36 @@ mod tests {
             .expect_err("dispatch MUST refuse an opaque token");
 
         assert!(err.to_string().starts_with("UnifiedPush endpoint refused"));
+    }
+
+    #[test]
+    fn only_an_unresolved_host_says_nothing_about_the_endpoint() {
+        assert_eq!(
+            refusal_kind(EndpointRejection::UnresolvableHost),
+            PushErrorKind::Unavailable
+        );
+        for reason in [
+            EndpointRejection::InsecureScheme,
+            EndpointRejection::MissingHost,
+            EndpointRejection::NonPublicAddress,
+        ] {
+            assert_eq!(
+                refusal_kind(reason),
+                PushErrorKind::InvalidArgument,
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_push_is_sorted_by_its_status() {
+        for status in [429, 500, 502, 503] {
+            assert_eq!(status_kind(status), PushErrorKind::Unavailable, "{status}");
+        }
+        // Not `Unregistered`: see `status_kind`.
+        for status in [400, 401, 403, 404, 410, 413] {
+            assert_eq!(status_kind(status), PushErrorKind::Other, "{status}");
+        }
     }
 
     /// `endpoint_guard` only ever inspects the first hop, so the client must
