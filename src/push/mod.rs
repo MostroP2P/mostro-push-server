@@ -30,8 +30,8 @@ pub enum PushKind {
 /// Why a backend did not deliver a push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushErrorKind {
-    /// The token no longer names a device (FCM `UNREGISTERED`). It will not
-    /// work again.
+    /// The token no longer names a device (FCM `UNREGISTERED`, a UnifiedPush
+    /// endpoint answering `404` or `410`). It will not work again.
     Unregistered,
     /// The backend refused the request as malformed (FCM `INVALID_ARGUMENT`).
     ///

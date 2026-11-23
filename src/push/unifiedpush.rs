@@ -243,10 +243,12 @@ fn refusal_kind(reason: EndpointRejection) -> PushErrorKind {
 
 /// Sorts the HTTP status a push server refused a push with.
 ///
-/// No status is read as `Unregistered`: UnifiedPush defines none for an
-/// endpoint that is gone, and each push server answers in its own way.
+/// A UnifiedPush endpoint is a push resource of RFC 8030, which answers
+/// `404` for a subscription that expired (section 7.3). `410` is read the
+/// same: some push servers answer it for an endpoint that is gone.
 fn status_kind(http_status: u16) -> PushErrorKind {
     match http_status {
+        404 | 410 => PushErrorKind::Unregistered,
         429 | 500..=599 => PushErrorKind::Unavailable,
         _ => PushErrorKind::Other,
     }
@@ -382,8 +384,10 @@ mod tests {
         for status in [429, 500, 502, 503] {
             assert_eq!(status_kind(status), PushErrorKind::Unavailable, "{status}");
         }
-        // Not `Unregistered`: see `status_kind`.
-        for status in [400, 401, 403, 404, 410, 413] {
+        for status in [404, 410] {
+            assert_eq!(status_kind(status), PushErrorKind::Unregistered, "{status}");
+        }
+        for status in [400, 401, 403, 413] {
             assert_eq!(status_kind(status), PushErrorKind::Other, "{status}");
         }
     }
