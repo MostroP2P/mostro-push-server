@@ -218,9 +218,11 @@ impl PushService for UnifiedPushService {
         }
     }
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.)
-        matches!(platform, Platform::Android)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.).
+        // Its one payload is a wake for a Mostro client, so a new dispute,
+        // which is for another app, is not sent through it.
+        matches!(platform, Platform::Android) && kind != PushKind::DisputeNew
     }
 }
 
@@ -377,9 +379,12 @@ mod tests {
     #[test]
     fn unifiedpush_supports_android_only() {
         let service = test_service();
-        assert!(service.supports_platform(&Platform::Android));
-        assert!(!service.supports_platform(&Platform::Ios));
-        assert!(!service.supports_platform(&Platform::Web));
+        for kind in [PushKind::TradeUpdate, PushKind::ChatWake] {
+            assert!(service.supports(kind, &Platform::Android));
+            assert!(!service.supports(kind, &Platform::Ios));
+            assert!(!service.supports(kind, &Platform::Web));
+        }
+        assert!(!service.supports(PushKind::DisputeNew, &Platform::Android));
     }
 
     // ---------------------------------------------------------------------

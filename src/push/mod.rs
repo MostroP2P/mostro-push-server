@@ -20,6 +20,11 @@ pub enum PushKind {
     TradeUpdate,
     /// `/api/notify`: a silent, data-only wake.
     ChatWake,
+    /// A trusted Mostro node opened a dispute: a visible notification for
+    /// the devices watching that node. Android only, through FCM.
+    // Sent by the dispute watchers, which are not wired yet.
+    #[allow(dead_code)]
+    DisputeNew,
 }
 
 /// Why a backend did not deliver a push.
@@ -76,7 +81,8 @@ pub trait PushService: Send + Sync {
         platform: &Platform,
     ) -> Result<(), PushError>;
 
-    fn supports_platform(&self, platform: &Platform) -> bool;
+    /// Whether this backend delivers a push of `kind` to `platform`.
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool;
 }
 
 // Implement PushService for Arc<UnifiedPushService> to allow shared ownership
@@ -91,8 +97,8 @@ impl PushService for Arc<UnifiedPushService> {
         (**self).send(kind, device_token, platform).await
     }
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        (**self).supports_platform(platform)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        (**self).supports(kind, platform)
     }
 }
 
@@ -108,7 +114,7 @@ impl PushService for Arc<FcmPush> {
         (**self).send(kind, device_token, platform).await
     }
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        (**self).supports_platform(platform)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        (**self).supports(kind, platform)
     }
 }

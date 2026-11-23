@@ -349,7 +349,7 @@ mod tests {
             Ok(())
         }
 
-        fn supports_platform(&self, _platform: &Platform) -> bool {
+        fn supports(&self, _kind: PushKind, _platform: &Platform) -> bool {
             true
         }
     }

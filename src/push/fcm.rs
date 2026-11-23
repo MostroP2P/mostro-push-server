@@ -359,7 +359,41 @@ impl FcmPush {
         match kind {
             PushKind::TradeUpdate => Self::build_trade_update_payload(device_token, platform),
             PushKind::ChatWake => Self::build_chat_wake_payload(device_token, platform),
+            PushKind::DisputeNew => Self::build_dispute_new_payload(device_token),
         }
+    }
+
+    /// Visible push for a dispute opened on a watched node. It names no
+    /// dispute, node or party.
+    ///
+    /// The text is the device's: `title_loc_key` and `body_loc_key` name
+    /// string resources of the client app, in the user's language. No literal
+    /// `title` or `body` is sent, because the Firebase Android SDK shows a
+    /// literal in preference to its key, so one would hide the translation.
+    ///
+    /// One tag for every dispute: a second one replaces the first notice and
+    /// alerts again.
+    fn build_dispute_new_payload(device_token: &str) -> serde_json::Value {
+        json!({
+            "message": {
+                "token": device_token,
+                "data": {
+                    "type": "dispute_new",
+                    "source": "mostro-push-server",
+                    "timestamp": chrono::Utc::now().timestamp().to_string()
+                },
+                "android": {
+                    "priority": "high",
+                    "notification": {
+                        "channel_id": "bosstro_disputes",
+                        "tag": "bosstro-dispute",
+                        "title_loc_key": "push_dispute_new_title",
+                        "body_loc_key": "push_dispute_new_body",
+                        "default_vibrate_timings": true
+                    }
+                }
+            }
+        })
     }
 
     fn build_trade_update_payload(device_token: &str, platform: &Platform) -> serde_json::Value {
@@ -502,6 +536,7 @@ impl PushService for FcmPush {
         let label = match kind {
             PushKind::TradeUpdate => "FCM",
             PushKind::ChatWake => "FCM silent",
+            PushKind::DisputeNew => "FCM dispute",
         };
 
         debug!(
@@ -536,8 +571,14 @@ impl PushService for FcmPush {
         }
     }
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        match kind {
+            PushKind::TradeUpdate | PushKind::ChatWake => {
+                matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
+            }
+            // Its payload is defined for Android only.
+            PushKind::DisputeNew => matches!(platform, Platform::Android),
+        }
     }
 }
 
@@ -667,9 +708,44 @@ mod tests {
     #[test]
     fn fcm_supports_every_platform() {
         let service = test_service("http://127.0.0.1:9/token".to_string());
-        assert!(service.supports_platform(&Platform::Android));
-        assert!(service.supports_platform(&Platform::Ios));
-        assert!(service.supports_platform(&Platform::Web));
+        for kind in [PushKind::TradeUpdate, PushKind::ChatWake] {
+            assert!(service.supports(kind, &Platform::Android));
+            assert!(service.supports(kind, &Platform::Ios));
+            assert!(service.supports(kind, &Platform::Web));
+        }
+    }
+
+    #[test]
+    fn fcm_sends_a_new_dispute_to_android_only() {
+        let service = test_service("http://127.0.0.1:9/token".to_string());
+        assert!(service.supports(PushKind::DisputeNew, &Platform::Android));
+        assert!(!service.supports(PushKind::DisputeNew, &Platform::Ios));
+        assert!(!service.supports(PushKind::DisputeNew, &Platform::Web));
+    }
+
+    #[test]
+    fn dispute_new_payload_is_pinned() {
+        let payload =
+            FcmPush::build_payload(PushKind::DisputeNew, "device-token", &Platform::Android);
+        assert_eq!(
+            pinned(payload),
+            include_str!("testdata/dispute_new_android.json").trim_end()
+        );
+    }
+
+    /// The Firebase Android SDK shows a literal title or body in preference
+    /// to its `*_loc_key`, so sending one would leave every device in English.
+    #[test]
+    fn dispute_new_payload_carries_no_literal_text() {
+        let payload =
+            FcmPush::build_payload(PushKind::DisputeNew, "device-token", &Platform::Android);
+        let message = &payload["message"];
+        assert!(message.get("notification").is_none());
+        let notification = &message["android"]["notification"];
+        assert!(notification.get("title").is_none());
+        assert!(notification.get("body").is_none());
+        assert_eq!(notification["title_loc_key"], "push_dispute_new_title");
+        assert_eq!(notification["body_loc_key"], "push_dispute_new_body");
     }
 
     /// An FCM v1 error body, as `messages:send` answers.

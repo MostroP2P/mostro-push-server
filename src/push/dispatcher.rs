@@ -48,8 +48,8 @@ impl PushDispatcher {
         }
     }
 
-    /// Sends a push of `kind` through the first backend that supports the
-    /// device's platform and accepts it.
+    /// Sends a push of `kind` through the first backend that supports it on
+    /// the device's platform and accepts it.
     pub async fn dispatch(
         &self,
         kind: PushKind,
@@ -59,7 +59,7 @@ impl PushDispatcher {
         let mut attempted = false;
 
         for (idx, service) in self.services.iter().enumerate() {
-            if !service.supports_platform(&token.platform) {
+            if !service.supports(kind, &token.platform) {
                 continue;
             }
             attempted = true;
