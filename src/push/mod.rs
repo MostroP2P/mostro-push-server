@@ -12,27 +12,24 @@ pub use unifiedpush::UnifiedPushService;
 
 use crate::store::Platform;
 
+/// What a push tells the device. It decides the payload each backend sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushKind {
+    /// A trusted Mostro node addressed a trade update to a registered trade
+    /// pubkey: a visible notification.
+    TradeUpdate,
+    /// `/api/notify`: a silent, data-only wake.
+    ChatWake,
+}
+
 #[async_trait]
 pub trait PushService: Send + Sync {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    /// Silent (data-only, low-priority) push variant for /api/notify.
-    ///
-    /// Default delegates to `send_to_token`. Backends that need a
-    /// distinct silent payload (e.g. FcmPush per Phase 2 D-05) override
-    /// this method. UnifiedPush has no per-payload distinction and uses
-    /// the default.
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.send_to_token(device_token, platform).await
-    }
 
     fn supports_platform(&self, platform: &Platform) -> bool;
 }
@@ -40,20 +37,13 @@ pub trait PushService: Send + Sync {
 // Implement PushService for Arc<UnifiedPushService> to allow shared ownership
 #[async_trait]
 impl PushService for Arc<UnifiedPushService> {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_to_token(device_token, platform).await
-    }
-
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_silent_to_token(device_token, platform).await
+        (**self).send(kind, device_token, platform).await
     }
 
     fn supports_platform(&self, platform: &Platform) -> bool {
@@ -64,20 +54,13 @@ impl PushService for Arc<UnifiedPushService> {
 // Implement PushService for Arc<FcmPush> to allow shared ownership
 #[async_trait]
 impl PushService for Arc<FcmPush> {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_to_token(device_token, platform).await
-    }
-
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_silent_to_token(device_token, platform).await
+        (**self).send(kind, device_token, platform).await
     }
 
     fn supports_platform(&self, platform: &Platform) -> bool {

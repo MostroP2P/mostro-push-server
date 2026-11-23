@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-use super::PushService;
+use super::{PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -169,8 +169,9 @@ impl UnifiedPushService {
 
 #[async_trait]
 impl PushService for UnifiedPushService {
-    async fn send_to_token(
+    async fn send(
         &self,
+        _kind: PushKind,
         device_token: &str,
         _platform: &Platform,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -271,7 +272,7 @@ mod tests {
     /// message: a missing guard would surface as a reqwest connection error
     /// instead, which reads very differently.
     #[tokio::test]
-    async fn send_to_token_refuses_non_public_endpoints() {
+    async fn send_refuses_non_public_endpoints() {
         let service = test_service();
 
         for token in [
@@ -283,7 +284,7 @@ mod tests {
             "https://localhost/push",
         ] {
             let err = service
-                .send_to_token(token, &Platform::Android)
+                .send(PushKind::TradeUpdate, token, &Platform::Android)
                 .await
                 .expect_err("dispatch MUST refuse a non-public endpoint");
 
@@ -297,10 +298,14 @@ mod tests {
     /// An opaque value (an FCM token that reached the wrong backend) must not
     /// be handed to reqwest to interpret.
     #[tokio::test]
-    async fn send_to_token_refuses_opaque_tokens() {
+    async fn send_refuses_opaque_tokens() {
         let service = test_service();
         let err = service
-            .send_to_token("d1PxYz8QRk-2vQ1sAbCdEf", &Platform::Android)
+            .send(
+                PushKind::TradeUpdate,
+                "d1PxYz8QRk-2vQ1sAbCdEf",
+                &Platform::Android,
+            )
             .await
             .expect_err("dispatch MUST refuse an opaque token");
 
@@ -313,7 +318,7 @@ mod tests {
     /// the guard and the whole SSRF fix is one HTTP header away from useless.
     ///
     /// The guard refuses loopback endpoints, so this exercises the client
-    /// configuration directly rather than going through `send_to_token`: the
+    /// configuration directly rather than going through `send`: the
     /// client policy is the property under test.
     #[tokio::test]
     async fn dispatch_client_refuses_to_follow_redirects() {
@@ -370,7 +375,7 @@ mod tests {
     // dispatcher -> UnifiedPushService.
     //
     // The tests above cover the guard by composition: one proves
-    // `send_to_token` calls it, the `endpoint_guard` unit tests prove the guard
+    // `send` calls it, the `endpoint_guard` unit tests prove the guard
     // itself is right. Neither proves the unauthenticated chain actually
     // reaches this backend. A dispatcher wired to the wrong service, or a
     // `/api/notify` that never dispatches, leaves all of them green.

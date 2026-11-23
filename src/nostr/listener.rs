@@ -10,7 +10,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::api::rate_limit::{start_keyed_limiter_cleanup_task, PerPubkeyLimiter};
 use crate::config::Config;
-use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
+use crate::push::{DispatchError, DispatchOutcome, PushDispatcher, PushKind};
 use crate::store::{RegisteredToken, TokenStore};
 use crate::utils::log_pubkey::log_pubkey;
 
@@ -269,7 +269,10 @@ async fn dispatch_and_log(
     registered_token: &RegisteredToken,
     event_id: EventId,
 ) {
-    match dispatcher.dispatch(registered_token).await {
+    match dispatcher
+        .dispatch(PushKind::TradeUpdate, registered_token)
+        .await
+    {
         Ok(DispatchOutcome::Delivered { backend: _ }) => {
             info!("Push sent successfully for event {}", event_id);
         }
@@ -333,8 +336,9 @@ mod tests {
 
     #[async_trait]
     impl PushService for GatedPushService {
-        async fn send_to_token(
+        async fn send(
             &self,
+            _kind: PushKind,
             device_token: &str,
             _platform: &Platform,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

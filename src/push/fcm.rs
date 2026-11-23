@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
-use super::PushService;
+use super::{PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -355,7 +355,14 @@ impl FcmPush {
     ///   text silently, and `Urgency: high` to match the Android and iOS
     ///   priority: Web Push defaults to `normal` (RFC 8030 §5.3), which a
     ///   dozing phone may defer
-    fn build_payload_for_token(device_token: &str, platform: &Platform) -> serde_json::Value {
+    fn build_payload(kind: PushKind, device_token: &str, platform: &Platform) -> serde_json::Value {
+        match kind {
+            PushKind::TradeUpdate => Self::build_trade_update_payload(device_token, platform),
+            PushKind::ChatWake => Self::build_chat_wake_payload(device_token, platform),
+        }
+    }
+
+    fn build_trade_update_payload(device_token: &str, platform: &Platform) -> serde_json::Value {
         let mut payload = json!({
             "message": {
                 "token": device_token,
@@ -423,7 +430,7 @@ impl FcmPush {
     /// Data-only (no `alert`, no notification fallback) so iOS does not
     /// throttle the app for high-frequency silent pushes
     /// (apns-priority: 5 + apns-push-type: background per Apple's docs).
-    /// Distinct from `build_payload_for_token` (Mostro daemon events at
+    /// Distinct from `build_trade_update_payload` (Mostro daemon events at
     /// apns-priority: 10 with an alert fallback). Do NOT merge:
     /// the two paths have fundamentally different frequency profiles
     /// (chat = continuous, daemon events = sporadic).
@@ -431,10 +438,7 @@ impl FcmPush {
     /// Web tokens also get `Urgency: high`, matching `android.priority`:
     /// the web client shows a notice for each `chat_wake`, and Web Push
     /// defaults to `normal`.
-    fn build_silent_payload_for_notify(
-        device_token: &str,
-        platform: &Platform,
-    ) -> serde_json::Value {
+    fn build_chat_wake_payload(device_token: &str, platform: &Platform) -> serde_json::Value {
         let mut payload = json!({
             "message": {
                 "token": device_token,
@@ -474,8 +478,9 @@ impl FcmPush {
 
 #[async_trait]
 impl PushService for FcmPush {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -486,10 +491,16 @@ impl PushService for FcmPush {
             self.project_id
         );
 
-        let payload = Self::build_payload_for_token(device_token, platform);
+        let payload = Self::build_payload(kind, device_token, platform);
+        // Names the push in the log lines, which read as before.
+        let label = match kind {
+            PushKind::TradeUpdate => "FCM",
+            PushKind::ChatWake => "FCM silent",
+        };
 
         debug!(
-            "Sending FCM to token: {}...",
+            "Sending {} to token: {}...",
+            label,
             &device_token[..20.min(device_token.len())]
         );
 
@@ -502,49 +513,12 @@ impl PushService for FcmPush {
             .await?;
 
         if response.status().is_success() {
-            info!("FCM notification sent to {} device", platform);
+            info!("{} notification sent to {} device", label, platform);
             Ok(())
         } else {
             let error_text = response.text().await?;
-            error!("FCM error for {} device: {}", platform, error_text);
-            Err(format!("FCM send failed: {}", error_text).into())
-        }
-    }
-
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let auth_token = self.get_access_token().await?;
-
-        let fcm_url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
-        );
-
-        let payload = Self::build_silent_payload_for_notify(device_token, platform);
-
-        debug!(
-            "Sending FCM silent to token: {}...",
-            &device_token[..20.min(device_token.len())]
-        );
-
-        let response = self
-            .client
-            .post(&fcm_url)
-            .bearer_auth(&auth_token)
-            .json(&payload)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            info!("FCM silent notification sent to {} device", platform);
-            Ok(())
-        } else {
-            let error_text = response.text().await?;
-            error!("FCM silent error for {} device: {}", platform, error_text);
-            Err(format!("FCM silent send failed: {}", error_text).into())
+            error!("{} error for {} device: {}", label, platform, error_text);
+            Err(format!("{} send failed: {}", label, error_text).into())
         }
     }
 
@@ -676,7 +650,7 @@ mod tests {
                 include_str!("testdata/trade_update_web.json"),
             ),
         ] {
-            let payload = FcmPush::build_payload_for_token("device-token", &platform);
+            let payload = FcmPush::build_payload(PushKind::TradeUpdate, "device-token", &platform);
             assert_eq!(pinned(payload), fixture.trim_end(), "{platform}");
         }
     }
@@ -691,14 +665,14 @@ mod tests {
             (Platform::Ios, include_str!("testdata/chat_wake_ios.json")),
             (Platform::Web, include_str!("testdata/chat_wake_web.json")),
         ] {
-            let payload = FcmPush::build_silent_payload_for_notify("device-token", &platform);
+            let payload = FcmPush::build_payload(PushKind::ChatWake, "device-token", &platform);
             assert_eq!(pinned(payload), fixture.trim_end(), "{platform}");
         }
     }
 
     #[test]
     fn web_payload_carries_a_webpush_tag() {
-        let payload = FcmPush::build_payload_for_token("web-token", &Platform::Web);
+        let payload = FcmPush::build_payload(PushKind::TradeUpdate, "web-token", &Platform::Web);
         // `renotify`: a browser replaces a notification with the same tag
         // silently unless told to alert again, and the next trade step is
         // often the one with a deadline. `Urgency: high` for the same reason:
@@ -716,7 +690,7 @@ mod tests {
     #[test]
     fn mobile_payloads_carry_no_webpush_block() {
         for platform in [Platform::Android, Platform::Ios] {
-            let payload = FcmPush::build_payload_for_token("mobile-token", &platform);
+            let payload = FcmPush::build_payload(PushKind::TradeUpdate, "mobile-token", &platform);
             assert!(payload["message"].get("webpush").is_none(), "{platform}");
             assert!(payload["message"].get("android").is_some());
             assert!(payload["message"].get("apns").is_some());
@@ -725,7 +699,7 @@ mod tests {
 
     #[test]
     fn web_silent_payload_asks_for_high_urgency() {
-        let payload = FcmPush::build_silent_payload_for_notify("web-token", &Platform::Web);
+        let payload = FcmPush::build_payload(PushKind::ChatWake, "web-token", &Platform::Web);
         // The web client shows a notice for every `chat_wake`, and a counterparty
         // waiting on a reply is as time-bound as a trade step.
         assert_eq!(
@@ -739,7 +713,7 @@ mod tests {
     #[test]
     fn mobile_silent_payloads_carry_no_webpush_block() {
         for platform in [Platform::Android, Platform::Ios] {
-            let payload = FcmPush::build_silent_payload_for_notify("mobile-token", &platform);
+            let payload = FcmPush::build_payload(PushKind::ChatWake, "mobile-token", &platform);
             assert!(payload["message"].get("webpush").is_none(), "{platform}");
             assert_eq!(payload["message"]["android"]["priority"], "high");
             assert_eq!(payload["message"]["apns"]["headers"]["apns-priority"], "5");
