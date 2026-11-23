@@ -14,17 +14,19 @@ use crate::api::rate_limit::{
     REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
 };
 use crate::api::routes::{configure, AppState};
-use crate::push::{PushDispatcher, PushService};
+use crate::push::{PushDispatcher, PushError, PushErrorKind, PushKind, PushService};
 use crate::store::{Platform, TokenStore};
 
 /// Stub PushService recording every dispatch call (D-23).
 ///
-/// `calls`: shared record of (device_token, platform) per invocation.
-/// `supports`: platforms for which `supports_platform` returns true.
-/// `fail`: when true, `send_to_token` returns an error.
+/// `calls`: shared record of (device_token, platform, kind) per invocation.
+/// `supports`: platforms for which `supports` returns true.
+/// `unsupported_kinds`: kinds for which it returns false on every platform.
+/// `fail`: when true, `send` returns an error.
 pub struct StubPushService {
-    pub calls: Arc<Mutex<Vec<(String, Platform)>>>,
+    pub calls: Arc<Mutex<Vec<(String, Platform, PushKind)>>>,
     pub supports: Vec<Platform>,
+    pub unsupported_kinds: Vec<PushKind>,
     pub fail: bool,
 }
 
@@ -33,6 +35,7 @@ impl StubPushService {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             supports,
+            unsupported_kinds: Vec::new(),
             fail: false,
         }
     }
@@ -40,26 +43,25 @@ impl StubPushService {
 
 #[async_trait]
 impl PushService for StubPushService {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), PushError> {
         self.calls
             .lock()
             .await
-            .push((device_token.to_string(), platform.clone()));
+            .push((device_token.to_string(), platform.clone(), kind));
         if self.fail {
-            Err("stub forced failure".into())
+            Err(PushError::new(PushErrorKind::Other, "stub forced failure"))
         } else {
             Ok(())
         }
     }
 
-    // send_silent_to_token uses the trait default (delegates to send_to_token).
-
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        self.supports.contains(platform)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        self.supports.contains(platform) && !self.unsupported_kinds.contains(&kind)
     }
 }
 

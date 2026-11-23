@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::api::rate_limit::rate_limited_response;
 use crate::api::routes::AppState;
+use crate::push::PushKind;
 use crate::utils::log_pubkey::log_pubkey;
 use governor::clock::Clock;
 
@@ -131,7 +132,7 @@ pub async fn notify_token(
 
                 // CONC-2-safe: get() drops the RwLock before returning.
                 if let Some(token) = token_store.get(&pubkey).await {
-                    match dispatcher.dispatch_silent(&token).await {
+                    match dispatcher.dispatch(PushKind::ChatWake, &token).await {
                         Ok(_outcome) => info!("notify: dispatched pk={}", task_log_pk),
                         Err(e) => warn!("notify: dispatch failed pk={} err={}", task_log_pk, e),
                     }
@@ -226,6 +227,7 @@ mod tests {
         assert_eq!(calls.len(), 1, "stub should record exactly 1 dispatch");
         assert_eq!(calls[0].0, "test_fcm_token");
         assert_eq!(calls[0].1, Platform::Android);
+        assert_eq!(calls[0].2, crate::push::PushKind::ChatWake);
     }
 
     /// D-24 #2: Unregistered pubkey → 202 (anti-CRIT-2 always-202),

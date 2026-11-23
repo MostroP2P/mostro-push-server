@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
-use super::PushService;
+use super::{token_prefix, PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -355,7 +355,48 @@ impl FcmPush {
     ///   text silently, and `Urgency: high` to match the Android and iOS
     ///   priority: Web Push defaults to `normal` (RFC 8030 §5.3), which a
     ///   dozing phone may defer
-    fn build_payload_for_token(device_token: &str, platform: &Platform) -> serde_json::Value {
+    fn build_payload(kind: PushKind, device_token: &str, platform: &Platform) -> serde_json::Value {
+        match kind {
+            PushKind::TradeUpdate => Self::build_trade_update_payload(device_token, platform),
+            PushKind::ChatWake => Self::build_chat_wake_payload(device_token, platform),
+            PushKind::DisputeNew => Self::build_dispute_new_payload(device_token),
+        }
+    }
+
+    /// Visible push for a dispute opened on a watched node. It names no
+    /// dispute, node or party.
+    ///
+    /// The text is the device's: `title_loc_key` and `body_loc_key` name
+    /// string resources of the client app, in the user's language. No literal
+    /// `title` or `body` is sent, because the Firebase Android SDK shows a
+    /// literal in preference to its key, so one would hide the translation.
+    ///
+    /// One tag for every dispute: a second one replaces the first notice and
+    /// alerts again.
+    fn build_dispute_new_payload(device_token: &str) -> serde_json::Value {
+        json!({
+            "message": {
+                "token": device_token,
+                "data": {
+                    "type": "dispute_new",
+                    "source": "mostro-push-server",
+                    "timestamp": chrono::Utc::now().timestamp().to_string()
+                },
+                "android": {
+                    "priority": "high",
+                    "notification": {
+                        "channel_id": "bosstro_disputes",
+                        "tag": "bosstro-dispute",
+                        "title_loc_key": "push_dispute_new_title",
+                        "body_loc_key": "push_dispute_new_body",
+                        "default_vibrate_timings": true
+                    }
+                }
+            }
+        })
+    }
+
+    fn build_trade_update_payload(device_token: &str, platform: &Platform) -> serde_json::Value {
         let mut payload = json!({
             "message": {
                 "token": device_token,
@@ -423,7 +464,7 @@ impl FcmPush {
     /// Data-only (no `alert`, no notification fallback) so iOS does not
     /// throttle the app for high-frequency silent pushes
     /// (apns-priority: 5 + apns-push-type: background per Apple's docs).
-    /// Distinct from `build_payload_for_token` (Mostro daemon events at
+    /// Distinct from `build_trade_update_payload` (Mostro daemon events at
     /// apns-priority: 10 with an alert fallback). Do NOT merge:
     /// the two paths have fundamentally different frequency profiles
     /// (chat = continuous, daemon events = sporadic).
@@ -431,10 +472,7 @@ impl FcmPush {
     /// Web tokens also get `Urgency: high`, matching `android.priority`:
     /// the web client shows a notice for each `chat_wake`, and Web Push
     /// defaults to `normal`.
-    fn build_silent_payload_for_notify(
-        device_token: &str,
-        platform: &Platform,
-    ) -> serde_json::Value {
+    fn build_chat_wake_payload(device_token: &str, platform: &Platform) -> serde_json::Value {
         let mut payload = json!({
             "message": {
                 "token": device_token,
@@ -474,23 +512,37 @@ impl FcmPush {
 
 #[async_trait]
 impl PushService for FcmPush {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let auth_token = self.get_access_token().await?;
+    ) -> Result<(), PushError> {
+        // A failure before FCM answers says nothing about the token.
+        let unavailable = |detail: String| PushError::new(PushErrorKind::Unavailable, detail);
+
+        let auth_token = self
+            .get_access_token()
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
 
         let fcm_url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             self.project_id
         );
 
-        let payload = Self::build_payload_for_token(device_token, platform);
+        let payload = Self::build_payload(kind, device_token, platform);
+        // Names the push in the log lines, which read as before.
+        let label = match kind {
+            PushKind::TradeUpdate => "FCM",
+            PushKind::ChatWake => "FCM silent",
+            PushKind::DisputeNew => "FCM dispute",
+        };
 
         debug!(
-            "Sending FCM to token: {}...",
-            &device_token[..20.min(device_token.len())]
+            "Sending {} to token: {}...",
+            label,
+            token_prefix(device_token, 20)
         );
 
         let response = self
@@ -499,57 +551,76 @@ impl PushService for FcmPush {
             .bearer_auth(&auth_token)
             .json(&payload)
             .send()
-            .await?;
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
 
-        if response.status().is_success() {
-            info!("FCM notification sent to {} device", platform);
+        let status = response.status();
+        if status.is_success() {
+            info!("{} notification sent to {} device", label, platform);
             Ok(())
         } else {
-            let error_text = response.text().await?;
-            error!("FCM error for {} device: {}", platform, error_text);
-            Err(format!("FCM send failed: {}", error_text).into())
+            // A body that cannot be read leaves the HTTP status to sort
+            // the error by, and to name it in the log.
+            let error_text = response.text().await.unwrap_or_default();
+            error!(
+                "{} error for {} device: {} {}",
+                label, platform, status, error_text
+            );
+            Err(PushError::new(
+                classify_fcm_error(status.as_u16(), &error_text),
+                format!("{} send failed: {} {}", label, status, error_text),
+            ))
         }
     }
 
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let auth_token = self.get_access_token().await?;
-
-        let fcm_url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
-        );
-
-        let payload = Self::build_silent_payload_for_notify(device_token, platform);
-
-        debug!(
-            "Sending FCM silent to token: {}...",
-            &device_token[..20.min(device_token.len())]
-        );
-
-        let response = self
-            .client
-            .post(&fcm_url)
-            .bearer_auth(&auth_token)
-            .json(&payload)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            info!("FCM silent notification sent to {} device", platform);
-            Ok(())
-        } else {
-            let error_text = response.text().await?;
-            error!("FCM silent error for {} device: {}", platform, error_text);
-            Err(format!("FCM silent send failed: {}", error_text).into())
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        match kind {
+            PushKind::TradeUpdate | PushKind::ChatWake => {
+                matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
+            }
+            // Its payload is defined for Android only.
+            PushKind::DisputeNew => matches!(platform, Platform::Android),
         }
     }
+}
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
+/// Sorts an FCM v1 error response (`messages:send`) into a [`PushErrorKind`].
+///
+/// FCM's own `errorCode` (in `error.details`) is read first, then the
+/// canonical `error.status`, then the HTTP status. A value this does not
+/// know is passed over, so the next one decides: a `503` stays `Unavailable`
+/// whatever name FCM gives it.
+///
+/// A token is `Unregistered` only when FCM says so by name. A bare `404` is
+/// also what a wrong `FIREBASE_PROJECT_ID` answers, and callers delete the
+/// tokens FCM reports as unregistered.
+fn classify_fcm_error(http_status: u16, body: &str) -> PushErrorKind {
+    let error = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|body| body["error"].clone())
+        .unwrap_or_default();
+    let error_code = error["details"]
+        .as_array()
+        .and_then(|details| details.iter().find_map(|d| d["errorCode"].as_str()));
+
+    match error_code {
+        Some("UNREGISTERED") => return PushErrorKind::Unregistered,
+        Some("SENDER_ID_MISMATCH") => return PushErrorKind::SenderMismatch,
+        Some("INVALID_ARGUMENT") => return PushErrorKind::InvalidArgument,
+        Some("QUOTA_EXCEEDED" | "UNAVAILABLE" | "INTERNAL") => return PushErrorKind::Unavailable,
+        _ => {}
+    }
+    match error["status"].as_str() {
+        Some("INVALID_ARGUMENT") => return PushErrorKind::InvalidArgument,
+        Some("RESOURCE_EXHAUSTED" | "UNAVAILABLE" | "INTERNAL" | "DEADLINE_EXCEEDED") => {
+            return PushErrorKind::Unavailable
+        }
+        _ => {}
+    }
+    match http_status {
+        400 => PushErrorKind::InvalidArgument,
+        429 | 500..=599 => PushErrorKind::Unavailable,
+        _ => PushErrorKind::Other,
     }
 }
 
@@ -639,14 +710,216 @@ mod tests {
     #[test]
     fn fcm_supports_every_platform() {
         let service = test_service("http://127.0.0.1:9/token".to_string());
-        assert!(service.supports_platform(&Platform::Android));
-        assert!(service.supports_platform(&Platform::Ios));
-        assert!(service.supports_platform(&Platform::Web));
+        for kind in [PushKind::TradeUpdate, PushKind::ChatWake] {
+            assert!(service.supports(kind, &Platform::Android));
+            assert!(service.supports(kind, &Platform::Ios));
+            assert!(service.supports(kind, &Platform::Web));
+        }
+    }
+
+    #[test]
+    fn fcm_sends_a_new_dispute_to_android_only() {
+        let service = test_service("http://127.0.0.1:9/token".to_string());
+        assert!(service.supports(PushKind::DisputeNew, &Platform::Android));
+        assert!(!service.supports(PushKind::DisputeNew, &Platform::Ios));
+        assert!(!service.supports(PushKind::DisputeNew, &Platform::Web));
+    }
+
+    #[test]
+    fn dispute_new_payload_is_pinned() {
+        let payload =
+            FcmPush::build_payload(PushKind::DisputeNew, "device-token", &Platform::Android);
+        assert_eq!(
+            pinned(payload),
+            include_str!("testdata/dispute_new_android.json").trim_end()
+        );
+    }
+
+    /// The Firebase Android SDK shows a literal title or body in preference
+    /// to its `*_loc_key`, so sending one would leave every device in English.
+    #[test]
+    fn dispute_new_payload_carries_no_literal_text() {
+        let payload =
+            FcmPush::build_payload(PushKind::DisputeNew, "device-token", &Platform::Android);
+        let message = &payload["message"];
+        assert!(message.get("notification").is_none());
+        let notification = &message["android"]["notification"];
+        assert!(notification.get("title").is_none());
+        assert!(notification.get("body").is_none());
+        assert_eq!(notification["title_loc_key"], "push_dispute_new_title");
+        assert_eq!(notification["body_loc_key"], "push_dispute_new_body");
+    }
+
+    /// An FCM v1 error body, as `messages:send` answers.
+    fn fcm_error(code: u16, status: &str, error_code: Option<&str>) -> String {
+        let mut error = json!({"code": code, "message": "an error", "status": status});
+        if let Some(error_code) = error_code {
+            error["details"] = json!([{
+                "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                "errorCode": error_code
+            }]);
+        }
+        json!({ "error": error }).to_string()
+    }
+
+    #[test]
+    fn fcm_errors_are_sorted_by_their_error_code() {
+        for (http, status, error_code, expected) in [
+            (
+                404,
+                "NOT_FOUND",
+                "UNREGISTERED",
+                PushErrorKind::Unregistered,
+            ),
+            (
+                400,
+                "INVALID_ARGUMENT",
+                "INVALID_ARGUMENT",
+                PushErrorKind::InvalidArgument,
+            ),
+            (
+                403,
+                "PERMISSION_DENIED",
+                "SENDER_ID_MISMATCH",
+                PushErrorKind::SenderMismatch,
+            ),
+            (
+                429,
+                "RESOURCE_EXHAUSTED",
+                "QUOTA_EXCEEDED",
+                PushErrorKind::Unavailable,
+            ),
+            (
+                503,
+                "UNAVAILABLE",
+                "UNAVAILABLE",
+                PushErrorKind::Unavailable,
+            ),
+            (500, "INTERNAL", "INTERNAL", PushErrorKind::Unavailable),
+            (
+                401,
+                "UNAUTHENTICATED",
+                "THIRD_PARTY_AUTH_ERROR",
+                PushErrorKind::Other,
+            ),
+        ] {
+            let body = fcm_error(http, status, Some(error_code));
+            assert_eq!(classify_fcm_error(http, &body), expected, "{error_code}");
+        }
+    }
+
+    #[test]
+    fn fcm_errors_without_an_error_code_are_sorted_by_status() {
+        for (http, status, expected) in [
+            (400, "INVALID_ARGUMENT", PushErrorKind::InvalidArgument),
+            (429, "RESOURCE_EXHAUSTED", PushErrorKind::Unavailable),
+            (503, "UNAVAILABLE", PushErrorKind::Unavailable),
+            (500, "INTERNAL", PushErrorKind::Unavailable),
+            (504, "DEADLINE_EXCEEDED", PushErrorKind::Unavailable),
+            (401, "UNAUTHENTICATED", PushErrorKind::Other),
+            (403, "PERMISSION_DENIED", PushErrorKind::Other),
+        ] {
+            let body = fcm_error(http, status, None);
+            assert_eq!(classify_fcm_error(http, &body), expected, "{status}");
+        }
+    }
+
+    /// A name this server does not know must not hide a status that says to
+    /// try again.
+    #[test]
+    fn an_unknown_fcm_error_name_leaves_the_next_level_to_decide() {
+        // An unknown `errorCode`: `error.status` decides.
+        let body = fcm_error(503, "UNAVAILABLE", Some("UNSPECIFIED_ERROR"));
+        assert_eq!(classify_fcm_error(503, &body), PushErrorKind::Unavailable);
+        // Both unknown: the HTTP status decides.
+        let body = fcm_error(500, "UNKNOWN", Some("UNSPECIFIED_ERROR"));
+        assert_eq!(classify_fcm_error(500, &body), PushErrorKind::Unavailable);
+        let body = fcm_error(500, "UNKNOWN", None);
+        assert_eq!(classify_fcm_error(500, &body), PushErrorKind::Unavailable);
+        let body = fcm_error(403, "PERMISSION_DENIED", Some("UNSPECIFIED_ERROR"));
+        assert_eq!(classify_fcm_error(403, &body), PushErrorKind::Other);
+    }
+
+    /// A `404` with no `UNREGISTERED` is what a wrong project id answers:
+    /// reading it as a dead token would have every token deleted.
+    #[test]
+    fn a_bare_not_found_is_not_an_unregistered_token() {
+        let body = fcm_error(404, "NOT_FOUND", None);
+        assert_eq!(classify_fcm_error(404, &body), PushErrorKind::Other);
+        assert_eq!(classify_fcm_error(404, "Not Found"), PushErrorKind::Other);
+    }
+
+    #[test]
+    fn fcm_errors_with_an_unreadable_body_are_sorted_by_http_status() {
+        for (http, expected) in [
+            (400, PushErrorKind::InvalidArgument),
+            (429, PushErrorKind::Unavailable),
+            (500, PushErrorKind::Unavailable),
+            (502, PushErrorKind::Unavailable),
+            (503, PushErrorKind::Unavailable),
+            (401, PushErrorKind::Other),
+            (403, PushErrorKind::Other),
+        ] {
+            assert_eq!(classify_fcm_error(http, "<html>"), expected, "{http}");
+            assert_eq!(classify_fcm_error(http, ""), expected, "{http}");
+        }
+    }
+
+    /// The payload as it is serialised for FCM, with its only moving part,
+    /// the timestamp, fixed.
+    fn pinned(mut payload: serde_json::Value) -> String {
+        let timestamp = &mut payload["message"]["data"]["timestamp"];
+        assert!(
+            timestamp
+                .as_str()
+                .is_some_and(|seconds| seconds.parse::<i64>().is_ok()),
+            "the timestamp is Unix seconds as a string"
+        );
+        *timestamp = json!("0");
+        serde_json::to_string(&payload).unwrap()
+    }
+
+    /// The exact bytes clients in the field receive: key order included,
+    /// since `serde_json` keeps it (`preserve_order`).
+    #[test]
+    fn trade_update_payloads_are_pinned() {
+        for (platform, fixture) in [
+            (
+                Platform::Android,
+                include_str!("testdata/trade_update_android.json"),
+            ),
+            (
+                Platform::Ios,
+                include_str!("testdata/trade_update_ios.json"),
+            ),
+            (
+                Platform::Web,
+                include_str!("testdata/trade_update_web.json"),
+            ),
+        ] {
+            let payload = FcmPush::build_payload(PushKind::TradeUpdate, "device-token", &platform);
+            assert_eq!(pinned(payload), fixture.trim_end(), "{platform}");
+        }
+    }
+
+    #[test]
+    fn chat_wake_payloads_are_pinned() {
+        for (platform, fixture) in [
+            (
+                Platform::Android,
+                include_str!("testdata/chat_wake_android.json"),
+            ),
+            (Platform::Ios, include_str!("testdata/chat_wake_ios.json")),
+            (Platform::Web, include_str!("testdata/chat_wake_web.json")),
+        ] {
+            let payload = FcmPush::build_payload(PushKind::ChatWake, "device-token", &platform);
+            assert_eq!(pinned(payload), fixture.trim_end(), "{platform}");
+        }
     }
 
     #[test]
     fn web_payload_carries_a_webpush_tag() {
-        let payload = FcmPush::build_payload_for_token("web-token", &Platform::Web);
+        let payload = FcmPush::build_payload(PushKind::TradeUpdate, "web-token", &Platform::Web);
         // `renotify`: a browser replaces a notification with the same tag
         // silently unless told to alert again, and the next trade step is
         // often the one with a deadline. `Urgency: high` for the same reason:
@@ -664,7 +937,7 @@ mod tests {
     #[test]
     fn mobile_payloads_carry_no_webpush_block() {
         for platform in [Platform::Android, Platform::Ios] {
-            let payload = FcmPush::build_payload_for_token("mobile-token", &platform);
+            let payload = FcmPush::build_payload(PushKind::TradeUpdate, "mobile-token", &platform);
             assert!(payload["message"].get("webpush").is_none(), "{platform}");
             assert!(payload["message"].get("android").is_some());
             assert!(payload["message"].get("apns").is_some());
@@ -673,7 +946,7 @@ mod tests {
 
     #[test]
     fn web_silent_payload_asks_for_high_urgency() {
-        let payload = FcmPush::build_silent_payload_for_notify("web-token", &Platform::Web);
+        let payload = FcmPush::build_payload(PushKind::ChatWake, "web-token", &Platform::Web);
         // The web client shows a notice for every `chat_wake`, and a counterparty
         // waiting on a reply is as time-bound as a trade step.
         assert_eq!(
@@ -687,7 +960,7 @@ mod tests {
     #[test]
     fn mobile_silent_payloads_carry_no_webpush_block() {
         for platform in [Platform::Android, Platform::Ios] {
-            let payload = FcmPush::build_silent_payload_for_notify("mobile-token", &platform);
+            let payload = FcmPush::build_payload(PushKind::ChatWake, "mobile-token", &platform);
             assert!(payload["message"].get("webpush").is_none(), "{platform}");
             assert_eq!(payload["message"]["android"]["priority"], "high");
             assert_eq!(payload["message"]["apns"]["headers"]["apns-priority"], "5");

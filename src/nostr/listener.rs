@@ -10,7 +10,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::api::rate_limit::{start_keyed_limiter_cleanup_task, PerPubkeyLimiter};
 use crate::config::Config;
-use crate::push::{DispatchError, DispatchOutcome, PushDispatcher};
+use crate::push::{DispatchError, DispatchOutcome, PushDispatcher, PushKind};
 use crate::store::{RegisteredToken, TokenStore};
 use crate::utils::log_pubkey::log_pubkey;
 
@@ -269,7 +269,10 @@ async fn dispatch_and_log(
     registered_token: &RegisteredToken,
     event_id: EventId,
 ) {
-    match dispatcher.dispatch(registered_token).await {
+    match dispatcher
+        .dispatch(PushKind::TradeUpdate, registered_token)
+        .await
+    {
         Ok(DispatchOutcome::Delivered { backend: _ }) => {
             info!("Push sent successfully for event {}", event_id);
         }
@@ -314,7 +317,7 @@ fn extract_recipient(event: &Event) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::push::PushService;
+    use crate::push::{PushError, PushService};
     use crate::store::Platform;
     use async_trait::async_trait;
     use tokio::sync::{mpsc, Notify};
@@ -333,11 +336,12 @@ mod tests {
 
     #[async_trait]
     impl PushService for GatedPushService {
-        async fn send_to_token(
+        async fn send(
             &self,
+            _kind: PushKind,
             device_token: &str,
             _platform: &Platform,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<(), PushError> {
             if device_token == SLOW_DEVICE {
                 self.release.notified().await;
             }
@@ -345,7 +349,7 @@ mod tests {
             Ok(())
         }
 
-        fn supports_platform(&self, _platform: &Platform) -> bool {
+        fn supports(&self, _kind: PushKind, _platform: &Platform) -> bool {
             true
         }
     }

@@ -8,7 +8,7 @@ The server treats UnifiedPush as a peer of FCM behind the same `PushService` tra
 
 1. The mobile client picks a distributor and obtains an endpoint URL from it.
 2. The client calls `POST /api/register` with `platform = "android"` and `token` set to that endpoint URL — i.e. for UnifiedPush, the "device token" *is* the URL.
-3. On dispatch, `UnifiedPushService::send_to_token` POSTs a small JSON payload to the URL.
+3. On dispatch, `UnifiedPushService::send` POSTs a small JSON payload to the URL.
 4. The distributor delivers a wake-up to the client app, which then fetches the relevant Nostr events itself.
 
 ## Wire format
@@ -34,7 +34,7 @@ The endpoint store is loaded once at startup. Failures to read or parse the file
 
 ## Platform support
 
-`UnifiedPushService::supports_platform` returns `true` only for `Platform::Android`. iOS and web clients are FCM-only.
+`UnifiedPushService::supports` returns `true` only for `Platform::Android`, and never for `PushKind::DisputeNew`. iOS and web clients are FCM-only.
 
 If `UNIFIEDPUSH_ENABLED=false`, the service is not added to the dispatcher slice. Existing entries in `data/unifiedpush_endpoints.json` are ignored at runtime but not deleted.
 
@@ -68,7 +68,7 @@ tracked in [#39](https://github.com/MostroP2P/mostro-push-server/issues/39).
 
 ## Operational notes
 
-- UnifiedPush has no per-payload distinction between silent and visible push. `send_silent_to_token` falls back to `send_to_token`, which is the same code path the Nostr listener uses.
+- UnifiedPush has no per-payload distinction between silent and visible push. `send` ignores the `PushKind`: `/api/notify` and the Nostr listener go through the same code path.
 - There is no rate limiting on outbound UnifiedPush calls. Nothing bounds how often the server will POST to a registered endpoint.
 - The backend's client applies a 2 s connect timeout and a 5 s total timeout. Those bound how long one call may take, not how many are made, so they are not a substitute for the rate limiting above. They come from `UnifiedPushService::build_client`, not from the server-wide `reqwest::Client`, which this backend does not use.
 - The pre-flight DNS lookup in `endpoint_guard::validate_endpoint` carries its own 2 s bound. It runs before the client ever sees the request, so it is outside those timeouts, and the host it resolves is attacker-supplied.

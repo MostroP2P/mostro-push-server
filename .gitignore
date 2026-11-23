@@ -28,6 +28,7 @@ firebase-service-account.json
 *.json
 !.planning/**/*.json
 !config/trusted_mostro_pubkeys.json
+!src/push/testdata/*.json
 
 # Logs
 *.log

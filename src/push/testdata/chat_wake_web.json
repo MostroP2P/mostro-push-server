@@ -1,0 +1,1 @@
+{"message":{"token":"device-token","data":{"type":"chat_wake","source":"mostro-push-server","timestamp":"0"},"android":{"priority":"high"},"apns":{"headers":{"apns-priority":"5","apns-push-type":"background"},"payload":{"aps":{"content-available":1}}},"webpush":{"headers":{"Urgency":"high"}}}}

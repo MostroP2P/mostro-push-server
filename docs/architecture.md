@@ -57,12 +57,15 @@ Reads always come from memory. With `TOKEN_STORE_PATH` set, `store/sqlite.rs` mi
 
 ### Push dispatcher
 
-`PushDispatcher` owns an immutable `Arc<[Arc<dyn PushService>]>` slice plus a parallel `Arc<[&'static str]>` of backend names. Dispatch iterates services, skips backends that do not support the platform, and stops on the first success. The slice is built once at startup and never mutated, so dispatch is lock-free.
+`PushDispatcher` owns an immutable `Arc<[Arc<dyn PushService>]>` slice plus a parallel `Arc<[&'static str]>` of backend names. Dispatch iterates services, skips backends that do not support the kind on the platform, and stops on the first success. The slice is built once at startup and never mutated, so dispatch is lock-free.
 
-Two entry points:
+One entry point, `dispatch(kind, token)`, which calls each backend's `send`. The `PushKind` decides the payload:
 
-- `dispatch` — used by the Nostr listener path. Backends call `send_to_token`.
-- `dispatch_silent` — used by `/api/notify`. Backends call `send_silent_to_token`. The trait's default delegates to `send_to_token`; FCM overrides it with a data-only payload (`apns-priority: 5`, `apns-push-type: background`).
+- `TradeUpdate` — the Nostr listener path: a visible notification.
+- `ChatWake` — `/api/notify`: for FCM a data-only payload (`apns-priority: 5`, `apns-push-type: background`). UnifiedPush sends the same payload for both kinds.
+- `DisputeNew` — a dispute opened on a watched node: a visible notification whose text is named by `title_loc_key` / `body_loc_key` and resolved on the device. FCM and Android only; no backend sends it to another platform, and UnifiedPush never sends it. Nothing dispatches it yet.
+
+A backend says what it delivers through `supports(kind, platform)`.
 
 ### FCM backend (`reqwest` + `jsonwebtoken`)
 
@@ -99,10 +102,10 @@ NostrListener.connect_and_listen
     │  per-trade limit (10/min; drop if exceeded)
     │  try listener permit (50; drop if full), tokio::spawn
     ▼
-PushDispatcher.dispatch(token)
+PushDispatcher.dispatch(TradeUpdate, token)
     │
     ▼
-FcmPush.send_to_token  OR  UnifiedPushService.send_to_token
+FcmPush.send  OR  UnifiedPushService.send
     │
     ▼
 device wake-up
@@ -127,7 +130,7 @@ notify_token handler
     └── try_acquire_owned on Semaphore(50)
             │ ok                                    │ saturated
             ▼                                       ▼
-      tokio::spawn { dispatch_silent }        warn! log (no pubkey)
+      tokio::spawn { dispatch(ChatWake) }     warn! log (no pubkey)
             │
             ▼
       always 202 { "accepted": true } ──▶ client

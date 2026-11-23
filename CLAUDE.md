@@ -67,7 +67,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 ## Conventions
 
 - **Naming**: `snake_case` modules, functions, fields. `PascalCase` types. `SCREAMING_SNAKE_CASE` constants. Module entry points are `mod.rs`.
-- **Errors**: async fallible operations return `Result<T, Box<dyn std::error::Error[+ Send + Sync]>>`. HTTP handlers return `impl Responder`. Validation at the HTTP boundary; trust internal types beyond it.
+- **Errors**: async fallible operations return `Result<T, Box<dyn std::error::Error[+ Send + Sync]>>`. The push layer is the exception: a backend returns a `PushError`, whose `PushErrorKind` says whether the failure is about the token, so a caller can act on it without reading the text. HTTP handlers return `impl Responder`. Validation at the HTTP boundary; trust internal types beyond it.
 - **Logging**: `log` macros (`info!`, `warn!`, `error!`, `debug!`). `info!` for lifecycle, `warn!` for recoverable problems, `error!` for failures requiring attention. No JSON-formatted logs.
 - **Style**: default `rustfmt`, default `clippy`. 4-space indent (Rust default).
 - **Docs and comments**: English only. Minimal comments. Doc comments (`///`) only where intent is non-obvious.

@@ -12,75 +12,140 @@ pub use unifiedpush::UnifiedPushService;
 
 use crate::store::Platform;
 
+/// What a push tells the device. It decides the payload each backend sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushKind {
+    /// A trusted Mostro node addressed a trade update to a registered trade
+    /// pubkey: a visible notification.
+    TradeUpdate,
+    /// `/api/notify`: a silent, data-only wake.
+    ChatWake,
+    /// A trusted Mostro node opened a dispute: a visible notification for
+    /// the devices watching that node. Android only, through FCM.
+    // Sent by the dispute watchers, which are not wired yet.
+    #[allow(dead_code)]
+    DisputeNew,
+}
+
+/// Why a backend did not deliver a push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushErrorKind {
+    /// The token no longer names a device (FCM `UNREGISTERED`, a UnifiedPush
+    /// endpoint answering `404` or `410`). It will not work again.
+    Unregistered,
+    /// The backend refused the request as malformed (FCM `INVALID_ARGUMENT`).
+    ///
+    /// It does not blame the token by itself: FCM answers the same for a
+    /// token it cannot read and for a message field it does not accept, so a
+    /// payload this server built wrong reads the same for every device. Never
+    /// delete a token for it.
+    InvalidArgument,
+    /// The token was issued for another sender (FCM `SENDER_ID_MISMATCH`):
+    /// it belongs to another Firebase project.
+    SenderMismatch,
+    /// The backend could not be reached, or asked to be tried again later.
+    /// It says nothing about the token.
+    Unavailable,
+    Other,
+}
+
+/// A failed push: what went wrong, and the text for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushError {
+    // Read by the dispute fan-out and the token check, which are not wired
+    // yet; today every caller only logs the error.
+    #[allow(dead_code)]
+    pub kind: PushErrorKind,
+    detail: String,
+}
+
+impl PushError {
+    pub fn new(kind: PushErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for PushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for PushError {}
+
 #[async_trait]
 pub trait PushService: Send + Sync {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), PushError>;
 
-    /// Silent (data-only, low-priority) push variant for /api/notify.
-    ///
-    /// Default delegates to `send_to_token`. Backends that need a
-    /// distinct silent payload (e.g. FcmPush per Phase 2 D-05) override
-    /// this method. UnifiedPush has no per-payload distinction and uses
-    /// the default.
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.send_to_token(device_token, platform).await
-    }
-
-    fn supports_platform(&self, platform: &Platform) -> bool;
+    /// Whether this backend delivers a push of `kind` to `platform`.
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool;
 }
 
 // Implement PushService for Arc<UnifiedPushService> to allow shared ownership
 #[async_trait]
 impl PushService for Arc<UnifiedPushService> {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_to_token(device_token, platform).await
+    ) -> Result<(), PushError> {
+        (**self).send(kind, device_token, platform).await
     }
 
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_silent_to_token(device_token, platform).await
-    }
-
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        (**self).supports_platform(platform)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        (**self).supports(kind, platform)
     }
 }
 
 // Implement PushService for Arc<FcmPush> to allow shared ownership
 #[async_trait]
 impl PushService for Arc<FcmPush> {
-    async fn send_to_token(
+    async fn send(
         &self,
+        kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_to_token(device_token, platform).await
+    ) -> Result<(), PushError> {
+        (**self).send(kind, device_token, platform).await
     }
 
-    async fn send_silent_to_token(
-        &self,
-        device_token: &str,
-        platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        (**self).send_silent_to_token(device_token, platform).await
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        (**self).supports(kind, platform)
     }
+}
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        (**self).supports_platform(platform)
+/// The start of a token, for a debug line: at most `max_bytes` of it, cut
+/// back to a character boundary. A token is whatever a client registered,
+/// and slicing a `str` inside a multibyte character panics.
+pub(crate) fn token_prefix(token: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(token.len());
+    while !token.is_char_boundary(end) {
+        end -= 1;
+    }
+    &token[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_prefix;
+
+    #[test]
+    fn a_token_prefix_never_cuts_a_character() {
+        assert_eq!(token_prefix("abcdef", 4), "abcd");
+        assert_eq!(token_prefix("abc", 4), "abc");
+        assert_eq!(token_prefix("", 4), "");
+        // "é" is two bytes, at 3..5: a cut at byte 4 falls inside it.
+        assert_eq!(token_prefix("abcédef", 4), "abc");
+        assert_eq!(token_prefix("abcédef", 5), "abcé");
+        assert_eq!(token_prefix("日本", 2), "");
     }
 }

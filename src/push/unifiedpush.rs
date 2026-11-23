@@ -8,7 +8,8 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-use super::PushService;
+use super::endpoint_guard::EndpointRejection;
+use super::{token_prefix, PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -169,17 +170,21 @@ impl UnifiedPushService {
 
 #[async_trait]
 impl PushService for UnifiedPushService {
-    async fn send_to_token(
+    async fn send(
         &self,
+        _kind: PushKind,
         device_token: &str,
         _platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), PushError> {
         // For UnifiedPush, the device_token IS the endpoint URL, so this is the
         // request-forgery boundary: everything reachable from here was supplied
         // by an unauthenticated caller. Validate before any outbound traffic.
         if let Err(reason) = crate::push::endpoint_guard::validate_endpoint(device_token).await {
             warn!("UnifiedPush endpoint refused: {}", reason);
-            return Err(format!("UnifiedPush endpoint refused: {}", reason).into());
+            return Err(PushError::new(
+                refusal_kind(reason),
+                format!("UnifiedPush endpoint refused: {}", reason),
+            ));
         }
 
         let payload = serde_json::json!({
@@ -189,10 +194,16 @@ impl PushService for UnifiedPushService {
 
         debug!(
             "Sending UnifiedPush to endpoint: {}...",
-            &device_token[..30.min(device_token.len())]
+            token_prefix(device_token, 30)
         );
 
-        let response = self.client.post(device_token).json(&payload).send().await?;
+        let response = self
+            .client
+            .post(device_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(transport_error)?;
 
         if response.status().is_success() {
             info!("UnifiedPush notification sent successfully");
@@ -201,14 +212,52 @@ impl PushService for UnifiedPushService {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             error!("UnifiedPush error: {} - {}", status, error_text);
-            Err(format!("UnifiedPush send failed: {}", status).into())
+            Err(PushError::new(
+                status_kind(status.as_u16()),
+                format!("UnifiedPush send failed: {}", status),
+            ))
         }
     }
 
-    fn supports_platform(&self, platform: &Platform) -> bool {
-        // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.)
-        matches!(platform, Platform::Android)
+    fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
+        // UnifiedPush is primarily for Android (GrapheneOS, LineageOS, etc.).
+        // Its one payload is a wake for a Mostro client, so a new dispute,
+        // which is for another app, is not sent through it.
+        matches!(platform, Platform::Android) && kind != PushKind::DisputeNew
     }
+}
+
+/// Sorts a refusal of the endpoint guard into a [`PushErrorKind`].
+///
+/// A name that did not resolve, or not in time, may resolve on the next
+/// push, so it says nothing about the endpoint. Every other refusal is about
+/// the endpoint as it was registered.
+fn refusal_kind(reason: EndpointRejection) -> PushErrorKind {
+    match reason {
+        EndpointRejection::UnresolvableHost => PushErrorKind::Unavailable,
+        EndpointRejection::InsecureScheme
+        | EndpointRejection::MissingHost
+        | EndpointRejection::NonPublicAddress => PushErrorKind::InvalidArgument,
+    }
+}
+
+/// Sorts the HTTP status a push server refused a push with.
+///
+/// A UnifiedPush endpoint is a push resource of RFC 8030, which answers
+/// `404` for a subscription that expired (section 7.3). `410` is read the
+/// same: some push servers answer it for an endpoint that is gone.
+fn status_kind(http_status: u16) -> PushErrorKind {
+    match http_status {
+        404 | 410 => PushErrorKind::Unregistered,
+        429 | 500..=599 => PushErrorKind::Unavailable,
+        _ => PushErrorKind::Other,
+    }
+}
+
+/// A request that got no answer. The endpoint URL is taken out of the text:
+/// it is the device's token, and this text reaches the logs.
+fn transport_error(error: reqwest::Error) -> PushError {
+    PushError::new(PushErrorKind::Unavailable, error.without_url().to_string())
 }
 
 #[cfg(test)]
@@ -271,7 +320,7 @@ mod tests {
     /// message: a missing guard would surface as a reqwest connection error
     /// instead, which reads very differently.
     #[tokio::test]
-    async fn send_to_token_refuses_non_public_endpoints() {
+    async fn send_refuses_non_public_endpoints() {
         let service = test_service();
 
         for token in [
@@ -283,7 +332,7 @@ mod tests {
             "https://localhost/push",
         ] {
             let err = service
-                .send_to_token(token, &Platform::Android)
+                .send(PushKind::TradeUpdate, token, &Platform::Android)
                 .await
                 .expect_err("dispatch MUST refuse a non-public endpoint");
 
@@ -297,14 +346,77 @@ mod tests {
     /// An opaque value (an FCM token that reached the wrong backend) must not
     /// be handed to reqwest to interpret.
     #[tokio::test]
-    async fn send_to_token_refuses_opaque_tokens() {
+    async fn send_refuses_opaque_tokens() {
         let service = test_service();
         let err = service
-            .send_to_token("d1PxYz8QRk-2vQ1sAbCdEf", &Platform::Android)
+            .send(
+                PushKind::TradeUpdate,
+                "d1PxYz8QRk-2vQ1sAbCdEf",
+                &Platform::Android,
+            )
             .await
             .expect_err("dispatch MUST refuse an opaque token");
 
         assert!(err.to_string().starts_with("UnifiedPush endpoint refused"));
+    }
+
+    #[test]
+    fn only_an_unresolved_host_says_nothing_about_the_endpoint() {
+        assert_eq!(
+            refusal_kind(EndpointRejection::UnresolvableHost),
+            PushErrorKind::Unavailable
+        );
+        for reason in [
+            EndpointRejection::InsecureScheme,
+            EndpointRejection::MissingHost,
+            EndpointRejection::NonPublicAddress,
+        ] {
+            assert_eq!(
+                refusal_kind(reason),
+                PushErrorKind::InvalidArgument,
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_push_is_sorted_by_its_status() {
+        for status in [429, 500, 502, 503] {
+            assert_eq!(status_kind(status), PushErrorKind::Unavailable, "{status}");
+        }
+        for status in [404, 410] {
+            assert_eq!(status_kind(status), PushErrorKind::Unregistered, "{status}");
+        }
+        for status in [400, 401, 403, 413] {
+            assert_eq!(status_kind(status), PushErrorKind::Other, "{status}");
+        }
+    }
+
+    /// The guard refuses loopback endpoints, so the failed request is made
+    /// with the client directly, as the redirect test below does.
+    #[tokio::test]
+    async fn a_failed_request_does_not_carry_the_endpoint_url() {
+        // Bound and dropped: nothing listens on the port, so the connection
+        // is refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{port}/upSECRETTOPIC");
+
+        let error = UnifiedPushService::build_client()
+            .post(&endpoint)
+            .send()
+            .await
+            .expect_err("nothing listens there");
+        assert!(
+            error.to_string().contains("upSECRETTOPIC"),
+            "reqwest no longer names the URL in its error: {error}"
+        );
+
+        let error = transport_error(error);
+        assert_eq!(error.kind, PushErrorKind::Unavailable);
+        assert!(!error.to_string().contains("upSECRETTOPIC"), "{error}");
+        assert!(!error.to_string().contains("127.0.0.1"), "{error}");
     }
 
     /// `endpoint_guard` only ever inspects the first hop, so the client must
@@ -313,7 +425,7 @@ mod tests {
     /// the guard and the whole SSRF fix is one HTTP header away from useless.
     ///
     /// The guard refuses loopback endpoints, so this exercises the client
-    /// configuration directly rather than going through `send_to_token`: the
+    /// configuration directly rather than going through `send`: the
     /// client policy is the property under test.
     #[tokio::test]
     async fn dispatch_client_refuses_to_follow_redirects() {
@@ -360,9 +472,12 @@ mod tests {
     #[test]
     fn unifiedpush_supports_android_only() {
         let service = test_service();
-        assert!(service.supports_platform(&Platform::Android));
-        assert!(!service.supports_platform(&Platform::Ios));
-        assert!(!service.supports_platform(&Platform::Web));
+        for kind in [PushKind::TradeUpdate, PushKind::ChatWake] {
+            assert!(service.supports(kind, &Platform::Android));
+            assert!(!service.supports(kind, &Platform::Ios));
+            assert!(!service.supports(kind, &Platform::Web));
+        }
+        assert!(!service.supports(PushKind::DisputeNew, &Platform::Android));
     }
 
     // ---------------------------------------------------------------------
@@ -370,7 +485,7 @@ mod tests {
     // dispatcher -> UnifiedPushService.
     //
     // The tests above cover the guard by composition: one proves
-    // `send_to_token` calls it, the `endpoint_guard` unit tests prove the guard
+    // `send` calls it, the `endpoint_guard` unit tests prove the guard
     // itself is right. Neither proves the unauthenticated chain actually
     // reaches this backend. A dispatcher wired to the wrong service, or a
     // `/api/notify` that never dispatches, leaves all of them green.
