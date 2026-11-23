@@ -644,6 +644,58 @@ mod tests {
         assert!(service.supports_platform(&Platform::Web));
     }
 
+    /// The payload as it is serialised for FCM, with its only moving part,
+    /// the timestamp, fixed.
+    fn pinned(mut payload: serde_json::Value) -> String {
+        let timestamp = &mut payload["message"]["data"]["timestamp"];
+        assert!(
+            timestamp
+                .as_str()
+                .is_some_and(|seconds| seconds.parse::<i64>().is_ok()),
+            "the timestamp is Unix seconds as a string"
+        );
+        *timestamp = json!("0");
+        serde_json::to_string(&payload).unwrap()
+    }
+
+    /// The exact bytes clients in the field receive: key order included,
+    /// since `serde_json` keeps it (`preserve_order`).
+    #[test]
+    fn trade_update_payloads_are_pinned() {
+        for (platform, fixture) in [
+            (
+                Platform::Android,
+                include_str!("testdata/trade_update_android.json"),
+            ),
+            (
+                Platform::Ios,
+                include_str!("testdata/trade_update_ios.json"),
+            ),
+            (
+                Platform::Web,
+                include_str!("testdata/trade_update_web.json"),
+            ),
+        ] {
+            let payload = FcmPush::build_payload_for_token("device-token", &platform);
+            assert_eq!(pinned(payload), fixture.trim_end(), "{platform}");
+        }
+    }
+
+    #[test]
+    fn chat_wake_payloads_are_pinned() {
+        for (platform, fixture) in [
+            (
+                Platform::Android,
+                include_str!("testdata/chat_wake_android.json"),
+            ),
+            (Platform::Ios, include_str!("testdata/chat_wake_ios.json")),
+            (Platform::Web, include_str!("testdata/chat_wake_web.json")),
+        ] {
+            let payload = FcmPush::build_silent_payload_for_notify("device-token", &platform);
+            assert_eq!(pinned(payload), fixture.trim_end(), "{platform}");
+        }
+    }
+
     #[test]
     fn web_payload_carries_a_webpush_tag() {
         let payload = FcmPush::build_payload_for_token("web-token", &Platform::Web);
