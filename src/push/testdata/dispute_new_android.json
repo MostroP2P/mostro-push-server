@@ -1,0 +1,1 @@
+{"message":{"token":"device-token","data":{"type":"dispute_new","source":"mostro-push-server","timestamp":"0"},"android":{"priority":"high","notification":{"channel_id":"bosstro_disputes","tag":"bosstro-dispute","title_loc_key":"push_dispute_new_title","body_loc_key":"push_dispute_new_body","default_vibrate_timings":true}}}}
