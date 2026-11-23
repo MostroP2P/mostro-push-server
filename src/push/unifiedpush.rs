@@ -9,7 +9,7 @@ use tokio::fs;
 use tokio::sync::RwLock;
 
 use super::endpoint_guard::EndpointRejection;
-use super::{PushError, PushErrorKind, PushKind, PushService};
+use super::{token_prefix, PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -194,7 +194,7 @@ impl PushService for UnifiedPushService {
 
         debug!(
             "Sending UnifiedPush to endpoint: {}...",
-            &device_token[..30.min(device_token.len())]
+            token_prefix(device_token, 30)
         );
 
         let response = self
