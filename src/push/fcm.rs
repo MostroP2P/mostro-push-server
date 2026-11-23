@@ -12,6 +12,7 @@ use tokio::time::sleep;
 
 use super::{PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
+use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::store::Platform;
 
 const SERVICE_ACCOUNT_JSON_ENV: &str = "FIREBASE_SERVICE_ACCOUNT_JSON";
@@ -582,6 +583,12 @@ impl PushService for FcmPush {
             PushKind::DisputeNew => matches!(platform, Platform::Android),
         }
     }
+
+    /// An FCM token is opaque. An `http(s)` URL is a UnifiedPush endpoint,
+    /// or was refused as one: either way it is not sent to Google.
+    fn accepts_token(&self, device_token: &str) -> bool {
+        classify_token(device_token) == TokenShape::Opaque
+    }
 }
 
 /// Sorts an FCM v1 error response (`messages:send`) into a [`PushErrorKind`].
@@ -723,6 +730,25 @@ mod tests {
         assert!(service.supports(PushKind::DisputeNew, &Platform::Android));
         assert!(!service.supports(PushKind::DisputeNew, &Platform::Ios));
         assert!(!service.supports(PushKind::DisputeNew, &Platform::Web));
+    }
+
+    #[test]
+    fn fcm_takes_opaque_tokens_and_no_url() {
+        let service = test_service("http://127.0.0.1:9/token".to_string());
+        for token in [
+            "d1PxYz8QRk-2vQ1sAbCdEf",
+            "fGh1_jK2:APA91bHun4MxP5egoKMwt2KZFBaFUH-1RYqx",
+        ] {
+            assert!(service.accepts_token(token), "{token}");
+        }
+        for token in [
+            "https://ntfy.sh/upAbCdEf123456",
+            "https://push.example.com/endpoint?token=abc",
+            "http://ntfy.sh/upAbCdEf123456",
+            "https://10.0.0.1/push",
+        ] {
+            assert!(!service.accepts_token(token), "{token}");
+        }
     }
 
     #[test]

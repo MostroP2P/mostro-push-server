@@ -22,11 +22,13 @@ use crate::store::{Platform, TokenStore};
 /// `calls`: shared record of (device_token, platform, kind) per invocation.
 /// `supports`: platforms for which `supports` returns true.
 /// `unsupported_kinds`: kinds for which it returns false on every platform.
+/// `refuses_urls`: when true, `accepts_token` refuses an `https://` token.
 /// `fail`: when true, `send` returns an error.
 pub struct StubPushService {
     pub calls: Arc<Mutex<Vec<(String, Platform, PushKind)>>>,
     pub supports: Vec<Platform>,
     pub unsupported_kinds: Vec<PushKind>,
+    pub refuses_urls: bool,
     pub fail: bool,
 }
 
@@ -36,6 +38,7 @@ impl StubPushService {
             calls: Arc::new(Mutex::new(Vec::new())),
             supports,
             unsupported_kinds: Vec::new(),
+            refuses_urls: false,
             fail: false,
         }
     }
@@ -62,6 +65,10 @@ impl PushService for StubPushService {
 
     fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
         self.supports.contains(platform) && !self.unsupported_kinds.contains(&kind)
+    }
+
+    fn accepts_token(&self, device_token: &str) -> bool {
+        !(self.refuses_urls && device_token.starts_with("https://"))
     }
 }
 

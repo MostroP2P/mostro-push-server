@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use super::endpoint_guard::EndpointRejection;
 use super::{PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
+use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::store::Platform;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +226,13 @@ impl PushService for UnifiedPushService {
         // which is for another app, is not sent through it.
         matches!(platform, Platform::Android) && kind != PushKind::DisputeNew
     }
+
+    /// An endpoint is an `http(s)` URL; an opaque value is some other
+    /// backend's token. A URL the guard refuses is still taken, so that
+    /// `send` is the one that refuses it, and says why.
+    fn accepts_token(&self, device_token: &str) -> bool {
+        classify_token(device_token) != TokenShape::Opaque
+    }
 }
 
 /// Sorts a refusal of the endpoint guard into a [`PushErrorKind`].
@@ -358,6 +366,25 @@ mod tests {
             .expect_err("dispatch MUST refuse an opaque token");
 
         assert!(err.to_string().starts_with("UnifiedPush endpoint refused"));
+    }
+
+    #[test]
+    fn unifiedpush_takes_urls_and_no_opaque_token() {
+        let service = test_service();
+        for token in [
+            "https://ntfy.sh/upAbCdEf123456",
+            // Refused by `send`, which names the reason.
+            "http://ntfy.sh/upAbCdEf123456",
+            "https://10.0.0.1/push",
+        ] {
+            assert!(service.accepts_token(token), "{token}");
+        }
+        for token in [
+            "d1PxYz8QRk-2vQ1sAbCdEf",
+            "fGh1_jK2:APA91bHun4MxP5egoKMwt2KZFBaFUH-1RYqx",
+        ] {
+            assert!(!service.accepts_token(token), "{token}");
+        }
     }
 
     #[test]

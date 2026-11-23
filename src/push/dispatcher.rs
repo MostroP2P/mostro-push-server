@@ -19,8 +19,8 @@ pub enum DispatchOutcome {
 
 #[derive(Debug)]
 pub enum DispatchError {
-    /// No backend sends this kind of push to the device's platform: the
-    /// platform has no backend at all, or none of them sends this kind.
+    /// No backend takes this push: the platform has no backend at all, none
+    /// of them sends this kind, or none accepts a token of this shape.
     NoBackendForPlatform,
     AllBackendsFailed {
         errors: Vec<PushError>,
@@ -31,7 +31,7 @@ impl std::fmt::Display for DispatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DispatchError::NoBackendForPlatform => {
-                write!(f, "no push backend sends this kind to this platform")
+                write!(f, "no push backend takes this kind, platform and token")
             }
             DispatchError::AllBackendsFailed { errors } => {
                 let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
@@ -53,7 +53,8 @@ impl PushDispatcher {
     }
 
     /// Sends a push of `kind` through the first backend that supports it on
-    /// the device's platform and accepts it.
+    /// the device's platform, takes a token of that shape, and delivers it.
+    /// A backend that does not take the token never sees it.
     pub async fn dispatch(
         &self,
         kind: PushKind,
@@ -63,7 +64,9 @@ impl PushDispatcher {
         let mut attempted = false;
 
         for (idx, service) in self.services.iter().enumerate() {
-            if !service.supports(kind, &token.platform) {
+            if !service.supports(kind, &token.platform)
+                || !service.accepts_token(&token.device_token)
+            {
                 continue;
             }
             attempted = true;
@@ -139,6 +142,45 @@ mod tests {
             outcome,
             Ok(DispatchOutcome::Delivered {
                 backend: "wake-only"
+            })
+        ));
+    }
+
+    /// As FCM before UnifiedPush: the endpoint URL goes only to the backend
+    /// that takes URLs, and an opaque token still reaches the first one.
+    #[tokio::test]
+    async fn a_backend_that_does_not_take_the_token_never_sees_it() {
+        let mut opaque_only = StubPushService::new(vec![Platform::Android]);
+        opaque_only.refuses_urls = true;
+        let opaque_only = Arc::new(opaque_only);
+        let any_token = Arc::new(StubPushService::new(vec![Platform::Android]));
+        let dispatcher = PushDispatcher::new(vec![
+            (
+                Arc::clone(&opaque_only) as Arc<dyn PushService>,
+                "opaque-only",
+            ),
+            (Arc::clone(&any_token) as Arc<dyn PushService>, "any-token"),
+        ]);
+
+        let mut endpoint = android_token();
+        endpoint.device_token = "https://ntfy.sh/upAbCdEf123456".to_string();
+        let outcome = dispatcher.dispatch(PushKind::TradeUpdate, &endpoint).await;
+
+        assert!(matches!(
+            outcome,
+            Ok(DispatchOutcome::Delivered {
+                backend: "any-token"
+            })
+        ));
+        assert!(opaque_only.calls.lock().await.is_empty());
+
+        let outcome = dispatcher
+            .dispatch(PushKind::TradeUpdate, &android_token())
+            .await;
+        assert!(matches!(
+            outcome,
+            Ok(DispatchOutcome::Delivered {
+                backend: "opaque-only"
             })
         ));
     }

@@ -24,7 +24,7 @@ The server posts:
 
 `Content-Type: application/json`, no auth, no payload data. The client must not rely on the body — UnifiedPush is a wake-up channel, not a message bus. After waking, the client queries Nostr directly.
 
-A `2xx` response is treated as success. Any other response is logged at `error!` level and the dispatcher tries the next backend (in practice, none — UnifiedPush registrations are Android-only and there is no fallback for them).
+A `2xx` response is treated as success. Any other response is logged at `error!` level and the dispatcher tries the next backend (in practice, none: an endpoint URL is taken by UnifiedPush only, and is never handed to FCM).
 
 ## Persistence
 

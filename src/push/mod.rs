@@ -87,6 +87,15 @@ pub trait PushService: Send + Sync {
 
     /// Whether this backend delivers a push of `kind` to `platform`.
     fn supports(&self, kind: PushKind, platform: &Platform) -> bool;
+
+    /// Whether `device_token` is this backend's to send to, decided by its
+    /// shape alone and without any network.
+    ///
+    /// A registration does not say which backend its token is for, so the
+    /// dispatcher asks each one. It keeps a token away from a backend it was
+    /// never meant for: a UnifiedPush endpoint is a URL that lets whoever
+    /// holds it push to the device, and must not be handed to FCM.
+    fn accepts_token(&self, device_token: &str) -> bool;
 }
 
 // Implement PushService for Arc<UnifiedPushService> to allow shared ownership
@@ -104,6 +113,10 @@ impl PushService for Arc<UnifiedPushService> {
     fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
         (**self).supports(kind, platform)
     }
+
+    fn accepts_token(&self, device_token: &str) -> bool {
+        (**self).accepts_token(device_token)
+    }
 }
 
 // Implement PushService for Arc<FcmPush> to allow shared ownership
@@ -120,5 +133,9 @@ impl PushService for Arc<FcmPush> {
 
     fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
         (**self).supports(kind, platform)
+    }
+
+    fn accepts_token(&self, device_token: &str) -> bool {
+        (**self).accepts_token(device_token)
     }
 }

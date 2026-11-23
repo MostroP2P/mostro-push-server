@@ -278,7 +278,7 @@ async fn dispatch_and_log(
         }
         Err(DispatchError::NoBackendForPlatform) => {
             error!(
-                "Push dropped for event {}: no backend for {} devices",
+                "Push dropped for event {}: no backend takes this {} device",
                 event_id, registered_token.platform
             );
         }
@@ -350,6 +350,10 @@ mod tests {
         }
 
         fn supports(&self, _kind: PushKind, _platform: &Platform) -> bool {
+            true
+        }
+
+        fn accepts_token(&self, _device_token: &str) -> bool {
             true
         }
     }
