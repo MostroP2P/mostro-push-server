@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-use super::{PushKind, PushService};
+use super::{PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -174,13 +174,16 @@ impl PushService for UnifiedPushService {
         _kind: PushKind,
         device_token: &str,
         _platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), PushError> {
         // For UnifiedPush, the device_token IS the endpoint URL, so this is the
         // request-forgery boundary: everything reachable from here was supplied
         // by an unauthenticated caller. Validate before any outbound traffic.
         if let Err(reason) = crate::push::endpoint_guard::validate_endpoint(device_token).await {
             warn!("UnifiedPush endpoint refused: {}", reason);
-            return Err(format!("UnifiedPush endpoint refused: {}", reason).into());
+            return Err(PushError::new(
+                PushErrorKind::InvalidArgument,
+                format!("UnifiedPush endpoint refused: {}", reason),
+            ));
         }
 
         let payload = serde_json::json!({
@@ -193,7 +196,13 @@ impl PushService for UnifiedPushService {
             &device_token[..30.min(device_token.len())]
         );
 
-        let response = self.client.post(device_token).json(&payload).send().await?;
+        let response = self
+            .client
+            .post(device_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| PushError::new(PushErrorKind::Unavailable, e.to_string()))?;
 
         if response.status().is_success() {
             info!("UnifiedPush notification sent successfully");
@@ -202,7 +211,10 @@ impl PushService for UnifiedPushService {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             error!("UnifiedPush error: {} - {}", status, error_text);
-            Err(format!("UnifiedPush send failed: {}", status).into())
+            Err(PushError::new(
+                PushErrorKind::Other,
+                format!("UnifiedPush send failed: {}", status),
+            ))
         }
     }
 

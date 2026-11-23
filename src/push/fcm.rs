@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
-use super::{PushKind, PushService};
+use super::{PushError, PushErrorKind, PushKind, PushService};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -483,8 +483,14 @@ impl PushService for FcmPush {
         kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let auth_token = self.get_access_token().await?;
+    ) -> Result<(), PushError> {
+        // A failure before FCM answers says nothing about the token.
+        let unavailable = |detail: String| PushError::new(PushErrorKind::Unavailable, detail);
+
+        let auth_token = self
+            .get_access_token()
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
 
         let fcm_url = format!(
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
@@ -510,20 +516,68 @@ impl PushService for FcmPush {
             .bearer_auth(&auth_token)
             .json(&payload)
             .send()
-            .await?;
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
 
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             info!("{} notification sent to {} device", label, platform);
             Ok(())
         } else {
-            let error_text = response.text().await?;
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| unavailable(e.to_string()))?;
             error!("{} error for {} device: {}", label, platform, error_text);
-            Err(format!("{} send failed: {}", label, error_text).into())
+            Err(PushError::new(
+                classify_fcm_error(status.as_u16(), &error_text),
+                format!("{} send failed: {}", label, error_text),
+            ))
         }
     }
 
     fn supports_platform(&self, platform: &Platform) -> bool {
         matches!(platform, Platform::Android | Platform::Ios | Platform::Web)
+    }
+}
+
+/// Sorts an FCM v1 error response (`messages:send`) into a [`PushErrorKind`].
+///
+/// FCM's own `errorCode` (in `error.details`) is read first, then the
+/// canonical `error.status`, then the HTTP status.
+///
+/// A token is `Unregistered` only when FCM says so by name. A bare `404` is
+/// also what a wrong `FIREBASE_PROJECT_ID` answers, and callers delete the
+/// tokens FCM reports as unregistered.
+fn classify_fcm_error(http_status: u16, body: &str) -> PushErrorKind {
+    let error = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|body| body["error"].clone())
+        .unwrap_or_default();
+    let error_code = error["details"]
+        .as_array()
+        .and_then(|details| details.iter().find_map(|d| d["errorCode"].as_str()));
+
+    match error_code {
+        Some("UNREGISTERED") => return PushErrorKind::Unregistered,
+        Some("SENDER_ID_MISMATCH") => return PushErrorKind::SenderMismatch,
+        Some("INVALID_ARGUMENT") => return PushErrorKind::InvalidArgument,
+        Some("QUOTA_EXCEEDED" | "UNAVAILABLE" | "INTERNAL") => return PushErrorKind::Unavailable,
+        Some(_) => return PushErrorKind::Other,
+        None => {}
+    }
+    match error["status"].as_str() {
+        Some("INVALID_ARGUMENT") => return PushErrorKind::InvalidArgument,
+        Some("RESOURCE_EXHAUSTED" | "UNAVAILABLE" | "INTERNAL" | "DEADLINE_EXCEEDED") => {
+            return PushErrorKind::Unavailable
+        }
+        Some(_) => return PushErrorKind::Other,
+        None => {}
+    }
+    match http_status {
+        400 => PushErrorKind::InvalidArgument,
+        429 | 500..=599 => PushErrorKind::Unavailable,
+        _ => PushErrorKind::Other,
     }
 }
 
@@ -616,6 +670,105 @@ mod tests {
         assert!(service.supports_platform(&Platform::Android));
         assert!(service.supports_platform(&Platform::Ios));
         assert!(service.supports_platform(&Platform::Web));
+    }
+
+    /// An FCM v1 error body, as `messages:send` answers.
+    fn fcm_error(code: u16, status: &str, error_code: Option<&str>) -> String {
+        let mut error = json!({"code": code, "message": "an error", "status": status});
+        if let Some(error_code) = error_code {
+            error["details"] = json!([{
+                "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                "errorCode": error_code
+            }]);
+        }
+        json!({ "error": error }).to_string()
+    }
+
+    #[test]
+    fn fcm_errors_are_sorted_by_their_error_code() {
+        for (http, status, error_code, expected) in [
+            (
+                404,
+                "NOT_FOUND",
+                "UNREGISTERED",
+                PushErrorKind::Unregistered,
+            ),
+            (
+                400,
+                "INVALID_ARGUMENT",
+                "INVALID_ARGUMENT",
+                PushErrorKind::InvalidArgument,
+            ),
+            (
+                403,
+                "PERMISSION_DENIED",
+                "SENDER_ID_MISMATCH",
+                PushErrorKind::SenderMismatch,
+            ),
+            (
+                429,
+                "RESOURCE_EXHAUSTED",
+                "QUOTA_EXCEEDED",
+                PushErrorKind::Unavailable,
+            ),
+            (
+                503,
+                "UNAVAILABLE",
+                "UNAVAILABLE",
+                PushErrorKind::Unavailable,
+            ),
+            (500, "INTERNAL", "INTERNAL", PushErrorKind::Unavailable),
+            (
+                401,
+                "UNAUTHENTICATED",
+                "THIRD_PARTY_AUTH_ERROR",
+                PushErrorKind::Other,
+            ),
+        ] {
+            let body = fcm_error(http, status, Some(error_code));
+            assert_eq!(classify_fcm_error(http, &body), expected, "{error_code}");
+        }
+    }
+
+    #[test]
+    fn fcm_errors_without_an_error_code_are_sorted_by_status() {
+        for (http, status, expected) in [
+            (400, "INVALID_ARGUMENT", PushErrorKind::InvalidArgument),
+            (429, "RESOURCE_EXHAUSTED", PushErrorKind::Unavailable),
+            (503, "UNAVAILABLE", PushErrorKind::Unavailable),
+            (500, "INTERNAL", PushErrorKind::Unavailable),
+            (504, "DEADLINE_EXCEEDED", PushErrorKind::Unavailable),
+            (401, "UNAUTHENTICATED", PushErrorKind::Other),
+            (403, "PERMISSION_DENIED", PushErrorKind::Other),
+        ] {
+            let body = fcm_error(http, status, None);
+            assert_eq!(classify_fcm_error(http, &body), expected, "{status}");
+        }
+    }
+
+    /// A `404` with no `UNREGISTERED` is what a wrong project id answers:
+    /// reading it as a dead token would have every token deleted.
+    #[test]
+    fn a_bare_not_found_is_not_an_unregistered_token() {
+        let body = fcm_error(404, "NOT_FOUND", None);
+        assert_eq!(classify_fcm_error(404, &body), PushErrorKind::Other);
+        assert_eq!(classify_fcm_error(404, "Not Found"), PushErrorKind::Other);
+    }
+
+    #[test]
+    fn fcm_errors_with_an_unreadable_body_are_sorted_by_http_status() {
+        for (http, expected) in [
+            (400, PushErrorKind::InvalidArgument),
+            (429, PushErrorKind::Unavailable),
+            (500, PushErrorKind::Unavailable),
+            (502, PushErrorKind::Unavailable),
+            (503, PushErrorKind::Unavailable),
+            (401, PushErrorKind::Other),
+            (403, PushErrorKind::Other),
+        ] {
+            assert_eq!(classify_fcm_error(http, "<html>"), expected, "{http}");
+            assert_eq!(classify_fcm_error(http, ""), expected, "{http}");
+        }
     }
 
     /// The payload as it is serialised for FCM, with its only moving part,

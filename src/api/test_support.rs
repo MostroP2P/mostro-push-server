@@ -14,7 +14,7 @@ use crate::api::rate_limit::{
     REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
 };
 use crate::api::routes::{configure, AppState};
-use crate::push::{PushDispatcher, PushKind, PushService};
+use crate::push::{PushDispatcher, PushError, PushErrorKind, PushKind, PushService};
 use crate::store::{Platform, TokenStore};
 
 /// Stub PushService recording every dispatch call (D-23).
@@ -45,13 +45,13 @@ impl PushService for StubPushService {
         kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), PushError> {
         self.calls
             .lock()
             .await
             .push((device_token.to_string(), platform.clone(), kind));
         if self.fail {
-            Err("stub forced failure".into())
+            Err(PushError::new(PushErrorKind::Other, "stub forced failure"))
         } else {
             Ok(())
         }

@@ -317,7 +317,7 @@ fn extract_recipient(event: &Event) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::push::PushService;
+    use crate::push::{PushError, PushService};
     use crate::store::Platform;
     use async_trait::async_trait;
     use tokio::sync::{mpsc, Notify};
@@ -341,7 +341,7 @@ mod tests {
             _kind: PushKind,
             device_token: &str,
             _platform: &Platform,
-        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<(), PushError> {
             if device_token == SLOW_DEVICE {
                 self.release.notified().await;
             }

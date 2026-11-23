@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::push::{PushKind, PushService};
+use crate::push::{PushError, PushKind, PushService};
 use crate::store::RegisteredToken;
 
 pub struct PushDispatcher {
@@ -20,7 +20,7 @@ pub enum DispatchOutcome {
 #[derive(Debug)]
 pub enum DispatchError {
     NoBackendForPlatform,
-    AllBackendsFailed { errors: Vec<String> },
+    AllBackendsFailed { errors: Vec<PushError> },
 }
 
 impl std::fmt::Display for DispatchError {
@@ -30,6 +30,7 @@ impl std::fmt::Display for DispatchError {
                 write!(f, "no push backend supports this platform")
             }
             DispatchError::AllBackendsFailed { errors } => {
+                let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
                 write!(f, "all push backends failed: [{}]", errors.join("; "))
             }
         }
@@ -54,7 +55,7 @@ impl PushDispatcher {
         kind: PushKind,
         token: &RegisteredToken,
     ) -> Result<DispatchOutcome, DispatchError> {
-        let mut errors: Vec<String> = Vec::new();
+        let mut errors: Vec<PushError> = Vec::new();
         let mut attempted = false;
 
         for (idx, service) in self.services.iter().enumerate() {
@@ -72,7 +73,7 @@ impl PushDispatcher {
                     });
                 }
                 Err(e) => {
-                    errors.push(e.to_string());
+                    errors.push(e);
                 }
             }
         }

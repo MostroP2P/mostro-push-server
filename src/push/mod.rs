@@ -22,6 +22,51 @@ pub enum PushKind {
     ChatWake,
 }
 
+/// Why a backend did not deliver a push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushErrorKind {
+    /// The token no longer names a device (FCM `UNREGISTERED`). It will not
+    /// work again.
+    Unregistered,
+    /// The backend refused the request as malformed, the token included (FCM
+    /// `INVALID_ARGUMENT`).
+    InvalidArgument,
+    /// The token was issued for another sender (FCM `SENDER_ID_MISMATCH`):
+    /// it belongs to another Firebase project.
+    SenderMismatch,
+    /// The backend could not be reached, or asked to be tried again later.
+    /// It says nothing about the token.
+    Unavailable,
+    Other,
+}
+
+/// A failed push: what went wrong, and the text for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushError {
+    // Read by the dispute fan-out and the token check, which are not wired
+    // yet; today every caller only logs the error.
+    #[allow(dead_code)]
+    pub kind: PushErrorKind,
+    detail: String,
+}
+
+impl PushError {
+    pub fn new(kind: PushErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for PushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for PushError {}
+
 #[async_trait]
 pub trait PushService: Send + Sync {
     async fn send(
@@ -29,7 +74,7 @@ pub trait PushService: Send + Sync {
         kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), PushError>;
 
     fn supports_platform(&self, platform: &Platform) -> bool;
 }
@@ -42,7 +87,7 @@ impl PushService for Arc<UnifiedPushService> {
         kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), PushError> {
         (**self).send(kind, device_token, platform).await
     }
 
@@ -59,7 +104,7 @@ impl PushService for Arc<FcmPush> {
         kind: PushKind,
         device_token: &str,
         platform: &Platform,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), PushError> {
         (**self).send(kind, device_token, platform).await
     }
 
