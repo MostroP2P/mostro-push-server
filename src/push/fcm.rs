@@ -559,10 +559,9 @@ impl PushService for FcmPush {
             info!("{} notification sent to {} device", label, platform);
             Ok(())
         } else {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| unavailable(e.to_string()))?;
+            // A body that cannot be read leaves the HTTP status to sort
+            // the error by.
+            let error_text = response.text().await.unwrap_or_default();
             error!("{} error for {} device: {}", label, platform, error_text);
             Err(PushError::new(
                 classify_fcm_error(status.as_u16(), &error_text),
