@@ -203,7 +203,7 @@ impl PushService for UnifiedPushService {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| PushError::new(PushErrorKind::Unavailable, e.to_string()))?;
+            .map_err(transport_error)?;
 
         if response.status().is_success() {
             info!("UnifiedPush notification sent successfully");
@@ -250,6 +250,12 @@ fn status_kind(http_status: u16) -> PushErrorKind {
         429 | 500..=599 => PushErrorKind::Unavailable,
         _ => PushErrorKind::Other,
     }
+}
+
+/// A request that got no answer. The endpoint URL is taken out of the text:
+/// it is the device's token, and this text reaches the logs.
+fn transport_error(error: reqwest::Error) -> PushError {
+    PushError::new(PushErrorKind::Unavailable, error.without_url().to_string())
 }
 
 #[cfg(test)]
@@ -380,6 +386,33 @@ mod tests {
         for status in [400, 401, 403, 404, 410, 413] {
             assert_eq!(status_kind(status), PushErrorKind::Other, "{status}");
         }
+    }
+
+    /// The guard refuses loopback endpoints, so the failed request is made
+    /// with the client directly, as the redirect test below does.
+    #[tokio::test]
+    async fn a_failed_request_does_not_carry_the_endpoint_url() {
+        // Bound and dropped: nothing listens on the port, so the connection
+        // is refused.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let endpoint = format!("http://127.0.0.1:{port}/upSECRETTOPIC");
+
+        let error = UnifiedPushService::build_client()
+            .post(&endpoint)
+            .send()
+            .await
+            .expect_err("nothing listens there");
+        assert!(
+            error.to_string().contains("upSECRETTOPIC"),
+            "reqwest no longer names the URL in its error: {error}"
+        );
+
+        let error = transport_error(error);
+        assert_eq!(error.kind, PushErrorKind::Unavailable);
+        assert!(!error.to_string().contains("upSECRETTOPIC"), "{error}");
+        assert!(!error.to_string().contains("127.0.0.1"), "{error}");
     }
 
     /// `endpoint_guard` only ever inspects the first hop, so the client must
