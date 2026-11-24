@@ -8,12 +8,14 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::cors::cors_mw;
+use crate::api::disputes::{unwatch_disputes, watch_disputes};
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::api::rate_limit::{
     per_ip_rate_limit_mw, rate_limited_response, register_ip_rate_limit_mw, PerPubkeyLimiter,
 };
 use crate::push::endpoint_guard::{classify_token, TokenShape};
-use crate::push::PushDispatcher;
+use crate::push::{PushDispatcher, TokenChecker};
+use crate::store::watchers::WatcherStore;
 use crate::store::{Platform, TokenStore, TokenStoreStats};
 use crate::utils::log_pubkey::log_pubkey;
 
@@ -69,6 +71,11 @@ pub struct AppState {
     /// default), `mostro_pubkey` is ignored even if the embedded JSON has
     /// entries, which keeps rollout staged with the mobile client.
     pub trusted_whitelist_enabled: bool,
+    /// Devices watching a node for new disputes.
+    pub watcher_store: Arc<WatcherStore>,
+    /// Checks a token before `/api/disputes/watch` stores it. `None` when
+    /// FCM is disabled or failed to start: a watch is then refused.
+    pub token_checker: Option<Arc<dyn TokenChecker>>,
 }
 
 /// Upper bound on the JSON body accepted by /api/register.
@@ -93,7 +100,7 @@ const MAX_UNREGISTER_BODY_BYTES: usize = 1024;
 /// endpoints are URLs. 4 KB leaves generous headroom while keeping an
 /// unbounded string out of the in-memory `TokenStore`, which has no on-disk
 /// backing to bound its growth (hard constraint 4).
-const MAX_TOKEN_BYTES: usize = 4096;
+pub(crate) const MAX_TOKEN_BYTES: usize = 4096;
 
 /// JSON extractor config for /api/register and /api/unregister.
 ///
@@ -146,6 +153,22 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .route(web::post().to(unregister_token)),
             )
             .route("/info", web::get().to(server_info))
+            // A watch carries a node pubkey, a token and a platform, as a
+            // registration does, so it shares its body cap and its limiter.
+            .service(
+                web::resource("/disputes/watch")
+                    .app_data(json_config(MAX_REGISTER_BODY_BYTES))
+                    .wrap(from_fn(register_ip_rate_limit_mw))
+                    .wrap(from_fn(cors_mw))
+                    .route(web::post().to(watch_disputes)),
+            )
+            .service(
+                web::resource("/disputes/unwatch")
+                    .app_data(json_config(MAX_REGISTER_BODY_BYTES))
+                    .wrap(from_fn(register_ip_rate_limit_mw))
+                    .wrap(from_fn(cors_mw))
+                    .route(web::post().to(unwatch_disputes)),
+            )
             .service(
                 web::resource("/notify")
                     .app_data(crate::api::notify::json_config())

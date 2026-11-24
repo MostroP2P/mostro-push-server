@@ -14,7 +14,8 @@ use crate::api::rate_limit::{
     REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
 };
 use crate::api::routes::{configure, AppState};
-use crate::push::{PushDispatcher, PushError, PushErrorKind, PushKind, PushService};
+use crate::push::{PushDispatcher, PushError, PushErrorKind, PushKind, PushService, TokenChecker};
+use crate::store::watchers::WatcherStore;
 use crate::store::{Platform, TokenStore};
 
 /// Stub PushService recording every dispatch call (D-23).
@@ -62,6 +63,38 @@ impl PushService for StubPushService {
 
     fn supports(&self, kind: PushKind, platform: &Platform) -> bool {
         self.supports.contains(platform) && !self.unsupported_kinds.contains(&kind)
+    }
+}
+
+/// Stub [`TokenChecker`]: answers every token the same way and counts how
+/// often it was asked.
+pub struct StubTokenChecker {
+    /// `None` accepts every token; `Some(kind)` refuses with that kind.
+    pub refuses_with: Option<PushErrorKind>,
+    pub calls: std::sync::atomic::AtomicUsize,
+}
+
+impl StubTokenChecker {
+    pub fn new(refuses_with: Option<PushErrorKind>) -> Self {
+        Self {
+            refuses_with,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TokenChecker for StubTokenChecker {
+    async fn check_token(&self, _device_token: &str) -> Result<(), PushError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match self.refuses_with {
+            None => Ok(()),
+            Some(kind) => Err(PushError::new(kind, "stub refused the token")),
+        }
     }
 }
 
@@ -128,6 +161,7 @@ pub fn make_app_state_for_service(
     let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
 
     let token_store = Arc::new(TokenStore::new(48, notify_log_salt.clone()));
+    let watcher_store = Arc::new(WatcherStore::new(notify_log_salt.clone()));
     let semaphore = Arc::new(Semaphore::new(50));
 
     let per_pubkey_limiter: Arc<PerPubkeyLimiter> =
@@ -142,6 +176,9 @@ pub fn make_app_state_for_service(
         per_pubkey_limiter,
         trusted_mostro_pubkeys,
         trusted_whitelist_enabled,
+        watcher_store,
+        // As a server with FCM off: the dispute tests install their own.
+        token_checker: None,
     };
 
     (state, per_ip_limiter)
