@@ -411,10 +411,17 @@ sudo journalctl -u mostro-push -f
 - **Schema version.** The file carries a version (`PRAGMA user_version`); `watchers` made it 2. Upgrading is automatic and leaves `tokens` alone. A binary that only knows version 1 refuses to start on a version 2 file (`token store schema version 2 is newer than supported`). To go back to such a binary, with the server stopped:
 
   ```bash
-  sqlite3 /app/data/tokens.db 'DROP TABLE watchers; PRAGMA user_version = 1; PRAGMA wal_checkpoint(TRUNCATE);'
+  sqlite3 /app/data/tokens.db 'PRAGMA secure_delete = ON; DROP TABLE watchers; PRAGMA user_version = 1; PRAGMA wal_checkpoint(TRUNCATE);'
   ```
 
-  The registrations are kept; the dispute watches are lost, and clients watch again.
+  The registrations are kept; the dispute watches are lost, and clients watch again. `secure_delete` is a setting of each connection, not of the file: without it the dropped rows stay readable in the file's free pages.
+- **Emptying one node's watcher list.** The caps and the per-IP limit make a list costly to fill with devices that are not solvers, not impossible. If it happens, delete that node's rows and restart at once, since the running server still holds them in memory and writes a renewed one back:
+
+  ```bash
+  sqlite3 /app/data/tokens.db "PRAGMA secure_delete = ON; DELETE FROM watchers WHERE mostro_pubkey = '<64 hex, lowercase>'; PRAGMA wal_checkpoint(TRUNCATE);"
+  ```
+
+  Real solvers are dropped with the rest, and watch again the next time their app starts.
 - **UnifiedPush endpoints** (`data/unifiedpush_endpoints.json`), written atomically (temp file + rename).
 - The FCM access-token cache is in memory and refetched after a restart.
 

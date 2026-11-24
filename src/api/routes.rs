@@ -11,7 +11,8 @@ use crate::api::cors::cors_mw;
 use crate::api::disputes::{unwatch_disputes, watch_disputes};
 use crate::api::notify::{notify_token, request_id_mw};
 use crate::api::rate_limit::{
-    per_ip_rate_limit_mw, rate_limited_response, register_ip_rate_limit_mw, PerPubkeyLimiter,
+    per_ip_rate_limit_mw, rate_limited_response, register_ip_rate_limit_mw, PerIpLimiter,
+    PerPubkeyLimiter,
 };
 use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::push::{PushDispatcher, TokenChecker};
@@ -73,6 +74,8 @@ pub struct AppState {
     pub trusted_whitelist_enabled: bool,
     /// Devices watching a node for new disputes.
     pub watcher_store: Arc<WatcherStore>,
+    /// Per-IP limit on *new* dispute watches (`NEW_WATCH_IP_PER_HOUR`).
+    pub new_watch_limiter: Arc<PerIpLimiter>,
     /// Checks a token before `/api/disputes/watch` stores it. `None` when
     /// FCM is disabled or failed to start: a watch is then refused.
     pub token_checker: Option<Arc<dyn TokenChecker>>,

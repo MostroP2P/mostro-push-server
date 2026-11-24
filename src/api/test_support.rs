@@ -177,6 +177,10 @@ pub fn make_app_state_for_service(
         trusted_mostro_pubkeys,
         trusted_whitelist_enabled,
         watcher_store,
+        // Wide enough that only the tests about this limit meet it.
+        new_watch_limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+            NonZeroU32::new(10_000).unwrap(),
+        ))),
         // As a server with FCM off: the dispute tests install their own.
         token_checker: None,
     };

@@ -622,7 +622,9 @@ impl TokenChecker for FcmPush {
         let error_text = response.text().await.unwrap_or_default();
         let mut kind = classify_fcm_error(status.as_u16(), &error_text);
         if kind == PushErrorKind::InvalidArgument && !names_the_token(&error_text) {
-            error!(
+            // warn!, not error!: an unauthenticated caller reaches this line
+            // at will if FCM ever answers a bad token this way.
+            warn!(
                 "FCM refused the token check as malformed without naming the token: {} {}",
                 status, error_text
             );

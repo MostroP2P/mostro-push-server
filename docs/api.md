@@ -10,6 +10,8 @@ All endpoints are mounted under `/api`. Bodies and responses are JSON unless not
 | POST   | `/api/register`  | Register a device token for a `trade_pubkey`           |
 | POST   | `/api/unregister`| Remove a registered token                              |
 | POST   | `/api/notify`    | Trigger a silent push to the device for a `trade_pubkey` |
+| POST   | `/api/disputes/watch` | Watch a Mostro node for new disputes                |
+| POST   | `/api/disputes/unwatch` | Stop watching a node                              |
 
 ## GET /api/health
 
@@ -197,6 +199,8 @@ Watching again renews the watch, which lasts 30 days since it was last asked for
 - **Only `android`**, and only FCM tokens. A token that is an `http(s)` URL (a UnifiedPush endpoint) is refused.
 - **The node must be on the trusted list** (`config/trusted_mostro_pubkeys.json`), whatever `TRUSTED_WHITELIST_ENABLED` says: the listener only rings for those nodes.
 - **A new token is checked with FCM before it is stored** (`messages:send` with `validate_only`, which delivers nothing). A watch that is renewed is not checked again.
+- **New watches are limited to 5 per IP address per hour**, apart from the per-IP limit shared with `/api/register`. A valid FCM token is cheap to come by, so without this one address could take every place of a node. A renewal does not count; a token FCM refuses does.
+- **The platform is not verified.** FCM accepts any token of the project in that check, so an iOS or web token sent as `android` is stored and takes a place, although the `dispute_new` notification is only defined for Android.
 
 | Status | Body `message` | When |
 |--------|----------------|------|
@@ -205,7 +209,7 @@ Watching again renews the watch, which lasts 30 days since it was last asked for
 | 400 | `Invalid platform (expected 'android')` | |
 | 400 | `Invalid token` | A URL, or a token FCM does not know for this server's Firebase project |
 | 403 | `Mostro instance not trusted` | |
-| 429 | `rate limited`, with `Retry-After` | The per-IP limit, or the node's watcher list (`MAX_WATCHERS_PER_NODE`) or the store (`MAX_WATCHERS`) is full. A device already on the list is still renewed |
+| 429 | `rate limited`, with `Retry-After` | A per-IP limit (requests, or new watches), or the node's watcher list (`MAX_WATCHERS_PER_NODE`) or the store (`MAX_WATCHERS`) is full. A device already on the list is still renewed |
 | 503 | `Token could not be checked` | FCM is disabled, unreachable or answered something else. Nothing is stored; try again later |
 
 Error bodies are `{"success":false,"message":"…"}`.
@@ -441,6 +445,9 @@ bound their size). It also bounds how often one address can make the server
 ask FCM about a token:
 
 - Per-IP: `120/min`, burst `100`
+
+`/api/disputes/watch` has a second per-IP limit, on **new** watches only:
+`5/hour`. Renewing a watch and `/api/disputes/unwatch` do not count against it.
 
 `/api/notify` has separate per-IP and per-`trade_pubkey` limits; both must allow the request to pass. Defaults:
 

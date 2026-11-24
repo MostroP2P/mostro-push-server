@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -20,8 +20,10 @@ use crate::utils::log_pubkey::log_pubkey;
 /// How long a watch lasts since it was last asked for.
 pub const WATCH_TTL_DAYS: i64 = 30;
 
-/// Default for `MAX_WATCHERS_PER_NODE`.
-pub const DEFAULT_MAX_WATCHERS_PER_NODE: usize = 100;
+/// Default for `MAX_WATCHERS_PER_NODE`. Far above the solvers a node has: the
+/// cap bounds the fan-out of one dispute, and a list that is easy to fill
+/// locks the real solvers out.
+pub const DEFAULT_MAX_WATCHERS_PER_NODE: usize = 1_000;
 
 /// Default for `MAX_WATCHERS`, across every node.
 pub const DEFAULT_MAX_WATCHERS: usize = 10_000;
@@ -209,6 +211,43 @@ impl WatcherStore {
         Ok(removed)
     }
 
+    /// Drops the watches of every node that is not in `trusted`, and reports
+    /// how many. A node taken off the trusted list is never rung for again
+    /// and its watches cannot be renewed, so nothing is kept of them.
+    pub async fn forget_untrusted(&self, trusted: &HashSet<String>) -> usize {
+        let _order = self.write_order.lock().await;
+
+        let untrusted: Vec<(String, usize)> = {
+            let mut nodes = self.nodes.write().await;
+            let untrusted: Vec<String> = nodes
+                .keys()
+                .filter(|node| !trusted.contains(*node))
+                .cloned()
+                .collect();
+            untrusted
+                .into_iter()
+                .filter_map(|node| nodes.remove(&node).map(|devices| (node, devices.len())))
+                .collect()
+        };
+
+        let mut removed = 0;
+        for (node, devices) in untrusted {
+            removed += devices;
+            let log_node = log_pubkey(&self.log_salt, &node);
+            warn!(
+                "Dropped {} dispute watches of node={}, which is not trusted",
+                devices, log_node
+            );
+            if let Some(db) = &self.persistence {
+                // Left on disk, they are dropped again at the next start.
+                if let Err(e) = db.delete_watchers_of(node).await {
+                    error!("Failed to delete the watches of node={}: {}", log_node, e);
+                }
+            }
+        }
+        removed
+    }
+
     pub async fn cleanup_expired(&self) -> usize {
         let _order = self.write_order.lock().await;
         let cutoff = Utc::now() - ttl();
@@ -352,6 +391,20 @@ mod tests {
         assert_eq!(store.cleanup_expired().await, 1);
         assert!(!store.is_watching(NODE_A, TOKEN_1).await);
         assert!(store.is_watching(NODE_A, TOKEN_2).await);
+    }
+
+    #[tokio::test]
+    async fn the_watches_of_a_node_that_is_no_longer_trusted_are_dropped() {
+        let store = WatcherStore::new(salt());
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        watch(&store, NODE_A, TOKEN_2).await.unwrap();
+        watch(&store, NODE_B, TOKEN_1).await.unwrap();
+
+        let trusted = HashSet::from([NODE_B.to_string()]);
+        assert_eq!(store.forget_untrusted(&trusted).await, 2);
+        assert!(!store.is_watching(NODE_A, TOKEN_1).await);
+        assert!(store.is_watching(NODE_B, TOKEN_1).await);
+        assert_eq!(store.forget_untrusted(&trusted).await, 0);
     }
 
     #[tokio::test]
@@ -601,6 +654,24 @@ mod tests {
             assert_eq!(db.query::<i64>("SELECT COUNT(*) FROM watchers"), 0);
             assert_eq!(db.query::<i64>("SELECT COUNT(*) FROM tokens"), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_an_untrusted_node_deletes_its_rows() {
+        let db = TempDb::new();
+        let (store, _) = open(&db, KEY);
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        watch(&store, NODE_A, TOKEN_2).await.unwrap();
+        watch(&store, NODE_B, TOKEN_1).await.unwrap();
+
+        let trusted = HashSet::from([NODE_B.to_string()]);
+        assert_eq!(store.forget_untrusted(&trusted).await, 2);
+        drop(store);
+
+        assert_eq!(db.query::<i64>("SELECT COUNT(*) FROM watchers"), 1);
+        let (store, report) = open(&db, KEY);
+        assert_eq!(report.restored, 1);
+        assert!(store.is_watching(NODE_B, TOKEN_1).await);
     }
 
     /// A file written before the `watchers` table existed.

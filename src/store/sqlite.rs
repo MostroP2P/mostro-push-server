@@ -343,6 +343,19 @@ impl SqliteStore {
         .await
     }
 
+    /// Deletes every watch of one node and truncates the WAL.
+    pub async fn delete_watchers_of(&self, mostro_pubkey: String) -> Result<usize, PersistError> {
+        self.run(move |conn| {
+            let removed = conn.execute(
+                "DELETE FROM watchers WHERE mostro_pubkey = ?1",
+                [mostro_pubkey],
+            )?;
+            checkpoint(conn)?;
+            Ok(removed)
+        })
+        .await
+    }
+
     pub async fn delete_expired_watchers(
         &self,
         cutoff: DateTime<Utc>,

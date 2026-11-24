@@ -5,12 +5,13 @@
 //! The push that follows a dispute is sent by the Nostr listener.
 
 use actix_web::http::StatusCode;
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use governor::clock::{Clock, DefaultClock};
 use log::{info, warn};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::api::rate_limit::rate_limited_response;
+use crate::api::rate_limit::{client_ip_of, rate_limited_response};
 use crate::api::routes::{AppState, MAX_TOKEN_BYTES};
 use crate::push::endpoint_guard::{classify_token, TokenShape};
 use crate::push::PushErrorKind;
@@ -71,6 +72,7 @@ fn token_shape_fault(token: &str) -> Option<&'static str> {
 }
 
 pub async fn watch_disputes(
+    http: HttpRequest,
     state: web::Data<AppState>,
     req: web::Json<WatchRequest>,
 ) -> impl Responder {
@@ -100,6 +102,21 @@ pub async fn watch_disputes(
     if !state.watcher_store.is_watching(&node, &req.token).await {
         if !state.watcher_store.has_room(&node).await {
             return rate_limited_response(WATCHERS_FULL_RETRY_AFTER_SECS);
+        }
+
+        // A valid token is cheap to come by, so the check below does not
+        // stop one address from taking every place of a node by itself.
+        // This does, and it also bounds how often an address makes the
+        // server ask FCM. Fail closed without the key, as the middleware.
+        let Some(ip) = client_ip_of(&http) else {
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        };
+        if let Err(not_until) = state.new_watch_limiter.check_key(&ip) {
+            let retry_after_secs = not_until
+                .wait_time_from(DefaultClock::default().now())
+                .as_secs()
+                .max(1);
+            return rate_limited_response(retry_after_secs);
         }
 
         // Without this check anyone could fill a node's list with invented
@@ -486,6 +503,87 @@ mod tests {
             watch_body(TRUSTED_MOSTRO_PUBKEY, TOKEN)
         );
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// One address cannot take a node's places by itself: new watches are
+    /// limited per IP, apart from the register limiter.
+    #[actix_web::test]
+    async fn new_watches_are_limited_per_address_and_renewals_are_not() {
+        let (mut c, checker) = components(None);
+        c.state.new_watch_limiter = Arc::new(governor::RateLimiter::keyed(
+            governor::Quota::per_hour(std::num::NonZeroU32::new(2).unwrap()),
+        ));
+        let watchers = c.state.watcher_store.clone();
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let token = |n: u32| format!("fcm-token-for-device-{n}:APA91bHexample{n}");
+
+        for n in 0..2 {
+            let (status, _, _) = send!(
+                app,
+                "/api/disputes/watch",
+                watch_body(TRUSTED_MOSTRO_PUBKEY, &token(n))
+            );
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, retry_after, body) = send!(
+            app,
+            "/api/disputes/watch",
+            watch_body(TRUSTED_MOSTRO_PUBKEY, &token(2))
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(retry_after.unwrap().parse::<u64>().unwrap() >= 1);
+        assert_eq!(body, r#"{"success":false,"message":"rate limited"}"#);
+        // Refused before FCM was asked, and nothing was stored.
+        assert_eq!(checker.calls(), 2);
+        assert_eq!(watchers.count().await, 2);
+
+        // The devices already watching still renew, and can leave.
+        let (status, _, _) = send!(
+            app,
+            "/api/disputes/watch",
+            watch_body(TRUSTED_MOSTRO_PUBKEY, &token(0))
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = send!(
+            app,
+            "/api/disputes/unwatch",
+            json!({"mostro_pubkey": TRUSTED_MOSTRO_PUBKEY, "token": token(1)})
+        );
+        assert_eq!(status, StatusCode::OK);
+
+        // Another address has its own allowance.
+        let other = post(
+            "/api/disputes/watch",
+            watch_body(TRUSTED_MOSTRO_PUBKEY, &token(2)),
+        )
+        .insert_header(("Fly-Client-IP", "9.9.9.9"));
+        let resp = atest::call_service(&app, other.to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A token FCM refuses still spends the allowance, so an address cannot
+    /// use the server to try tokens against FCM without end.
+    #[actix_web::test]
+    async fn a_refused_token_counts_against_the_address() {
+        let (mut c, checker) = components(Some(PushErrorKind::Unregistered));
+        c.state.new_watch_limiter = Arc::new(governor::RateLimiter::keyed(
+            governor::Quota::per_hour(std::num::NonZeroU32::new(2).unwrap()),
+        ));
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        for expected in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let (status, _, _) = send!(
+                app,
+                "/api/disputes/watch",
+                watch_body(TRUSTED_MOSTRO_PUBKEY, TOKEN)
+            );
+            assert_eq!(status, expected);
+        }
+        assert_eq!(checker.calls(), 2);
     }
 
     #[actix_web::test]

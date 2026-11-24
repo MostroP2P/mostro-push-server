@@ -63,7 +63,8 @@ Maps a node's pubkey to the devices watching its disputes: `mostro_pubkey -> dev
 
 - **Lifetime:** 30 days since the last watch; the same hourly task evicts older ones.
 - **Caps:** `MAX_WATCHERS_PER_NODE` and `MAX_WATCHERS`. A device already on a list is always renewed.
-- **Admission:** `/api/disputes/watch` stores a new token only after FCM knew it (`TokenChecker`, `messages:send` with `validate_only`). Without that anyone could fill a node's list with invented tokens. FCM names `message.token` when the token is the malformed part; an `INVALID_ARGUMENT` that does not is a fault of the message this server built, and is answered `503`, not `400`.
+- **Trusted nodes only:** at startup the watches of a node that is no longer on the trusted list are dropped, from memory and from disk. The listener never rings for such a node and its watches cannot be renewed.
+- **Admission:** `/api/disputes/watch` stores a new token only after FCM knew it (`TokenChecker`, `messages:send` with `validate_only`). Without that anyone could fill a node's list with invented tokens. A valid token is cheap to come by, though, so new watches are also limited per IP address (`NEW_WATCH_IP_PER_HOUR`, 5); the two together raise the cost of filling a list, they do not make it impossible (see the limits in #53). FCM names `message.token` when the token is the malformed part; an `INVALID_ARGUMENT` that does not is a fault of the message this server built, and is answered `503`, not `400`.
 - **Persistence:** the `watchers` table of the same SQLite file (schema version 2), under the same `write_order` discipline. A row keeps the node's pubkey in the clear (it is public) and the token sealed as in `tokens`, with the node's pubkey as associated data. Its primary key is a BLAKE3 hash of (node, token) keyed from `TOKEN_STORE_KEY`, so the rows of one device on two nodes share nothing. A changed key wipes both tables in one transaction.
 
 Nothing reads the store to send a push yet: the listener's dispute subscription is a later change.
@@ -155,7 +156,7 @@ Synchronous write under `RwLock::write`, then `200`. No fan-out; the next `kind 
 
 ### Dispute watch (`POST /api/disputes/watch` / `unwatch`)
 
-Validation, the trusted list, then for a device not yet on the node's list: the caps, and one `validate_only` request to FCM. Only then is the watch written, in memory and to SQLite. A renewal skips the caps and FCM.
+Validation, the trusted list, then for a device not yet on the node's list: the caps, the per-IP limit on new watches, and one `validate_only` request to FCM. Only then is the watch written, in memory and to SQLite. A renewal skips the caps and FCM.
 
 ## Concurrency model
 

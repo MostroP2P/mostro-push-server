@@ -18,8 +18,8 @@ mod utils;
 mod crypto;
 
 use api::rate_limit::{
-    PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
-    REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
+    PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST,
+    NEW_WATCH_IP_PER_HOUR, PUBKEY_BURST, REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
 };
 use api::routes::AppState;
 use config::Config;
@@ -179,6 +179,12 @@ async fn main() -> std::io::Result<()> {
         ),
     ));
 
+    let new_watch_limiter: Arc<PerIpLimiter> =
+        Arc::new(governor::RateLimiter::keyed(governor::Quota::per_hour(
+            std::num::NonZeroU32::new(NEW_WATCH_IP_PER_HOUR)
+                .expect("NEW_WATCH_IP_PER_HOUR is a non-zero compile-time constant"),
+        )));
+
     // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.
     // Run for all keyed limiters. Without per-IP cleanup, every distinct
     // client IP the server has ever seen sticks in keyed maps for the
@@ -203,6 +209,12 @@ async fn main() -> std::io::Result<()> {
         cleanup_soft_cap,
         "register-ip",
     );
+    api::rate_limit::start_keyed_limiter_cleanup_task(
+        new_watch_limiter.clone(),
+        cleanup_interval,
+        cleanup_soft_cap,
+        "new-watch-ip",
+    );
     info!(
         "Rate limiters initialized (notify per-pubkey {}/min burst {}; notify per-IP {}/min burst {}; register per-IP {}/min burst {}; cleanup {}s; soft cap {})",
         config.notify_rate_limit.per_pubkey_per_min,
@@ -226,6 +238,11 @@ async fn main() -> std::io::Result<()> {
         trusted_mostro_pubkeys.len(),
         config.trusted_whitelist_enabled
     );
+    // The list is embedded, so it only changes with a deploy: this is where
+    // the watches of a node that left it are noticed.
+    watcher_store
+        .forget_untrusted(&trusted_mostro_pubkeys)
+        .await;
 
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
@@ -251,6 +268,7 @@ async fn main() -> std::io::Result<()> {
         trusted_mostro_pubkeys: trusted_mostro_pubkeys.clone(),
         trusted_whitelist_enabled: config.trusted_whitelist_enabled,
         watcher_store: watcher_store.clone(),
+        new_watch_limiter,
         token_checker,
     };
 

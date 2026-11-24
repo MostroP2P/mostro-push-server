@@ -297,7 +297,7 @@ mod tests {
                 path: None,
                 key: None,
                 max_tokens: 50_000,
-                max_watchers_per_node: 100,
+                max_watchers_per_node: 1_000,
                 max_watchers: 10_000,
             },
             notify_rate_limit: NotifyRateLimitConfig {

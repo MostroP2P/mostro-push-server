@@ -513,7 +513,7 @@ mod tests {
         std::env::remove_var("MAX_WATCHERS_PER_NODE");
         std::env::remove_var("MAX_WATCHERS");
         let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
-        assert_eq!(config.store.max_watchers_per_node, 100);
+        assert_eq!(config.store.max_watchers_per_node, 1_000);
         assert_eq!(config.store.max_watchers, 10_000);
 
         std::env::set_var("MAX_WATCHERS_PER_NODE", "0");

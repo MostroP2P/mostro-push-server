@@ -42,7 +42,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 
    **Platform `web` (additive):** `/api/register` accepts `"platform": "web"` (FCM Web Push tokens from browsers). The invalid-platform `400` message is unchanged and still names only `android` and `ios`. `/api/status` appends `"web": n` after `ios` only while `n > 0`, so a store holding no web registrations, which is every state a pre-web server could reach, still serves the fixture body byte for byte.
 
-   **Newer endpoints:** `/api/disputes/watch` and `/api/disputes/unwatch` are outside the frozen set; their contract is in `docs/api.md`. They reuse `register_ip_rate_limit_mw`, `cors_mw` and the `429` / `500` bodies above, and must not change any of them.
+   **Newer endpoints:** `/api/disputes/watch` and `/api/disputes/unwatch` are outside the frozen set; their contract is in `docs/api.md`. They reuse `register_ip_rate_limit_mw`, `cors_mw` and the `429` / `500` bodies above, and must not change any of them. A new watch is admitted only after the per-IP limit on new watches (`NEW_WATCH_IP_PER_HOUR`) and the FCM token check; do NOT drop either, or one address fills a node's list.
 
    **CORS (headers only):** `/api/register`, `/api/unregister`, `/api/notify` and the two `/api/disputes` endpoints answer preflights from origins in `CORS_ALLOWED_ORIGINS` with `204` and add `Access-Control-Allow-Origin`, `Access-Control-Expose-Headers: Retry-After` and `Vary: Origin` to their responses. Bodies are untouched, and requests without an allowed `Origin` are answered exactly as before. `cors_mw` is hand-rolled on `middleware::from_fn` because `actix-cors` would be a new dependency (constraint 6).
 
@@ -85,7 +85,7 @@ src/
 ├── config.rs            # Config::from_env (typed env-var loader)
 ├── trusted_pubkeys.rs   # Compile-time whitelist (include_str! the JSON below)
 ├── api/
-│   ├── cors.rs          # CORS middleware for /register, /unregister, /notify
+│   ├── cors.rs          # CORS middleware for /register, /unregister, /notify, /disputes/*
 │   ├── routes.rs        # /health, /info, /status, /register, /unregister + AppState
 │   ├── notify.rs        # /api/notify handler + request_id_mw
 │   ├── disputes.rs      # /api/disputes/watch and /unwatch handlers
