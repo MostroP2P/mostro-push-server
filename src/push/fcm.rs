@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
-use super::{token_prefix, PushError, PushErrorKind, PushKind, PushService};
+use super::{token_prefix, PushError, PushErrorKind, PushKind, PushService, TokenChecker};
 use crate::config::Config;
 use crate::store::Platform;
 
@@ -107,7 +107,9 @@ pub struct FcmPush {
     /// Where the token exchange is POSTed. Fixed in production; overridden by
     /// tests so the retry behaviour can be exercised against a local server.
     oauth_token_url: String,
-    project_id: String,
+    /// Where a message is POSTed (`messages:send`). Fixed in production;
+    /// overridden by tests.
+    messages_url: String,
 }
 
 impl FcmPush {
@@ -129,7 +131,10 @@ impl FcmPush {
             cached_token: Arc::new(RwLock::new(None)),
             refresh_lock: Mutex::new(None),
             oauth_token_url: OAUTH_TOKEN_URL.to_string(),
-            project_id,
+            messages_url: format!(
+                "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+                project_id
+            ),
         }
     }
 
@@ -526,11 +531,6 @@ impl PushService for FcmPush {
             .await
             .map_err(|e| unavailable(e.to_string()))?;
 
-        let fcm_url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
-        );
-
         let payload = Self::build_payload(kind, device_token, platform);
         // Names the push in the log lines, which read as before.
         let label = match kind {
@@ -547,7 +547,7 @@ impl PushService for FcmPush {
 
         let response = self
             .client
-            .post(&fcm_url)
+            .post(&self.messages_url)
             .bearer_auth(&auth_token)
             .json(&payload)
             .send()
@@ -582,6 +582,72 @@ impl PushService for FcmPush {
             PushKind::DisputeNew => matches!(platform, Platform::Android),
         }
     }
+}
+
+#[async_trait]
+impl TokenChecker for FcmPush {
+    /// Sends the `dispute_new` message with `validate_only`: FCM checks the
+    /// request, the token included, and delivers nothing.
+    ///
+    /// Seen against FCM: a token that is not one at all is `INVALID_ARGUMENT`
+    /// naming `message.token`, and a well-formed token it never issued is
+    /// `UNREGISTERED`. An `INVALID_ARGUMENT` that does not name the token is
+    /// a fault of the message this server built, not of the caller's token,
+    /// so it is reported as `Other`.
+    async fn check_token(&self, device_token: &str) -> Result<(), PushError> {
+        let unavailable = |detail: String| PushError::new(PushErrorKind::Unavailable, detail);
+
+        let auth_token = self
+            .get_access_token()
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
+
+        let mut payload =
+            Self::build_payload(PushKind::DisputeNew, device_token, &Platform::Android);
+        payload["validate_only"] = json!(true);
+
+        let response = self
+            .client
+            .post(&self.messages_url)
+            .bearer_auth(&auth_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let error_text = response.text().await.unwrap_or_default();
+        let mut kind = classify_fcm_error(status.as_u16(), &error_text);
+        if kind == PushErrorKind::InvalidArgument && !names_the_token(&error_text) {
+            error!(
+                "FCM refused the token check as malformed without naming the token: {} {}",
+                status, error_text
+            );
+            kind = PushErrorKind::Other;
+        }
+        Err(PushError::new(
+            kind,
+            format!("FCM token check failed: {} {}", status, error_text),
+        ))
+    }
+}
+
+/// Whether an FCM error response blames `message.token` (a `BadRequest`
+/// detail with that field among its violations).
+fn names_the_token(body: &str) -> bool {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    body["error"]["details"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|detail| detail["fieldViolations"].as_array())
+        .flatten()
+        .any(|violation| violation["field"] == "message.token")
 }
 
 /// Sorts an FCM v1 error response (`messages:send`) into a [`PushErrorKind`].
@@ -701,8 +767,134 @@ mod tests {
             cached_token: Arc::new(RwLock::new(None)),
             refresh_lock: Mutex::new(None),
             oauth_token_url,
-            project_id: "test-project".to_string(),
+            messages_url: "http://127.0.0.1:9/send".to_string(),
         }
+    }
+
+    /// A service that already holds an access token and sends to `server`.
+    fn test_service_sending_to(server: &mockito::Server) -> FcmPush {
+        let mut service = test_service(format!("{}/token", server.url()));
+        service.messages_url = format!("{}/send", server.url());
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        service.cached_token = Arc::new(RwLock::new(Some(CachedToken {
+            token: "ya29.test".to_string(),
+            expires_at: now + 3600,
+        })));
+        service
+    }
+
+    /// What FCM answers a token it cannot read, as seen against the real
+    /// service.
+    fn fcm_bad_token_error() -> String {
+        json!({"error": {
+            "code": 400,
+            "message": "The registration token is not a valid FCM registration token",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                    "errorCode": "INVALID_ARGUMENT"
+                },
+                {
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [{"field": "message.token", "description": "x"}]
+                }
+            ]
+        }})
+        .to_string()
+    }
+
+    async fn checked(status: usize, body: &str) -> Result<(), PushError> {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/send")
+            .with_status(status)
+            .with_body(body)
+            .create_async()
+            .await;
+        let result = test_service_sending_to(&server)
+            .check_token("device-token")
+            .await;
+        mock.assert_async().await;
+        result
+    }
+
+    #[tokio::test]
+    async fn a_token_check_validates_and_delivers_nothing() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/send")
+            .match_header("authorization", "Bearer ya29.test")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "validate_only": true,
+                "message": {"token": "device-token", "data": {"type": "dispute_new"}}
+            })))
+            .with_status(200)
+            .with_body(r#"{"name":"projects/test-project/messages/fake_message_id"}"#)
+            .create_async()
+            .await;
+
+        let result = test_service_sending_to(&server)
+            .check_token("device-token")
+            .await;
+
+        mock.assert_async().await;
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_token_check_tells_a_bad_token_from_no_answer() {
+        for (status, body, expected) in [
+            (400, fcm_bad_token_error(), PushErrorKind::InvalidArgument),
+            (
+                404,
+                fcm_error(404, "NOT_FOUND", Some("UNREGISTERED")),
+                PushErrorKind::Unregistered,
+            ),
+            (
+                403,
+                fcm_error(403, "PERMISSION_DENIED", Some("SENDER_ID_MISMATCH")),
+                PushErrorKind::SenderMismatch,
+            ),
+            (
+                503,
+                fcm_error(503, "UNAVAILABLE", Some("UNAVAILABLE")),
+                PushErrorKind::Unavailable,
+            ),
+            (
+                401,
+                fcm_error(401, "UNAUTHENTICATED", Some("THIRD_PARTY_AUTH_ERROR")),
+                PushErrorKind::Other,
+            ),
+        ] {
+            let error = checked(status, &body).await.expect_err("FCM refused");
+            assert_eq!(error.kind, expected, "{status}");
+        }
+    }
+
+    /// A message this server built wrong is refused with the same code as a
+    /// bad token: it must not be blamed on the caller.
+    #[tokio::test]
+    async fn a_malformed_message_is_not_blamed_on_the_token() {
+        let body = fcm_error(400, "INVALID_ARGUMENT", Some("INVALID_ARGUMENT"));
+        let error = checked(400, &body).await.expect_err("FCM refused");
+        assert_eq!(error.kind, PushErrorKind::Other);
+
+        let error = checked(400, "<html>").await.expect_err("FCM refused");
+        assert_eq!(error.kind, PushErrorKind::Other);
+    }
+
+    #[tokio::test]
+    async fn a_token_check_without_credentials_says_nothing_about_the_token() {
+        let service = test_service("http://127.0.0.1:9/token".to_string());
+        let error = service
+            .check_token("device-token")
+            .await
+            .expect_err("no credentials");
+        assert_eq!(error.kind, PushErrorKind::Unavailable);
     }
 
     const TOKEN_BODY: &str = r#"{"access_token":"ya29.test","expires_in":3600}"#;

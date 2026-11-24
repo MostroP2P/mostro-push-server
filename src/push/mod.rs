@@ -22,8 +22,9 @@ pub enum PushKind {
     ChatWake,
     /// A trusted Mostro node opened a dispute: a visible notification for
     /// the devices watching that node. Android only, through FCM.
-    // Sent by the dispute watchers, which are not wired yet.
-    #[allow(dead_code)]
+    ///
+    /// Nothing dispatches it yet; its payload is what a token is checked
+    /// with before a dispute watch is stored.
     DisputeNew,
 }
 
@@ -35,10 +36,11 @@ pub enum PushErrorKind {
     Unregistered,
     /// The backend refused the request as malformed (FCM `INVALID_ARGUMENT`).
     ///
-    /// It does not blame the token by itself: FCM answers the same for a
-    /// token it cannot read and for a message field it does not accept, so a
-    /// payload this server built wrong reads the same for every device. Never
-    /// delete a token for it.
+    /// On a send it does not blame the token by itself: FCM answers the same
+    /// for a token it cannot read and for a message field it does not accept,
+    /// so a payload this server built wrong reads the same for every device.
+    /// Never delete a token for it. A [`TokenChecker`] answers it only when
+    /// the backend named the token as the malformed part.
     InvalidArgument,
     /// The token was issued for another sender (FCM `SENDER_ID_MISMATCH`):
     /// it belongs to another Firebase project.
@@ -52,9 +54,6 @@ pub enum PushErrorKind {
 /// A failed push: what went wrong, and the text for the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushError {
-    // Read by the dispute fan-out and the token check, which are not wired
-    // yet; today every caller only logs the error.
-    #[allow(dead_code)]
     pub kind: PushErrorKind,
     detail: String,
 }
@@ -87,6 +86,16 @@ pub trait PushService: Send + Sync {
 
     /// Whether this backend delivers a push of `kind` to `platform`.
     fn supports(&self, kind: PushKind, platform: &Platform) -> bool;
+}
+
+/// Asks a backend whether it could send to a token, without sending.
+///
+/// `Ok` means the backend knows the token. `Unregistered`, `InvalidArgument`
+/// and `SenderMismatch` mean the token is not one it can send to. Any other
+/// kind means the question got no answer, and says nothing about the token.
+#[async_trait]
+pub trait TokenChecker: Send + Sync {
+    async fn check_token(&self, device_token: &str) -> Result<(), PushError>;
 }
 
 // Implement PushService for Arc<UnifiedPushService> to allow shared ownership
