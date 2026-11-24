@@ -12,6 +12,7 @@ src/
 │   ├── cors.rs             # CORS middleware for the browser-facing endpoints (CORS_ALLOWED_ORIGINS)
 │   ├── routes.rs           # /api/health|info|status|register|unregister wiring + AppState
 │   ├── notify.rs           # /api/notify handler + x-request-id middleware
+│   ├── disputes.rs         # /api/disputes/watch|unwatch handlers
 │   ├── rate_limit.rs       # Per-IP and per-pubkey limiter middleware (governor)
 │   └── test_support.rs     # In-process test fixtures (StubPushService, app factory)
 ├── nostr/
@@ -23,6 +24,7 @@ src/
 │   └── unifiedpush.rs      # UnifiedPush backend, persistent endpoint store
 ├── store/
 │   ├── mod.rs              # TokenStore (RwLock<HashMap>), TTL cleanup, MAX_TOKENS cap
+│   ├── watchers.rs         # WatcherStore: node -> devices watching its disputes
 │   ├── sqlite.rs           # Optional SQLite persistence (TOKEN_STORE_PATH)
 │   └── cipher.rs           # Device-token encryption at rest (TOKEN_STORE_KEY)
 ├── crypto/
@@ -55,6 +57,17 @@ Reads always come from memory. With `TOKEN_STORE_PATH` set, `store/sqlite.rs` mi
 - **Row format:** `trade_pubkey` in the clear; the device token sealed by `store/cipher.rs` (ChaCha20-Poly1305, key derived with HKDF from `TOKEN_STORE_KEY`, random nonce per row, `trade_pubkey` as associated data).
 - **Deletion:** `secure_delete` zeroes deleted rows and every cleanup truncates the WAL.
 
+### Watcher store (`store/watchers.rs`)
+
+Maps a node's pubkey to the devices watching its disputes: `mostro_pubkey -> device_token -> Watcher { device_token, platform, watched_at }`. `TokenStore` cannot hold this: it keeps one device per `trade_pubkey`, and a dispute is announced by the node and goes to every device watching it.
+
+- **Lifetime:** 30 days since the last watch; the same hourly task evicts older ones.
+- **Caps:** `MAX_WATCHERS_PER_NODE` and `MAX_WATCHERS`. A device already on a list is always renewed.
+- **Admission:** `/api/disputes/watch` stores a new token only after FCM knew it (`TokenChecker`, `messages:send` with `validate_only`). Without that anyone could fill a node's list with invented tokens. FCM names `message.token` when the token is the malformed part; an `INVALID_ARGUMENT` that does not is a fault of the message this server built, and is answered `503`, not `400`.
+- **Persistence:** the `watchers` table of the same SQLite file (schema version 2), under the same `write_order` discipline. A row keeps the node's pubkey in the clear (it is public) and the token sealed as in `tokens`, with the node's pubkey as associated data. Its primary key is a BLAKE3 hash of (node, token) keyed from `TOKEN_STORE_KEY`, so the rows of one device on two nodes share nothing. A changed key wipes both tables in one transaction.
+
+Nothing reads the store to send a push yet: the listener's dispute subscription is a later change.
+
 ### Push dispatcher
 
 `PushDispatcher` owns an immutable `Arc<[Arc<dyn PushService>]>` slice plus a parallel `Arc<[&'static str]>` of backend names. Dispatch iterates services, skips backends that do not support the kind on the platform, and stops on the first success. The slice is built once at startup and never mutated, so dispatch is lock-free.
@@ -81,7 +94,7 @@ Treats the `device_token` as the UnifiedPush distributor endpoint URL. POSTs a s
 
 ### Privacy log correlator (`utils::log_pubkey`)
 
-A salted truncated BLAKE3 keyed hash. The salt is a 32-byte random value generated once at process start and never persisted or logged, so log lines from different runs cannot be correlated. Every place that logs a `trade_pubkey` (`api/notify.rs`, `api/routes.rs`, `store/mod.rs`, `nostr/listener.rs`) goes through this helper.
+A salted truncated BLAKE3 keyed hash. The salt is a 32-byte random value generated once at process start and never persisted or logged, so log lines from different runs cannot be correlated. Every place that logs a `trade_pubkey` (`api/notify.rs`, `api/routes.rs`, `store/mod.rs`, `nostr/listener.rs`) goes through this helper, and so does the node of a dispute watch (`api/disputes.rs`, `store/watchers.rs`). A watcher's token is never logged.
 
 ## Data flow
 
@@ -139,6 +152,10 @@ notify_token handler
 ### Token-store update (`POST /api/register` / `unregister`)
 
 Synchronous write under `RwLock::write`, then `200`. No fan-out; the next `kind 14` for that `trade_pubkey` will pick up the new token via the listener path.
+
+### Dispute watch (`POST /api/disputes/watch` / `unwatch`)
+
+Validation, the trusted list, then for a device not yet on the node's list: the caps, and one `validate_only` request to FCM. Only then is the watch written, in memory and to SQLite. A renewal skips the caps and FCM.
 
 ## Concurrency model
 

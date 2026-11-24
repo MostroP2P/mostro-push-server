@@ -407,6 +407,14 @@ sudo journalctl -u mostro-push -f
   - Deleted rows are zeroed (`secure_delete`) and the WAL is truncated after each cleanup.
   - If `TOKEN_STORE_KEY` changes, the server discards every stored registration at startup (logged) instead of failing.
   - With `TOKEN_STORE_PATH` set, the server refuses to start if the key is missing or invalid, or the file cannot be opened: running from memory instead would silently lose registrations again.
+- **Dispute watches** live in the same file, in the `watchers` table, under the same rules: 30 days since the last watch, deleted on `/api/disputes/unwatch`, the token encrypted, the node's pubkey in the clear. A changed `TOKEN_STORE_KEY` discards them together with the registrations.
+- **Schema version.** The file carries a version (`PRAGMA user_version`); `watchers` made it 2. Upgrading is automatic and leaves `tokens` alone. A binary that only knows version 1 refuses to start on a version 2 file (`token store schema version 2 is newer than supported`). To go back to such a binary, with the server stopped:
+
+  ```bash
+  sqlite3 /app/data/tokens.db 'DROP TABLE watchers; PRAGMA user_version = 1; PRAGMA wal_checkpoint(TRUNCATE);'
+  ```
+
+  The registrations are kept; the dispute watches are lost, and clients watch again.
 - **UnifiedPush endpoints** (`data/unifiedpush_endpoints.json`), written atomically (temp file + rename).
 - The FCM access-token cache is in memory and refetched after a restart.
 
