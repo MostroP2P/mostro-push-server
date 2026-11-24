@@ -10,6 +10,7 @@ use governor::clock::{Clock, DefaultClock};
 use log::{info, warn};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::rate_limit::{client_ip_of, new_watch_key, rate_limited_response};
@@ -44,20 +45,29 @@ const WATCHERS_FULL_RETRY_AFTER_SECS: u64 = 3600;
 /// connections the server accepts.
 const TOKEN_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// [`TokenChecker::check_token`], given up on after `timeout`.
+/// [`TokenChecker::check_token`], no longer waited for after `timeout`.
+///
+/// The check runs in its own task and is left to finish: cutting it short,
+/// by the timeout or by the caller hanging up, would abandon a token
+/// exchange with Google halfway, and with it the record of a failure that
+/// the pushes queued behind share instead of each trying again.
 async fn check_within(
-    checker: &dyn TokenChecker,
-    token: &str,
+    checker: Arc<dyn TokenChecker>,
+    token: String,
     timeout: Duration,
 ) -> Result<(), PushError> {
-    tokio::time::timeout(timeout, checker.check_token(token))
-        .await
-        .unwrap_or_else(|_| {
-            Err(PushError::new(
-                PushErrorKind::Unavailable,
-                "token check timed out",
-            ))
-        })
+    let check = tokio::spawn(async move { checker.check_token(&token).await });
+    match tokio::time::timeout(timeout, check).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(PushError::new(
+            PushErrorKind::Unavailable,
+            "token check did not finish",
+        )),
+        Err(_) => Err(PushError::new(
+            PushErrorKind::Unavailable,
+            "token check timed out",
+        )),
+    }
 }
 
 fn succeeded() -> HttpResponse {
@@ -158,7 +168,7 @@ pub async fn watch_disputes(
 
         // Without this check anyone could fill a node's list with invented
         // tokens and lock its solvers out.
-        let checked = check_within(checker.as_ref(), &req.token, TOKEN_CHECK_TIMEOUT).await;
+        let checked = check_within(checker.clone(), req.token.clone(), TOKEN_CHECK_TIMEOUT).await;
         if let Err(e) = checked {
             return match e.kind {
                 PushErrorKind::Unregistered
@@ -184,17 +194,22 @@ pub async fn watch_disputes(
         }
     }
 
-    match state
-        .watcher_store
-        .watch(node, req.token.clone(), Platform::Android)
-        .await
-    {
-        Ok(()) => succeeded(),
+    // In its own task: actix drops this handler when the caller hangs up,
+    // and a write to disk already under way would then finish without the
+    // change to memory that follows it.
+    let store = state.watcher_store.clone();
+    let token = req.token.clone();
+    let stored =
+        tokio::spawn(async move { store.watch(node, token, Platform::Android).await }).await;
+    match stored {
+        Ok(Ok(())) => succeeded(),
         // The list filled up while the token was being checked.
-        Err(WatchError::Full) => rate_limited_response(WATCHERS_FULL_RETRY_AFTER_SECS),
+        Ok(Err(WatchError::Full)) => rate_limited_response(WATCHERS_FULL_RETRY_AFTER_SECS),
         // Not written to disk, so not kept: success would be a lie the next
         // restart exposes, as for an unwatch.
-        Err(WatchError::Persist(_)) => refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Ok(Err(WatchError::Persist(_))) | Err(_) => {
+            refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
     }
 }
 
@@ -209,12 +224,17 @@ pub async fn unwatch_disputes(
         return refused(StatusCode::BAD_REQUEST, fault);
     }
 
-    match state.watcher_store.unwatch(&node, &req.token).await {
+    // In its own task, as the watch: an unwatch cut short after its delete
+    // reached the disk would leave the device watching from memory.
+    let store = state.watcher_store.clone();
+    let token = req.token.clone();
+    let removed = tokio::spawn(async move { store.unwatch(&node, &token).await }).await;
+    match removed {
         // The same answer whether or not the watch existed.
-        Ok(_) => succeeded(),
+        Ok(Ok(_)) => succeeded(),
         // The durable delete failed and the watch is still in place, so
         // success would be a lie a restart exposes.
-        Err(_) => refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        Ok(Err(_)) | Err(_) => refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
 }
 
@@ -665,24 +685,42 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// A check that does not come back is given up on, as an FCM that could
-    /// not be asked.
+    /// A check that does not come back is not waited for, as an FCM that
+    /// could not be asked; and it is left to finish rather than cut short.
     #[tokio::test]
-    async fn a_token_check_that_hangs_is_given_up_on() {
-        struct Hanging;
+    async fn a_slow_token_check_is_not_waited_for_but_still_finishes() {
+        struct Slow(tokio::sync::mpsc::UnboundedSender<()>);
         #[async_trait::async_trait]
-        impl crate::push::TokenChecker for Hanging {
+        impl crate::push::TokenChecker for Slow {
             async fn check_token(&self, _device_token: &str) -> Result<(), crate::push::PushError> {
-                std::future::pending().await
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let _ = self.0.send(());
+                Ok(())
             }
         }
+        let (finished, mut was_finished) = tokio::sync::mpsc::unbounded_channel();
 
-        let result =
-            super::check_within(&Hanging, TOKEN, std::time::Duration::from_millis(20)).await;
+        let result = super::check_within(
+            Arc::new(Slow(finished)),
+            TOKEN.to_string(),
+            std::time::Duration::from_millis(20),
+        )
+        .await;
         assert_eq!(result.unwrap_err().kind, PushErrorKind::Unavailable);
+        // Given up on, not cancelled.
+        assert!(was_finished.try_recv().is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), was_finished.recv())
+            .await
+            .expect("the check ran to its end")
+            .unwrap();
 
-        let checker = StubTokenChecker::new(None);
-        let result = super::check_within(&checker, TOKEN, std::time::Duration::from_secs(5)).await;
+        let checker = Arc::new(StubTokenChecker::new(None));
+        let result = super::check_within(
+            checker,
+            TOKEN.to_string(),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         assert_eq!(result, Ok(()));
     }
 

@@ -194,12 +194,12 @@ Request:
 { "success": true }
 ```
 
-Watching again renews the watch, which lasts 30 days since it was last asked for.
+Watching again renews the watch, which lasts 30 days since the day it was last asked for (so between 29 and 30 days: only the day is kept).
 
 - **Only `android`**, and only FCM tokens. A token that is an `http(s)` URL (a UnifiedPush endpoint) is refused.
 - **The node must be on the trusted list** (`config/trusted_mostro_pubkeys.json`), whatever `TRUSTED_WHITELIST_ENABLED` says: the listener only rings for those nodes.
 - **A new token is checked with FCM before it is stored** (`messages:send` with `validate_only`, which delivers nothing). A watch that is renewed is not checked again.
-- **New watches are limited to 5 per IP address per hour** (`NEW_WATCHES_PER_IP_PER_HOUR`), apart from the per-IP limit shared with `/api/register`. A valid FCM token is cheap to come by, so without this one address could take every place of a node. An IPv6 address is counted with its /64. A renewal does not count. A token FCM refuses does, and so does a check FCM did not answer (the `503` below): the allowance is what bounds how often an address makes the server ask FCM. A `503` because FCM is disabled costs nothing.
+- **New watches are limited per IP address**: 5 at once, then one more every 12 minutes (`NEW_WATCHES_PER_IP_PER_HOUR`, which is that burst and that refill: 9 fit in a first hour, 5 an hour after that), apart from the per-IP limit shared with `/api/register`. A valid FCM token is cheap to come by, so without this one address could take every place of a node. An IPv6 address is counted with its /64. A renewal does not count. A token FCM refuses does, and so does a check FCM did not answer (the `503` below): the allowance is what bounds how often an address makes the server ask FCM. A `503` because FCM is disabled costs nothing.
 - **The platform is not verified.** FCM accepts any token of the project in that check, so an iOS or web token sent as `android` is stored and takes a place, although the `dispute_new` notification is only defined for Android.
 
 | Status | Body `message` | When |
@@ -448,7 +448,7 @@ ask FCM about a token:
 - Per-IP: `120/min`, burst `100`
 
 `/api/disputes/watch` has a second per-IP limit, on **new** watches only:
-`5/hour` (`NEW_WATCHES_PER_IP_PER_HOUR`), keyed by the address for IPv4 and by
+a burst of `5`, refilled at `5/hour` (`NEW_WATCHES_PER_IP_PER_HOUR` sets both), keyed by the address for IPv4 and by
 its /64 for IPv6. Renewing a watch and `/api/disputes/unwatch` do not count
 against it.
 

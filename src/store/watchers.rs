@@ -32,7 +32,20 @@ pub const DEFAULT_MAX_WATCHERS: usize = 10_000;
 pub struct Watcher {
     pub device_token: String,
     pub platform: Platform,
+    /// The start of the UTC day the watch was last asked for; see [`day_of`].
     pub watched_at: DateTime<Utc>,
+}
+
+/// The start of the UTC day of `at`, which is all that is kept of when a
+/// device watched a node, in memory and on disk alike.
+///
+/// A device that renews several nodes at once would otherwise leave rows
+/// sharing a second, which groups them as surely as a shared id would. So a
+/// watch lasts between 29 and 30 days rather than exactly [`WATCH_TTL_DAYS`].
+pub fn day_of(at: DateTime<Utc>) -> DateTime<Utc> {
+    const DAY_SECS: i64 = 86_400;
+    let day = at.timestamp().div_euclid(DAY_SECS) * DAY_SECS;
+    DateTime::from_timestamp(day, 0).unwrap_or(at)
 }
 
 /// Why a watch was not stored.
@@ -149,7 +162,7 @@ impl WatcherStore {
         let watcher = Watcher {
             device_token,
             platform,
-            watched_at: Utc::now(),
+            watched_at: day_of(Utc::now()),
         };
         let log_node = log_pubkey(&self.log_salt, &mostro_pubkey);
 
@@ -237,7 +250,15 @@ impl WatcherStore {
     /// Drops the watches of every node that is not in `trusted`, and reports
     /// how many. A node taken off the trusted list is never rung for again
     /// and its watches cannot be renewed, so nothing is kept of them.
+    ///
+    /// An empty list drops nothing. It is a deployment mistake, which the
+    /// listener refuses to start with, and it would otherwise read as every
+    /// node having left the list.
     pub async fn forget_untrusted(&self, trusted: &HashSet<String>) -> usize {
+        if trusted.is_empty() {
+            warn!("The trusted list is empty: no dispute watch is dropped for it");
+            return 0;
+        }
         let _order = self.write_order.lock().await;
 
         let untrusted: Vec<(String, usize)> = {
@@ -279,7 +300,8 @@ impl WatcherStore {
             let mut nodes = self.nodes.write().await;
             let before = total(&nodes);
             for devices in nodes.values_mut() {
-                devices.retain(|_, watcher| watcher.watched_at >= cutoff);
+                // In whole seconds, as the file compares them.
+                devices.retain(|_, watcher| watcher.watched_at.timestamp() >= cutoff.timestamp());
             }
             nodes.retain(|_, devices| !devices.is_empty());
             before - total(&nodes)
@@ -400,7 +422,7 @@ mod tests {
         assert_eq!(store.cleanup_expired().await, 0);
         let nodes = store.nodes.read().await;
         let age = Utc::now() - nodes[NODE_A][TOKEN_1].watched_at;
-        assert!(age < chrono::Duration::minutes(1));
+        assert!(age < chrono::Duration::days(1));
     }
 
     #[tokio::test]
@@ -428,6 +450,18 @@ mod tests {
         assert!(!store.is_watching(NODE_A, TOKEN_1).await);
         assert!(store.is_watching(NODE_B, TOKEN_1).await);
         assert_eq!(store.forget_untrusted(&trusted).await, 0);
+    }
+
+    /// An empty list is a broken deployment, not every node leaving it.
+    #[tokio::test]
+    async fn an_empty_trusted_list_drops_nothing() {
+        let db = TempDb::new();
+        let (store, _) = open(&db, KEY);
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+
+        assert_eq!(store.forget_untrusted(&HashSet::new()).await, 0);
+        assert!(store.is_watching(NODE_A, TOKEN_1).await);
+        assert_eq!(db.query::<i64>("SELECT COUNT(*) FROM watchers"), 1);
     }
 
     #[tokio::test]
@@ -772,30 +806,73 @@ mod tests {
         assert_eq!(report.restored, 2);
     }
 
-    /// One device renewing several nodes at once must not write rows that
+    /// One device renewing several nodes at once must not leave rows that
     /// share a moment: that would group them as surely as a shared id.
     #[tokio::test]
-    async fn the_file_keeps_the_day_of_a_watch_and_not_its_moment() {
+    async fn only_the_day_of_a_watch_is_kept() {
         let db = TempDb::new();
         let (store, _) = open(&db, KEY);
+        // The test may run across midnight UTC.
+        let before = day_of(Utc::now());
         watch(&store, NODE_A, TOKEN_1).await.unwrap();
         watch(&store, NODE_B, TOKEN_1).await.unwrap();
+        let after = day_of(Utc::now());
+        let in_memory = store.nodes.read().await[NODE_A][TOKEN_1].watched_at;
+        assert!(in_memory == before || in_memory == after);
         drop(store);
 
-        let today = Utc::now().timestamp() / 86_400 * 86_400;
         assert_eq!(
             db.query::<i64>("SELECT COUNT(*) FROM watchers WHERE watched_at % 86400 = 0"),
             2
         );
-        assert_eq!(
-            db.query::<i64>("SELECT MAX(watched_at) FROM watchers"),
-            today
-        );
+        let newest = db.query::<i64>("SELECT MAX(watched_at) FROM watchers");
+        assert!(newest == before.timestamp() || newest == after.timestamp());
 
-        // Restored from the start of its day: it can only expire early.
+        // Memory and the file agree, before and after a restart.
         let (store, _) = open(&db, KEY);
         let restored = store.nodes.read().await[NODE_A][TOKEN_1].watched_at;
-        assert_eq!(restored.timestamp(), today);
+        assert_eq!(restored, in_memory);
+    }
+
+    /// The cleanup must not delete from the file a watch memory still holds:
+    /// a restart in between would lose it.
+    #[tokio::test]
+    async fn the_cleanup_expires_the_same_watches_in_memory_and_on_disk() {
+        let db = TempDb::new();
+        let (store, _) = open(&db, KEY);
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        // In its last day: older than 29 days, not yet 30.
+        let last_day = day_of(Utc::now() - chrono::Duration::days(WATCH_TTL_DAYS - 1));
+        store
+            .nodes
+            .write()
+            .await
+            .get_mut(NODE_A)
+            .unwrap()
+            .get_mut(TOKEN_1)
+            .unwrap()
+            .watched_at = last_day;
+        db.sql(&format!(
+            "UPDATE watchers SET watched_at = {}",
+            last_day.timestamp()
+        ));
+
+        assert_eq!(store.cleanup_expired().await, 0);
+        assert!(store.is_watching(NODE_A, TOKEN_1).await);
+        assert_eq!(db.query::<i64>("SELECT COUNT(*) FROM watchers"), 1);
+    }
+
+    /// Rows are not numbered in the order they were written, which would
+    /// group the watches a device asked for one after another.
+    #[test]
+    fn the_watchers_table_has_no_rowid() {
+        let db = TempDb::new();
+        drop(sqlite(&db, KEY));
+        let result = rusqlite::Connection::open(&db.0)
+            .unwrap()
+            .prepare("SELECT rowid FROM watchers")
+            .map(|_| ());
+        assert!(result.is_err());
     }
 
     #[tokio::test]

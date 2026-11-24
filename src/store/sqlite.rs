@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use super::cipher::{CipherError, TokenCipher};
-use super::watchers::Watcher;
+use super::watchers::{day_of, Watcher};
 use super::{Platform, RegisteredToken};
 
 /// 1: `meta` and `tokens`. 2 adds `watchers` and leaves the others alone.
@@ -126,7 +126,7 @@ impl SqliteStore {
                  watched_at    INTEGER NOT NULL,
                  nonce         BLOB NOT NULL,
                  token_ct      BLOB NOT NULL
-             );",
+             ) WITHOUT ROWID;",
         )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
@@ -320,7 +320,8 @@ impl SqliteStore {
                     id.as_slice(),
                     mostro_pubkey,
                     platform_to_db(&watcher.platform),
-                    day_of(watcher.watched_at),
+                    // Already a day; enforced again where it is stored.
+                    day_of(watcher.watched_at).timestamp(),
                     sealed.nonce.as_slice(),
                     sealed.ciphertext,
                 ],
@@ -432,15 +433,6 @@ impl SqliteStore {
             .map_err(|e| PersistError::Task(e.to_string()))?
             .map_err(PersistError::from)
     }
-}
-
-/// The start of the UTC day of `at`, which is all the file keeps of when a
-/// device watched a node. A device that renews several nodes at once would
-/// otherwise write rows sharing a second, which groups them as surely as a
-/// shared id would. A restored watch can so expire up to a day early.
-fn day_of(at: DateTime<Utc>) -> i64 {
-    const DAY_SECS: i64 = 86_400;
-    at.timestamp().div_euclid(DAY_SECS) * DAY_SECS
 }
 
 /// A panic while holding the lock leaves SQLite itself consistent (every
