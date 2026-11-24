@@ -4,7 +4,7 @@
 //! restart. Each row keeps `trade_pubkey` in the clear and the device token
 //! sealed by [`TokenCipher`]. A `watchers` row keeps the node's pubkey in the
 //! clear (it is public) and the token sealed the same way, under an id that
-//! does not reveal it. `secure_delete` zeroes deleted rows and every
+//! does not reveal it, and only the day it was last asked for. `secure_delete` zeroes deleted rows and every
 //! cleanup truncates the WAL, so expired and unregistered entries do not
 //! linger in the file.
 
@@ -320,7 +320,7 @@ impl SqliteStore {
                     id.as_slice(),
                     mostro_pubkey,
                     platform_to_db(&watcher.platform),
-                    watcher.watched_at.timestamp(),
+                    day_of(watcher.watched_at),
                     sealed.nonce.as_slice(),
                     sealed.ciphertext,
                 ],
@@ -432,6 +432,15 @@ impl SqliteStore {
             .map_err(|e| PersistError::Task(e.to_string()))?
             .map_err(PersistError::from)
     }
+}
+
+/// The start of the UTC day of `at`, which is all the file keeps of when a
+/// device watched a node. A device that renews several nodes at once would
+/// otherwise write rows sharing a second, which groups them as surely as a
+/// shared id would. A restored watch can so expire up to a day early.
+fn day_of(at: DateTime<Utc>) -> i64 {
+    const DAY_SECS: i64 = 86_400;
+    at.timestamp().div_euclid(DAY_SECS) * DAY_SECS
 }
 
 /// A panic while holding the lock leaves SQLite itself consistent (every

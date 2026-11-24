@@ -18,8 +18,8 @@ mod utils;
 mod crypto;
 
 use api::rate_limit::{
-    PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST,
-    NEW_WATCH_IP_PER_HOUR, PUBKEY_BURST, REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
+    PerIpLimiter, PerPubkeyLimiter, RegisterIpLimiter, TrustProxyHeaders, IP_BURST, PUBKEY_BURST,
+    REGISTER_IP_BURST, REGISTER_IP_RATE_PER_MIN,
 };
 use api::routes::AppState;
 use config::Config;
@@ -181,8 +181,8 @@ async fn main() -> std::io::Result<()> {
 
     let new_watch_limiter: Arc<PerIpLimiter> =
         Arc::new(governor::RateLimiter::keyed(governor::Quota::per_hour(
-            std::num::NonZeroU32::new(NEW_WATCH_IP_PER_HOUR)
-                .expect("NEW_WATCH_IP_PER_HOUR is a non-zero compile-time constant"),
+            std::num::NonZeroU32::new(config.new_watches_per_ip_per_hour)
+                .expect("validated > 0 in Config::from_env"),
         )));
 
     // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.

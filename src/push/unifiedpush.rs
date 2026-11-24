@@ -309,6 +309,7 @@ mod tests {
             },
             trusted_whitelist_enabled: false,
             cors_allowed_origins: crate::api::cors::AllowedOrigins::List(Vec::new()),
+            new_watches_per_ip_per_hour: 5,
         }
     }
 

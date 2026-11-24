@@ -11,7 +11,7 @@ use governor::{
 };
 use log::warn;
 use serde_json::json;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,13 +51,31 @@ pub const IP_BURST: u32 = 30;
 pub const REGISTER_IP_RATE_PER_MIN: u32 = 120;
 pub const REGISTER_IP_BURST: u32 = 100;
 
-/// New dispute watches one address may ask for per hour, on top of the
-/// register limiter. A watch that is renewed does not count.
+/// Default for `NEW_WATCHES_PER_IP_PER_HOUR`: new dispute watches one
+/// address may ask for per hour, on top of the register limiter. A watch
+/// that is renewed does not count.
 ///
 /// A valid FCM token is cheap to come by, so the token check alone would let
 /// one address fill a node's watcher list within the register limiter's
 /// burst. A solver watches a handful of nodes from a handful of devices.
-pub const NEW_WATCH_IP_PER_HOUR: u32 = 5;
+pub const NEW_WATCHES_PER_IP_PER_HOUR_DEFAULT: u32 = 5;
+
+/// The key new watches are counted under: the address for IPv4, its /64 for
+/// IPv6. One IPv6 subscriber holds a whole /64, so counting each address
+/// apart would give it as many allowances as it cares to use.
+pub fn new_watch_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            // `::ffff:a.b.c.d` is an IPv4 client seen through a dual stack.
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let network = u128::from(v6) & !u128::from(u64::MAX);
+                IpAddr::V6(Ipv6Addr::from(network))
+            }
+        },
+    }
+}
 
 /// Cleanup interval default in seconds (D-16). Override via NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS.
 /// Defaults are duplicated in `Config::from_env` so this constant is currently
@@ -320,6 +338,17 @@ mod tests {
     use std::time::Duration;
 
     /// LIMIT-06: above the cap, the callback fires with the actual length.
+    #[test]
+    fn new_watches_are_keyed_by_address_or_by_ipv6_network() {
+        let key = |ip: &str| new_watch_key(ip.parse().unwrap()).to_string();
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
+        assert_eq!(key("2001:db8:1:2::1"), "2001:db8:1:2::");
+        assert_ne!(key("2001:db8:1:3::1"), key("2001:db8:1:2::1"));
+        // An IPv4 client seen through a dual stack keeps its own key.
+        assert_eq!(key("::ffff:203.0.113.7"), "203.0.113.7");
+    }
+
     #[test]
     fn check_soft_cap_fires_above_cap() {
         let calls: Mutex<Vec<usize>> = Mutex::new(Vec::new());

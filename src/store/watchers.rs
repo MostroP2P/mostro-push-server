@@ -35,17 +35,25 @@ pub struct Watcher {
     pub watched_at: DateTime<Utc>,
 }
 
-/// A new watch was refused: the node's list, or the whole store, is full.
-#[derive(Debug, PartialEq, Eq)]
-pub struct WatchersFull;
+/// Why a watch was not stored.
+#[derive(Debug)]
+pub enum WatchError {
+    /// A new watch was refused: the node's list, or the whole store, is full.
+    Full,
+    /// The watch could not be written to disk, and nothing was changed.
+    Persist(PersistError),
+}
 
-impl std::fmt::Display for WatchersFull {
+impl std::fmt::Display for WatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "watcher store is full")
+        match self {
+            WatchError::Full => write!(f, "watcher store is full"),
+            WatchError::Persist(e) => write!(f, "watch not persisted: {}", e),
+        }
     }
 }
 
-impl std::error::Error for WatchersFull {}
+impl std::error::Error for WatchError {}
 
 /// Node pubkey → device token → watcher.
 type Nodes = HashMap<String, HashMap<String, Watcher>>;
@@ -96,7 +104,7 @@ impl WatcherStore {
         Ok((store, report))
     }
 
-    /// Caps new watches, per node and in total; see [`WatchersFull`].
+    /// Caps new watches, per node and in total; see [`WatchError::Full`].
     pub fn with_caps(mut self, max_per_node: usize, max_total: usize) -> Self {
         self.max_per_node = max_per_node;
         self.max_total = max_total;
@@ -127,12 +135,17 @@ impl WatcherStore {
     /// Adds `device_token` to the watchers of `mostro_pubkey`, or renews its
     /// lifetime. Renewing is always accepted, so a full list never cuts off a
     /// device already on it; only new watches are refused.
+    ///
+    /// With persistence the row is written first. If that fails, memory is
+    /// left untouched and the error is returned: a watch lasts 30 days, so
+    /// acknowledging one that the next restart drops would leave a solver
+    /// without notifications and unaware of it.
     pub async fn watch(
         &self,
         mostro_pubkey: String,
         device_token: String,
         platform: Platform,
-    ) -> Result<(), WatchersFull> {
+    ) -> Result<(), WatchError> {
         let watcher = Watcher {
             device_token,
             platform,
@@ -140,31 +153,41 @@ impl WatcherStore {
         };
         let log_node = log_pubkey(&self.log_salt, &mostro_pubkey);
 
+        // Every change holds `write_order`, so what is decided here still
+        // holds when the watch is inserted below.
         let _order = self.write_order.lock().await;
-        let (renewed, on_node) = {
-            let mut nodes = self.nodes.write().await;
+        let renewed = {
+            let nodes = self.nodes.read().await;
             let renewed = nodes
                 .get(&mostro_pubkey)
                 .is_some_and(|devices| devices.contains_key(&watcher.device_token));
             if !renewed && !has_room(&nodes, &mostro_pubkey, self.max_per_node, self.max_total) {
                 warn!("Watcher store full, refusing a watch of node={}", log_node);
-                return Err(WatchersFull);
+                return Err(WatchError::Full);
             }
-            let devices = nodes.entry(mostro_pubkey.clone()).or_default();
-            devices.insert(watcher.device_token.clone(), watcher.clone());
-            (renewed, devices.len())
+            renewed
+        };
+
+        if let Some(db) = &self.persistence {
+            if let Err(e) = db
+                .upsert_watcher(mostro_pubkey.clone(), watcher.clone())
+                .await
+            {
+                error!("Failed to persist a watch of node={}: {}", log_node, e);
+                return Err(WatchError::Persist(e));
+            }
+        }
+
+        let on_node = {
+            let mut nodes = self.nodes.write().await;
+            let devices = nodes.entry(mostro_pubkey).or_default();
+            devices.insert(watcher.device_token.clone(), watcher);
+            devices.len()
         };
         if renewed {
             debug!("Renewed a watch of node={}", log_node);
         } else {
             info!("Watching node={} (devices: {})", log_node, on_node);
-        }
-
-        if let Some(db) = &self.persistence {
-            // The watch still works from memory; only a restart loses it.
-            if let Err(e) = db.upsert_watcher(mostro_pubkey, watcher).await {
-                error!("Failed to persist a watch of node={}: {}", log_node, e);
-            }
         }
         Ok(())
     }
@@ -323,7 +346,7 @@ mod tests {
         Arc::new([7u8; 32])
     }
 
-    async fn watch(store: &WatcherStore, node: &str, token: &str) -> Result<(), WatchersFull> {
+    async fn watch(store: &WatcherStore, node: &str, token: &str) -> Result<(), WatchError> {
         store
             .watch(node.into(), token.into(), Platform::Android)
             .await
@@ -414,7 +437,10 @@ mod tests {
         watch(&store, NODE_A, TOKEN_2).await.unwrap();
 
         assert!(!store.has_room(NODE_A).await);
-        assert_eq!(watch(&store, NODE_A, TOKEN_3).await, Err(WatchersFull));
+        assert!(matches!(
+            watch(&store, NODE_A, TOKEN_3).await,
+            Err(WatchError::Full)
+        ));
         assert!(!store.is_watching(NODE_A, TOKEN_3).await);
 
         // A device already on the list is never cut off by the cap.
@@ -436,7 +462,10 @@ mod tests {
 
         assert!(!store.has_room(NODE_A).await);
         assert!(!store.has_room(NODE_B).await);
-        assert_eq!(watch(&store, NODE_A, TOKEN_2).await, Err(WatchersFull));
+        assert!(matches!(
+            watch(&store, NODE_A, TOKEN_2).await,
+            Err(WatchError::Full)
+        ));
         watch(&store, NODE_B, TOKEN_1).await.unwrap();
         assert_eq!(store.count().await, 2);
     }
@@ -708,6 +737,65 @@ mod tests {
 
         let result = SqliteStore::open(&db.0, TokenCipher::from_hex(KEY).unwrap());
         assert!(matches!(result, Err(PersistError::UnsupportedSchema(3))));
+    }
+
+    #[tokio::test]
+    async fn a_watch_the_disk_refused_is_reported_and_changes_nothing() {
+        let db = TempDb::new();
+        let (store, _) = open(&db, KEY);
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        let first = store.nodes.read().await[NODE_A][TOKEN_1].watched_at;
+
+        db.sql(
+            "CREATE TRIGGER fail_insert BEFORE INSERT ON watchers
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+             CREATE TRIGGER fail_update BEFORE UPDATE ON watchers
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+        );
+        // A new watch is not kept in memory when it did not reach the disk.
+        assert!(matches!(
+            watch(&store, NODE_A, TOKEN_2).await,
+            Err(WatchError::Persist(_))
+        ));
+        assert!(!store.is_watching(NODE_A, TOKEN_2).await);
+        // A renewal that did not reach the disk leaves the watch as it was.
+        assert!(matches!(
+            watch(&store, NODE_A, TOKEN_1).await,
+            Err(WatchError::Persist(_))
+        ));
+        assert_eq!(store.nodes.read().await[NODE_A][TOKEN_1].watched_at, first);
+
+        db.sql("DROP TRIGGER fail_insert; DROP TRIGGER fail_update;");
+        watch(&store, NODE_A, TOKEN_2).await.unwrap();
+        drop(store);
+        let (_, report) = open(&db, KEY);
+        assert_eq!(report.restored, 2);
+    }
+
+    /// One device renewing several nodes at once must not write rows that
+    /// share a moment: that would group them as surely as a shared id.
+    #[tokio::test]
+    async fn the_file_keeps_the_day_of_a_watch_and_not_its_moment() {
+        let db = TempDb::new();
+        let (store, _) = open(&db, KEY);
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        watch(&store, NODE_B, TOKEN_1).await.unwrap();
+        drop(store);
+
+        let today = Utc::now().timestamp() / 86_400 * 86_400;
+        assert_eq!(
+            db.query::<i64>("SELECT COUNT(*) FROM watchers WHERE watched_at % 86400 = 0"),
+            2
+        );
+        assert_eq!(
+            db.query::<i64>("SELECT MAX(watched_at) FROM watchers"),
+            today
+        );
+
+        // Restored from the start of its day: it can only expire early.
+        let (store, _) = open(&db, KEY);
+        let restored = store.nodes.read().await[NODE_A][TOKEN_1].watched_at;
+        assert_eq!(restored.timestamp(), today);
     }
 
     #[tokio::test]

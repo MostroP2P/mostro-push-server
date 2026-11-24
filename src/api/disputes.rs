@@ -10,11 +10,13 @@ use governor::clock::{Clock, DefaultClock};
 use log::{info, warn};
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 
-use crate::api::rate_limit::{client_ip_of, rate_limited_response};
+use crate::api::rate_limit::{client_ip_of, new_watch_key, rate_limited_response};
 use crate::api::routes::{AppState, MAX_TOKEN_BYTES};
 use crate::push::endpoint_guard::{classify_token, TokenShape};
-use crate::push::PushErrorKind;
+use crate::push::{PushError, PushErrorKind, TokenChecker};
+use crate::store::watchers::WatchError;
 use crate::store::Platform;
 use crate::utils::log_pubkey::log_pubkey;
 
@@ -31,9 +33,32 @@ pub struct UnwatchRequest {
     pub token: String,
 }
 
-/// `Retry-After` sent when a watcher list is full: watches expire on the
-/// hourly cleanup.
+/// `Retry-After` sent when a watcher list is full. It is how often to ask
+/// again, not when a place will be free: one frees up when a device leaves
+/// or its watch expires, which nothing here can foresee.
 const WATCHERS_FULL_RETRY_AFTER_SECS: u64 = 3600;
+
+/// How long a token check may take, the token exchange with Google
+/// included, before the watch is answered `503`. The exchange alone retries
+/// for longer than that, and a request left waiting holds one of the few
+/// connections the server accepts.
+const TOKEN_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// [`TokenChecker::check_token`], given up on after `timeout`.
+async fn check_within(
+    checker: &dyn TokenChecker,
+    token: &str,
+    timeout: Duration,
+) -> Result<(), PushError> {
+    tokio::time::timeout(timeout, checker.check_token(token))
+        .await
+        .unwrap_or_else(|_| {
+            Err(PushError::new(
+                PushErrorKind::Unavailable,
+                "token check timed out",
+            ))
+        })
+}
 
 fn succeeded() -> HttpResponse {
     HttpResponse::Ok().json(json!({"success": true}))
@@ -104,14 +129,26 @@ pub async fn watch_disputes(
             return rate_limited_response(WATCHERS_FULL_RETRY_AFTER_SECS);
         }
 
+        // Asked before the allowance below is spent: with FCM off no token
+        // can be checked, and that is not the caller's doing.
+        let Some(checker) = &state.token_checker else {
+            warn!("Watch of node={} refused: FCM is not available", log_node);
+            return refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Token could not be checked",
+            );
+        };
+
         // A valid token is cheap to come by, so the check below does not
         // stop one address from taking every place of a node by itself.
         // This does, and it also bounds how often an address makes the
-        // server ask FCM. Fail closed without the key, as the middleware.
+        // server ask FCM, an FCM that is not answering included: the
+        // allowance is spent before the question, whatever its answer.
+        // Fail closed without the key, as the middleware.
         let Some(ip) = client_ip_of(&http) else {
             return refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
         };
-        if let Err(not_until) = state.new_watch_limiter.check_key(&ip) {
+        if let Err(not_until) = state.new_watch_limiter.check_key(&new_watch_key(ip)) {
             let retry_after_secs = not_until
                 .wait_time_from(DefaultClock::default().now())
                 .as_secs()
@@ -121,14 +158,8 @@ pub async fn watch_disputes(
 
         // Without this check anyone could fill a node's list with invented
         // tokens and lock its solvers out.
-        let Some(checker) = &state.token_checker else {
-            warn!("Watch of node={} refused: FCM is not available", log_node);
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Token could not be checked",
-            );
-        };
-        if let Err(e) = checker.check_token(&req.token).await {
+        let checked = check_within(checker.as_ref(), &req.token, TOKEN_CHECK_TIMEOUT).await;
+        if let Err(e) = checked {
             return match e.kind {
                 PushErrorKind::Unregistered
                 | PushErrorKind::InvalidArgument
@@ -153,16 +184,18 @@ pub async fn watch_disputes(
         }
     }
 
-    if state
+    match state
         .watcher_store
         .watch(node, req.token.clone(), Platform::Android)
         .await
-        .is_err()
     {
+        Ok(()) => succeeded(),
         // The list filled up while the token was being checked.
-        return rate_limited_response(WATCHERS_FULL_RETRY_AFTER_SECS);
+        Err(WatchError::Full) => rate_limited_response(WATCHERS_FULL_RETRY_AFTER_SECS),
+        // Not written to disk, so not kept: success would be a lie the next
+        // restart exposes, as for an unwatch.
+        Err(WatchError::Persist(_)) => refused(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
-    succeeded()
 }
 
 pub async fn unwatch_disputes(
@@ -586,6 +619,73 @@ mod tests {
         assert_eq!(checker.calls(), 2);
     }
 
+    /// With FCM off no token can be checked, which is not the caller's
+    /// doing: it costs nothing of the allowance.
+    #[actix_web::test]
+    async fn a_watch_refused_for_lack_of_fcm_spends_no_allowance() {
+        let mut c = make_test_components_with_trusted_whitelist();
+        c.state.new_watch_limiter = Arc::new(governor::RateLimiter::keyed(
+            governor::Quota::per_hour(std::num::NonZeroU32::new(1).unwrap()),
+        ));
+        let app = atest::init_service(build_test_actix_app(c)).await;
+
+        for _ in 0..5 {
+            let (status, _, _) = send!(
+                app,
+                "/api/disputes/watch",
+                watch_body(TRUSTED_MOSTRO_PUBKEY, TOKEN)
+            );
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    /// An IPv6 subscriber holds a whole /64: its addresses share one
+    /// allowance.
+    #[actix_web::test]
+    async fn the_addresses_of_one_ipv6_network_share_an_allowance() {
+        let (mut c, _) = components(None);
+        c.state.new_watch_limiter = Arc::new(governor::RateLimiter::keyed(
+            governor::Quota::per_hour(std::num::NonZeroU32::new(1).unwrap()),
+        ));
+        let app = atest::init_service(build_test_actix_app(c)).await;
+        let watch_from = |ip: &'static str, token: &'static str| {
+            atest::TestRequest::post()
+                .uri("/api/disputes/watch")
+                .insert_header(("Fly-Client-IP", ip))
+                .set_json(watch_body(TRUSTED_MOSTRO_PUBKEY, token))
+                .to_request()
+        };
+
+        let resp = atest::call_service(&app, watch_from("2001:db8:1:2::1", TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = atest::call_service(&app, watch_from("2001:db8:1:2:aaaa::9", OTHER_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // The next /64 is another subscriber.
+        let resp = atest::call_service(&app, watch_from("2001:db8:1:3::1", OTHER_TOKEN)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A check that does not come back is given up on, as an FCM that could
+    /// not be asked.
+    #[tokio::test]
+    async fn a_token_check_that_hangs_is_given_up_on() {
+        struct Hanging;
+        #[async_trait::async_trait]
+        impl crate::push::TokenChecker for Hanging {
+            async fn check_token(&self, _device_token: &str) -> Result<(), crate::push::PushError> {
+                std::future::pending().await
+            }
+        }
+
+        let result =
+            super::check_within(&Hanging, TOKEN, std::time::Duration::from_millis(20)).await;
+        assert_eq!(result.unwrap_err().kind, PushErrorKind::Unavailable);
+
+        let checker = StubTokenChecker::new(None);
+        let result = super::check_within(&checker, TOKEN, std::time::Duration::from_secs(5)).await;
+        assert_eq!(result, Ok(()));
+    }
+
     #[actix_web::test]
     async fn an_unwatch_removes_the_watch_and_answers_the_same_without_one() {
         let (c, _) = components(None);
@@ -684,6 +784,27 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, r#"{"success":false,"message":"internal error"}"#);
         assert!(watchers.is_watching(TRUSTED_MOSTRO_PUBKEY, TOKEN).await);
+
+        // A watch the disk refuses is not acknowledged either.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_insert BEFORE INSERT ON watchers
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+            )
+            .unwrap();
+        let (status, _, body) = send!(
+            app,
+            "/api/disputes/watch",
+            watch_body(TRUSTED_MOSTRO_PUBKEY, OTHER_TOKEN)
+        );
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, r#"{"success":false,"message":"internal error"}"#);
+        assert!(
+            !watchers
+                .is_watching(TRUSTED_MOSTRO_PUBKEY, OTHER_TOKEN)
+                .await
+        );
 
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));

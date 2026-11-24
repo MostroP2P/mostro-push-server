@@ -74,7 +74,7 @@ pub struct AppState {
     pub trusted_whitelist_enabled: bool,
     /// Devices watching a node for new disputes.
     pub watcher_store: Arc<WatcherStore>,
-    /// Per-IP limit on *new* dispute watches (`NEW_WATCH_IP_PER_HOUR`).
+    /// Per-IP limit on *new* dispute watches (`NEW_WATCHES_PER_IP_PER_HOUR`).
     pub new_watch_limiter: Arc<PerIpLimiter>,
     /// Checks a token before `/api/disputes/watch` stores it. `None` when
     /// FCM is disabled or failed to start: a watch is then refused.
