@@ -9,6 +9,11 @@
 //!   sealed twice yields unrelated ciphertexts.
 //! - Associated data: the row's `trade_pubkey`, so a ciphertext copied onto
 //!   another row fails to open.
+//!
+//! A dispute watch (`watchers` table) is sealed the same way, with the node's
+//! pubkey as associated data. Its row is named by [`TokenCipher::watcher_row_id`],
+//! a keyed hash of the node and the token, so the rows of one device on two
+//! nodes cannot be told to be the same device.
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
@@ -24,6 +29,7 @@ const SECRET_LEN: usize = 32;
 const HKDF_SALT: &[u8] = b"mostro-push-token-store-v1";
 const HKDF_INFO_ENCRYPTION: &[u8] = b"device-token-encryption";
 const HKDF_INFO_FINGERPRINT: &[u8] = b"key-fingerprint";
+const HKDF_INFO_WATCHER_ROW_ID: &[u8] = b"watcher-row-id";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CipherError {
@@ -59,6 +65,7 @@ pub struct SealedToken {
 pub struct TokenCipher {
     cipher: ChaCha20Poly1305,
     fingerprint: [u8; 32],
+    watcher_row_key: [u8; 32],
 }
 
 impl TokenCipher {
@@ -77,12 +84,29 @@ impl TokenCipher {
         hk.expand(HKDF_INFO_FINGERPRINT, &mut fingerprint)
             .map_err(|_| CipherError::InvalidKey)?;
 
+        let mut watcher_row_key = [0u8; 32];
+        hk.expand(HKDF_INFO_WATCHER_ROW_ID, &mut watcher_row_key)
+            .map_err(|_| CipherError::InvalidKey)?;
+
         let cipher = ChaCha20Poly1305::new_from_slice(&encryption_key)
             .map_err(|_| CipherError::InvalidKey)?;
         Ok(Self {
             cipher,
             fingerprint,
+            watcher_row_key,
         })
+    }
+
+    /// Names the row of one device watching one node, without revealing the
+    /// token: a keyed hash, so only this key can tell that two rows are the
+    /// same device. The node pubkey has a fixed length, so the two parts
+    /// cannot run into each other.
+    pub fn watcher_row_id(&self, mostro_pubkey: &str, device_token: &str) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new_keyed(&self.watcher_row_key);
+        hasher.update(mostro_pubkey.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(device_token.as_bytes());
+        *hasher.finalize().as_bytes()
     }
 
     /// Identifies the key without revealing it. Stored next to the rows so a
@@ -223,6 +247,17 @@ mod tests {
             TokenCipher::from_hex(&"zz".repeat(32)).err(),
             Some(CipherError::InvalidKey)
         );
+    }
+
+    #[test]
+    fn a_watcher_row_id_is_stable_and_tied_to_node_token_and_key() {
+        let c = cipher(KEY);
+        let id = c.watcher_row_id(PUBKEY, TOKEN);
+        assert_eq!(id, cipher(KEY).watcher_row_id(PUBKEY, TOKEN));
+        assert_ne!(id, c.watcher_row_id(OTHER_PUBKEY, TOKEN));
+        assert_ne!(id, c.watcher_row_id(PUBKEY, "another-token"));
+        assert_ne!(id, cipher(OTHER_KEY).watcher_row_id(PUBKEY, TOKEN));
+        assert_ne!(id, c.fingerprint());
     }
 
     #[test]
