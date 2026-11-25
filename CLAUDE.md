@@ -42,13 +42,17 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 
    **Platform `web` (additive):** `/api/register` accepts `"platform": "web"` (FCM Web Push tokens from browsers). The invalid-platform `400` message is unchanged and still names only `android` and `ios`. `/api/status` appends `"web": n` after `ios` only while `n > 0`, so a store holding no web registrations, which is every state a pre-web server could reach, still serves the fixture body byte for byte.
 
-   **CORS (headers only):** `/api/register`, `/api/unregister` and `/api/notify` answer preflights from origins in `CORS_ALLOWED_ORIGINS` with `204` and add `Access-Control-Allow-Origin`, `Access-Control-Expose-Headers: Retry-After` and `Vary: Origin` to their responses. Bodies are untouched, and requests without an allowed `Origin` are answered exactly as before. `cors_mw` is hand-rolled on `middleware::from_fn` because `actix-cors` would be a new dependency (constraint 6).
+   **Newer endpoints:** `/api/disputes/watch` and `/api/disputes/unwatch` are outside the frozen set; their contract is in `docs/api.md`. They reuse `register_ip_rate_limit_mw`, `cors_mw` and the `429` / `500` bodies above, and must not change any of them. A new watch is admitted only after the per-IP limit on new watches (`NEW_WATCHES_PER_IP_PER_HOUR`, keyed by /64 for IPv6) and the FCM token check; do NOT drop either, or one address fills a node's list.
+
+   **CORS (headers only):** `/api/register`, `/api/unregister`, `/api/notify` and the two `/api/disputes` endpoints answer preflights from origins in `CORS_ALLOWED_ORIGINS` with `204` and add `Access-Control-Allow-Origin`, `Access-Control-Expose-Headers: Retry-After` and `Vary: Origin` to their responses. Bodies are untouched, and requests without an allowed `Origin` are answered exactly as before. `cors_mw` is hand-rolled on `middleware::from_fn` because `actix-cors` would be a new dependency (constraint 6).
 
 4. **Persisted registrations are minimal, encrypted and short-lived.** With `TOKEN_STORE_PATH` set, `src/store/sqlite.rs` mirrors the in-memory map to SQLite so registrations survive restarts; without it the store is in-memory only. The rules below are the privacy contract of that file:
    - Only live registrations are kept: rows expire with the TTL, are deleted on `unregister`, and are purged at startup. Deletion is real (`secure_delete = ON`, WAL truncated after each cleanup).
    - `trade_pubkey` is stored in the clear (it is public on the relays); the device token is sealed with ChaCha20-Poly1305 (`src/store/cipher.rs`) under a key derived from `TOKEN_STORE_KEY`, with a **random nonce per row** so rows of one device cannot be grouped, and `trade_pubkey` as associated data.
    - `TOKEN_STORE_KEY` never touches the disk or the logs (`config::Secret` redacts it in `Debug`). A changed key is detected through a stored fingerprint and wipes the rows instead of failing.
    - Reads (listener, `/api/notify`) are served from memory and never touch the disk.
+   - Dispute watches (`watchers` table, `src/store/watchers.rs`) follow the same rules: 30 days since the last watch, deleted on `/api/disputes/unwatch`, purged at startup. The node's pubkey is in the clear; the token is sealed with the node's pubkey as associated data. The row's key is a keyed hash of (node, token), so the rows of one device on two nodes cannot be grouped. Do NOT key the row by the token or by a plain hash of it, and do NOT store `watched_at` finer than the day nor give the table a rowid (it is `WITHOUT ROWID`): rows written in the same second, or numbered in the order they were written, group a device as surely as a shared id.
+   - The file has a schema version (`SCHEMA_VERSION` in `sqlite.rs`, now 2). A change to the tables bumps it and migrates in `open`; a binary refuses a newer file. A changed key wipes **both** tables in one transaction.
    - The Fly volume holding the file has scheduled snapshots disabled. UnifiedPush endpoints are the other on-disk state (atomic JSON write to `data/unifiedpush_endpoints.json`).
 
 5. **Logs never carry raw pubkeys.** Every log site that touches a `trade_pubkey` goes through `crate::utils::log_pubkey::log_pubkey(salt, pubkey)`. The salt is a 32-byte random value generated once per process and never persisted.
@@ -60,6 +64,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 - **Dispatch path is lock-free.** `PushDispatcher` (`src/push/dispatcher.rs`) owns an immutable `Arc<[Arc<dyn PushService>]>`. Do NOT add a `Mutex` around the dispatcher or its services slice.
 - **`/api/notify` spawn pile is capped at 50 permits.** This is intentionally distinct from `fly.toml`'s `hard_limit = 25` (inbound TCP connections vs in-flight outbound dispatch tasks).
 - **Listener dispatch is spawned, not awaited inline.** `EventHandler::handle` in `src/nostr/listener.rs` takes a permit from its own `Semaphore(50)` with `try_acquire_owned` (drops the push with a `warn!` when saturated; never `acquire().await`) and runs the push in a `tokio::spawn` task. Awaiting `dispatch` or a permit inside the notification loop would let one slow FCM/UnifiedPush call (UnifiedPush endpoints are registrant-chosen) stall events from every relay and overflow nostr-sdk's 4096-slot notification channel, which drops events without logging them.
+- **A dispute watch is stored, removed and checked in spawned tasks.** `watch_disputes` and `unwatch_disputes` in `src/api/disputes.rs` run the disk-then-memory change, and the FCM token check, in `tokio::spawn` and await the handle. Actix drops a handler when its caller hangs up; awaited inline, a write already on its way to SQLite would finish without the change to memory, and a token exchange with Google would be abandoned halfway.
 - **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so callers do not hold a guard across `await`. Mutations take the separate `write_order` mutex across the in-memory change and its SQLite write, so the database sees changes in memory order while readers never wait on the disk.
 - **Per-IP key fail-closed.** If `extract_client_ip` fails, the middleware returns `500`. Never share a global bucket — that defeats per-IP rate limiting.
 - **`NOTIFY_TRUST_PROXY_HEADERS` defaults to `false`.** Set it to `true` only when a trusted proxy (e.g. Fly.io edge) overwrites `Fly-Client-IP` / `X-Forwarded-For`. Otherwise an attacker rotates those headers per request and bypasses the per-IP limiter.
@@ -81,9 +86,10 @@ src/
 ├── config.rs            # Config::from_env (typed env-var loader)
 ├── trusted_pubkeys.rs   # Compile-time whitelist (include_str! the JSON below)
 ├── api/
-│   ├── cors.rs          # CORS middleware for /register, /unregister, /notify
+│   ├── cors.rs          # CORS middleware for /register, /unregister, /notify, /disputes/*
 │   ├── routes.rs        # /health, /info, /status, /register, /unregister + AppState
 │   ├── notify.rs        # /api/notify handler + request_id_mw
+│   ├── disputes.rs      # /api/disputes/watch and /unwatch handlers
 │   ├── rate_limit.rs    # per-IP / per-pubkey limiter middleware (governor)
 │   └── test_support.rs  # In-process test fixtures
 ├── nostr/listener.rs    # Kind-14 subscription from trusted Mostro nodes, per-trade push limit
@@ -95,6 +101,7 @@ src/
 │   └── unifiedpush.rs   # UnifiedPush backend, persistent endpoint store
 ├── store/
 │   ├── mod.rs           # TokenStore (in-memory map, TTL cleanup, MAX_TOKENS cap)
+│   ├── watchers.rs      # WatcherStore (node -> devices watching its disputes)
 │   ├── sqlite.rs        # Optional SQLite persistence (TOKEN_STORE_PATH)
 │   └── cipher.rs        # Device-token encryption at rest (TOKEN_STORE_KEY)
 ├── crypto/mod.rs        # Reserved (gated #[allow(dead_code)])

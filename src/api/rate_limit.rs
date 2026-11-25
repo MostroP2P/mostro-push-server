@@ -1,8 +1,9 @@
 use actix_web::{
     body::{BoxBody, MessageBody},
     dev::{ServiceRequest, ServiceResponse},
+    http::header::HeaderMap,
     middleware::Next,
-    web, Error, HttpResponse,
+    web, Error, HttpRequest, HttpResponse,
 };
 use governor::{
     clock::{Clock, DefaultClock},
@@ -10,7 +11,7 @@ use governor::{
 };
 use log::warn;
 use serde_json::json;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +51,32 @@ pub const IP_BURST: u32 = 30;
 pub const REGISTER_IP_RATE_PER_MIN: u32 = 120;
 pub const REGISTER_IP_BURST: u32 = 100;
 
+/// Default for `NEW_WATCHES_PER_IP_PER_HOUR`: new dispute watches one
+/// address may ask for per hour, on top of the register limiter. A watch
+/// that is renewed does not count.
+///
+/// A valid FCM token is cheap to come by, so the token check alone would let
+/// one address fill a node's watcher list within the register limiter's
+/// burst. A solver watches a handful of nodes from a handful of devices.
+pub const NEW_WATCHES_PER_IP_PER_HOUR_DEFAULT: u32 = 5;
+
+/// The key new watches are counted under: the address for IPv4, its /64 for
+/// IPv6. One IPv6 subscriber holds a whole /64, so counting each address
+/// apart would give it as many allowances as it cares to use.
+pub fn new_watch_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            // `::ffff:a.b.c.d` is an IPv4 client seen through a dual stack.
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let network = u128::from(v6) & !u128::from(u64::MAX);
+                IpAddr::V6(Ipv6Addr::from(network))
+            }
+        },
+    }
+}
+
 /// Cleanup interval default in seconds (D-16). Override via NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS.
 /// Defaults are duplicated in `Config::from_env` so this constant is currently
 /// unused at runtime; kept as the canonical reference for D-16.
@@ -88,15 +115,33 @@ pub fn rate_limited_response(retry_after_secs: u64) -> HttpResponse {
 /// short-circuits with 500 (fail-closed per D-11) so an attacker cannot
 /// bypass per-IP RL.
 fn extract_client_ip(req: &ServiceRequest, trust_proxy_headers: bool) -> Option<IpAddr> {
+    client_ip(req.headers(), req.peer_addr(), trust_proxy_headers)
+}
+
+/// [`extract_client_ip`] for a handler, which holds an `HttpRequest`: the
+/// same key the per-IP middleware used for this request.
+pub fn client_ip_of(req: &HttpRequest) -> Option<IpAddr> {
+    let trust_proxy_headers = req
+        .app_data::<web::Data<TrustProxyHeaders>>()
+        .map(|d| d.0)
+        .unwrap_or(false);
+    client_ip(req.headers(), req.peer_addr(), trust_proxy_headers)
+}
+
+fn client_ip(
+    headers: &HeaderMap,
+    peer_addr: Option<SocketAddr>,
+    trust_proxy_headers: bool,
+) -> Option<IpAddr> {
     if trust_proxy_headers {
-        if let Some(v) = req.headers().get("Fly-Client-IP") {
+        if let Some(v) = headers.get("Fly-Client-IP") {
             if let Ok(s) = v.to_str() {
                 if let Ok(ip) = IpAddr::from_str(s.trim()) {
                     return Some(ip);
                 }
             }
         }
-        if let Some(v) = req.headers().get("X-Forwarded-For") {
+        if let Some(v) = headers.get("X-Forwarded-For") {
             if let Ok(s) = v.to_str() {
                 // Rightmost segment per D-10 (Fly appends the real client IP last).
                 if let Some(last) = s.rsplit(',').next() {
@@ -107,7 +152,7 @@ fn extract_client_ip(req: &ServiceRequest, trust_proxy_headers: bool) -> Option<
             }
         }
     }
-    req.peer_addr().map(|sa| sa.ip())
+    peer_addr.map(|sa| sa.ip())
 }
 
 /// Per-IP middleware applied ONLY to the /api/notify resource (D-21).
@@ -293,6 +338,17 @@ mod tests {
     use std::time::Duration;
 
     /// LIMIT-06: above the cap, the callback fires with the actual length.
+    #[test]
+    fn new_watches_are_keyed_by_address_or_by_ipv6_network() {
+        let key = |ip: &str| new_watch_key(ip.parse().unwrap()).to_string();
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
+        assert_eq!(key("2001:db8:1:2::1"), "2001:db8:1:2::");
+        assert_ne!(key("2001:db8:1:3::1"), key("2001:db8:1:2::1"));
+        // An IPv4 client seen through a dual stack keeps its own key.
+        assert_eq!(key("::ffff:203.0.113.7"), "203.0.113.7");
+    }
+
     #[test]
     fn check_soft_cap_fires_above_cap() {
         let calls: Mutex<Vec<usize>> = Mutex::new(Vec::new());

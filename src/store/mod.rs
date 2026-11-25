@@ -9,6 +9,7 @@ use crate::utils::log_pubkey::log_pubkey;
 
 pub mod cipher;
 pub mod sqlite;
+pub mod watchers;
 
 use sqlite::{LoadReport, PersistError, SqliteStore};
 

@@ -297,6 +297,8 @@ mod tests {
                 path: None,
                 key: None,
                 max_tokens: 50_000,
+                max_watchers_per_node: 1_000,
+                max_watchers: 10_000,
             },
             notify_rate_limit: NotifyRateLimitConfig {
                 per_pubkey_per_min: 30,
@@ -307,6 +309,7 @@ mod tests {
             },
             trusted_whitelist_enabled: false,
             cors_allowed_origins: crate::api::cors::AllowedOrigins::List(Vec::new()),
+            new_watches_per_ip_per_hour: 5,
         }
     }
 

@@ -24,9 +24,10 @@ use api::rate_limit::{
 use api::routes::AppState;
 use config::Config;
 use nostr::NostrListener;
-use push::{FcmPush, PushDispatcher, PushService, UnifiedPushService};
+use push::{FcmPush, PushDispatcher, PushService, TokenChecker, UnifiedPushService};
 use store::cipher::TokenCipher;
 use store::sqlite::SqliteStore;
+use store::watchers::{self, WatcherStore};
 use store::TokenStore;
 
 #[actix_web::main]
@@ -53,10 +54,13 @@ async fn main() -> std::io::Result<()> {
     let notify_log_salt: Arc<[u8; 32]> = Arc::new(salt_bytes);
 
     // Initialize token store
-    let token_store = Arc::new(open_token_store(&config.store, notify_log_salt.clone()));
+    let (token_store, watcher_store) = open_stores(&config.store, notify_log_salt.clone());
+    let token_store = Arc::new(token_store);
+    let watcher_store = Arc::new(watcher_store);
 
-    // Start cleanup task
+    // Start cleanup tasks
     store::start_cleanup_task(token_store.clone(), config.store.cleanup_interval_hours);
+    watchers::start_cleanup_task(watcher_store.clone(), config.store.cleanup_interval_hours);
     info!(
         "Token store initialized (TTL: {}h, cleanup interval: {}h)",
         config.store.token_ttl_hours, config.store.cleanup_interval_hours
@@ -93,6 +97,9 @@ async fn main() -> std::io::Result<()> {
         log::error!("Failed to load UnifiedPush endpoints: {}", e);
     }
 
+    // Checks a token before a dispute watch is stored; only FCM can.
+    let mut token_checker: Option<Arc<dyn TokenChecker>> = None;
+
     // Initialize FCM service if enabled
     if config.push.fcm_enabled {
         info!("Initializing FCM push service");
@@ -103,6 +110,7 @@ async fn main() -> std::io::Result<()> {
             Ok(_) => {
                 info!("FCM service initialized successfully");
                 push_services.push((Arc::clone(&fcm_service) as Arc<dyn PushService>, "fcm"));
+                token_checker = Some(fcm_service as Arc<dyn TokenChecker>);
             }
             Err(e) => {
                 // error!, not warn!: the credential no longer ships inside the
@@ -171,6 +179,12 @@ async fn main() -> std::io::Result<()> {
         ),
     ));
 
+    let new_watch_limiter: Arc<PerIpLimiter> =
+        Arc::new(governor::RateLimiter::keyed(governor::Quota::per_hour(
+            std::num::NonZeroU32::new(config.new_watches_per_ip_per_hour)
+                .expect("validated > 0 in Config::from_env"),
+        )));
+
     // D-15 + LIMIT-05/06: cleanup task mirrors store::start_cleanup_task.
     // Run for all keyed limiters. Without per-IP cleanup, every distinct
     // client IP the server has ever seen sticks in keyed maps for the
@@ -195,6 +209,12 @@ async fn main() -> std::io::Result<()> {
         cleanup_soft_cap,
         "register-ip",
     );
+    api::rate_limit::start_keyed_limiter_cleanup_task(
+        new_watch_limiter.clone(),
+        cleanup_interval,
+        cleanup_soft_cap,
+        "new-watch-ip",
+    );
     info!(
         "Rate limiters initialized (notify per-pubkey {}/min burst {}; notify per-IP {}/min burst {}; register per-IP {}/min burst {}; cleanup {}s; soft cap {})",
         config.notify_rate_limit.per_pubkey_per_min,
@@ -218,6 +238,11 @@ async fn main() -> std::io::Result<()> {
         trusted_mostro_pubkeys.len(),
         config.trusted_whitelist_enabled
     );
+    // The list is embedded, so it only changes with a deploy: this is where
+    // the watches of a node that left it are noticed.
+    watcher_store
+        .forget_untrusted(&trusted_mostro_pubkeys)
+        .await;
 
     // Start Nostr listener in background
     let nostr_listener = NostrListener::new(
@@ -242,6 +267,9 @@ async fn main() -> std::io::Result<()> {
         per_pubkey_limiter: per_pubkey_limiter.clone(),
         trusted_mostro_pubkeys: trusted_mostro_pubkeys.clone(),
         trusted_whitelist_enabled: config.trusted_whitelist_enabled,
+        watcher_store: watcher_store.clone(),
+        new_watch_limiter,
+        token_checker,
     };
 
     // Start HTTP API server
@@ -254,6 +282,8 @@ async fn main() -> std::io::Result<()> {
     info!("  POST /api/register   - Register token (plaintext)");
     info!("  POST /api/unregister - Unregister token");
     info!("  POST /api/notify     - Trigger silent push (best-effort)");
+    info!("  POST /api/disputes/watch   - Watch a node for new disputes");
+    info!("  POST /api/disputes/unwatch - Stop watching a node");
 
     let trust_proxy_headers = TrustProxyHeaders(config.notify_rate_limit.trust_proxy_headers);
     info!(
@@ -284,16 +314,24 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
-/// Opens the persistent store when `TOKEN_STORE_PATH` is set. A configured
-/// store that cannot be opened stops the server: running from memory instead
-/// would silently lose every registration on the next restart.
-fn open_token_store(config: &config::StoreConfig, log_salt: Arc<[u8; 32]>) -> TokenStore {
+/// Opens the token store and the dispute watchers, both in the same database
+/// file when `TOKEN_STORE_PATH` is set. A configured store that cannot be
+/// opened stops the server: running from memory instead would silently lose
+/// every registration on the next restart.
+fn open_stores(
+    config: &config::StoreConfig,
+    log_salt: Arc<[u8; 32]>,
+) -> (TokenStore, WatcherStore) {
     let Some(path) = &config.path else {
         log::warn!(
-            "TOKEN_STORE_PATH not set: registrations are kept in memory only and lost on restart"
+            "TOKEN_STORE_PATH not set: registrations and dispute watches are kept in memory only and lost on restart"
         );
-        return TokenStore::new(config.token_ttl_hours, log_salt)
-            .with_max_tokens(config.max_tokens);
+        return (
+            TokenStore::new(config.token_ttl_hours, log_salt.clone())
+                .with_max_tokens(config.max_tokens),
+            WatcherStore::new(log_salt)
+                .with_caps(config.max_watchers_per_node, config.max_watchers),
+        );
     };
 
     let key = config
@@ -303,13 +341,30 @@ fn open_token_store(config: &config::StoreConfig, log_salt: Arc<[u8; 32]>) -> To
     let cipher = TokenCipher::from_hex(key.expose()).expect("Invalid TOKEN_STORE_KEY");
     let db = SqliteStore::open(path, cipher)
         .unwrap_or_else(|e| panic!("Failed to open token store {}: {}", path.display(), e));
-    let (store, report) = TokenStore::persistent(config.token_ttl_hours, log_salt, db)
-        .unwrap_or_else(|e| panic!("Failed to load token store {}: {}", path.display(), e));
+    let (store, report) =
+        TokenStore::persistent(config.token_ttl_hours, log_salt.clone(), db.clone())
+            .unwrap_or_else(|e| panic!("Failed to load token store {}: {}", path.display(), e));
     let store = store.with_max_tokens(config.max_tokens);
+    let (watcher_store, watcher_report) = WatcherStore::persistent(log_salt, db)
+        .unwrap_or_else(|e| panic!("Failed to load dispute watches {}: {}", path.display(), e));
+    let watcher_store = watcher_store.with_caps(config.max_watchers_per_node, config.max_watchers);
 
-    if report.key_changed {
-        log::warn!("TOKEN_STORE_KEY changed: discarded every persisted registration");
+    // Whichever load ran first found the change and wiped both tables.
+    if report.key_changed || watcher_report.key_changed {
+        log::warn!(
+            "TOKEN_STORE_KEY changed: discarded every persisted registration and dispute watch"
+        );
     }
+    if watcher_report.discarded > 0 {
+        log::warn!(
+            "Discarded {} unreadable persisted dispute watches",
+            watcher_report.discarded
+        );
+    }
+    info!(
+        "Dispute watches: {} restored, {} expired removed",
+        watcher_report.restored, watcher_report.expired
+    );
     if report.discarded > 0 {
         log::warn!(
             "Discarded {} unreadable persisted registrations",
@@ -322,5 +377,5 @@ fn open_token_store(config: &config::StoreConfig, log_salt: Arc<[u8; 32]>) -> To
         report.restored,
         report.expired
     );
-    store
+    (store, watcher_store)
 }

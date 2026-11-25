@@ -1,5 +1,6 @@
 //! CORS for the browser-facing endpoints (`/api/register`, `/api/unregister`,
-//! `/api/notify`), so a web client can register its FCM Web Push token.
+//! `/api/notify`, `/api/disputes/watch`, `/api/disputes/unwatch`), so a web
+//! client can register its FCM Web Push token.
 //!
 //! Hand-rolled rather than `actix-cors` because new crates need approval
 //! (hard constraint 6), and the surface is tiny: one method, one header, no
@@ -203,7 +204,13 @@ mod http_tests {
 
     const ALLOWED: &str = "https://mostro.network";
     const OTHER: &str = "https://evil.example";
-    const BROWSER_ENDPOINTS: [&str; 3] = ["/api/register", "/api/unregister", "/api/notify"];
+    const BROWSER_ENDPOINTS: [&str; 5] = [
+        "/api/register",
+        "/api/unregister",
+        "/api/notify",
+        "/api/disputes/watch",
+        "/api/disputes/unwatch",
+    ];
 
     fn preflight(uri: &str, origin: Option<&str>) -> TestRequest {
         let req = TestRequest::default()

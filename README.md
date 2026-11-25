@@ -88,6 +88,8 @@ curl http://localhost:8080/api/health
 | POST   | `/api/register`  | Register a device token for a `trade_pubkey`              |
 | POST   | `/api/unregister`| Remove a registered token                                 |
 | POST   | `/api/notify`    | Trigger a silent push to the device for a `trade_pubkey`  |
+| POST   | `/api/disputes/watch` | Watch a Mostro node for new disputes                 |
+| POST   | `/api/disputes/unwatch` | Stop watching a node                               |
 
 See [docs/api.md](docs/api.md) for full request and response shapes.
 

@@ -32,6 +32,9 @@ pub struct Config {
     /// `*` allows any origin; an empty value disables CORS. Defaults to
     /// [`DEFAULT_ALLOWED_ORIGINS`].
     pub cors_allowed_origins: AllowedOrigins,
+    /// `NEW_WATCHES_PER_IP_PER_HOUR`: new dispute watches accepted from one
+    /// IP address (one /64 for IPv6) per hour. Renewals do not count.
+    pub new_watches_per_ip_per_hour: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +102,10 @@ pub struct StoreConfig {
     pub key: Option<Secret>,
     /// `MAX_TOKENS`: registrations accepted for new trade pubkeys.
     pub max_tokens: usize,
+    /// `MAX_WATCHERS_PER_NODE`: devices that may watch one node's disputes.
+    pub max_watchers_per_node: usize,
+    /// `MAX_WATCHERS`: devices watching, across every node.
+    pub max_watchers: usize,
 }
 
 /// A configuration value that must never reach a log. `Config` derives
@@ -145,6 +152,33 @@ impl Config {
         };
         if max_tokens == 0 {
             return Err("MAX_TOKENS must be > 0, got 0".into());
+        }
+        let max_watchers_per_node: usize = match env::var("MAX_WATCHERS_PER_NODE") {
+            Ok(s) => s.parse()?,
+            Err(_) => crate::store::watchers::DEFAULT_MAX_WATCHERS_PER_NODE,
+        };
+        if max_watchers_per_node == 0 {
+            return Err("MAX_WATCHERS_PER_NODE must be > 0, got 0".into());
+        }
+        let max_watchers: usize = match env::var("MAX_WATCHERS") {
+            Ok(s) => s.parse()?,
+            Err(_) => crate::store::watchers::DEFAULT_MAX_WATCHERS,
+        };
+        if max_watchers == 0 {
+            return Err("MAX_WATCHERS must be > 0, got 0".into());
+        }
+        if max_watchers_per_node > max_watchers {
+            log::warn!(
+                "MAX_WATCHERS_PER_NODE ({}) is above MAX_WATCHERS ({}): one node can take every place",
+                max_watchers_per_node, max_watchers
+            );
+        }
+        let new_watches_per_ip_per_hour: u32 = match env::var("NEW_WATCHES_PER_IP_PER_HOUR") {
+            Ok(s) => s.parse()?,
+            Err(_) => crate::api::rate_limit::NEW_WATCHES_PER_IP_PER_HOUR_DEFAULT,
+        };
+        if new_watches_per_ip_per_hour == 0 {
+            return Err("NEW_WATCHES_PER_IP_PER_HOUR must be > 0, got 0".into());
         }
 
         Ok(Config {
@@ -199,6 +233,8 @@ impl Config {
                 path: token_store_path,
                 key: token_store_key,
                 max_tokens,
+                max_watchers_per_node,
+                max_watchers,
             },
             notify_rate_limit: NotifyRateLimitConfig {
                 per_pubkey_per_min: {
@@ -252,6 +288,7 @@ impl Config {
                 &env::var("CORS_ALLOWED_ORIGINS")
                     .unwrap_or_else(|_| DEFAULT_ALLOWED_ORIGINS.to_string()),
             ),
+            new_watches_per_ip_per_hour,
         })
     }
 }
@@ -482,5 +519,46 @@ mod tests {
         std::env::set_var("MAX_TOKENS", "0");
         let err = Config::from_env().expect_err("MAX_TOKENS=0 MUST be rejected");
         assert!(err.to_string().contains("MAX_TOKENS must be > 0"));
+    }
+
+    #[test]
+    fn watcher_caps_default_and_reject_zero() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _env = EnvGuard::new(&[
+            "MAX_WATCHERS_PER_NODE",
+            "MAX_WATCHERS",
+            "NEW_WATCHES_PER_IP_PER_HOUR",
+            "NOSTR_RELAYS",
+        ]);
+        std::env::set_var("NOSTR_RELAYS", "wss://relay.example.com");
+
+        std::env::remove_var("MAX_WATCHERS_PER_NODE");
+        std::env::remove_var("MAX_WATCHERS");
+        std::env::remove_var("NEW_WATCHES_PER_IP_PER_HOUR");
+        let config = Config::from_env().expect("Config::from_env MUST succeed on defaults");
+        assert_eq!(config.new_watches_per_ip_per_hour, 5);
+        assert_eq!(config.store.max_watchers_per_node, 1_000);
+        assert_eq!(config.store.max_watchers, 10_000);
+
+        std::env::set_var("MAX_WATCHERS_PER_NODE", "0");
+        let err = Config::from_env().expect_err("MAX_WATCHERS_PER_NODE=0 MUST be rejected");
+        assert!(err
+            .to_string()
+            .contains("MAX_WATCHERS_PER_NODE must be > 0"));
+        std::env::remove_var("MAX_WATCHERS_PER_NODE");
+
+        std::env::set_var("MAX_WATCHERS", "0");
+        let err = Config::from_env().expect_err("MAX_WATCHERS=0 MUST be rejected");
+        assert!(err.to_string().contains("MAX_WATCHERS must be > 0"));
+        std::env::remove_var("MAX_WATCHERS");
+
+        std::env::set_var("NEW_WATCHES_PER_IP_PER_HOUR", "20");
+        let config = Config::from_env().expect("an explicit allowance MUST be accepted");
+        assert_eq!(config.new_watches_per_ip_per_hour, 20);
+        std::env::set_var("NEW_WATCHES_PER_IP_PER_HOUR", "0");
+        let err = Config::from_env().expect_err("an allowance of 0 MUST be rejected");
+        assert!(err
+            .to_string()
+            .contains("NEW_WATCHES_PER_IP_PER_HOUR must be > 0"));
     }
 }

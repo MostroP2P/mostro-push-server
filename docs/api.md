@@ -1,6 +1,6 @@
 # API Reference
 
-All endpoints are mounted under `/api`. Bodies and responses are JSON unless noted otherwise. `/api/register`, `/api/unregister` and `/api/notify` can also be called from a browser; see [CORS](#cors-browser-clients).
+All endpoints are mounted under `/api`. Bodies and responses are JSON unless noted otherwise. `/api/register`, `/api/unregister`, `/api/notify` and the two `/api/disputes` endpoints can also be called from a browser; see [CORS](#cors-browser-clients).
 
 | Method | Path             | Purpose                                                |
 |--------|------------------|--------------------------------------------------------|
@@ -10,6 +10,8 @@ All endpoints are mounted under `/api`. Bodies and responses are JSON unless not
 | POST   | `/api/register`  | Register a device token for a `trade_pubkey`           |
 | POST   | `/api/unregister`| Remove a registered token                              |
 | POST   | `/api/notify`    | Trigger a silent push to the device for a `trade_pubkey` |
+| POST   | `/api/disputes/watch` | Watch a Mostro node for new disputes                |
+| POST   | `/api/disputes/unwatch` | Stop watching a node                              |
 
 ## GET /api/health
 
@@ -176,6 +178,53 @@ Request:
 
 With persistence enabled, the row is deleted from disk before memory. If that deletion fails, nothing is changed and the endpoint answers `500` with `{"success":false,"message":"internal error"}` rather than acknowledging an unregister that the next restart would undo. Retry once the store recovers.
 
+## POST /api/disputes/watch
+
+A device asks to be told when a Mostro node opens a dispute. The watch names a node, never a solver: no key of the caller is sent. The push itself is sent by the Nostr listener and carries no dispute, node or party.
+
+Request:
+
+```json
+{ "mostro_pubkey": "<64-char hex>", "token": "<FCM token>", "platform": "android" }
+```
+
+`200 OK`:
+
+```json
+{ "success": true }
+```
+
+Watching again renews the watch, which lasts 30 days since the day it was last asked for (so between 29 and 30 days: only the day is kept).
+
+- **Only `android`**, and only FCM tokens. A token that is an `http(s)` URL (a UnifiedPush endpoint) is refused.
+- **The node must be on the trusted list** (`config/trusted_mostro_pubkeys.json`), whatever `TRUSTED_WHITELIST_ENABLED` says: the listener only rings for those nodes.
+- **A new token is checked with FCM before it is stored** (`messages:send` with `validate_only`, which delivers nothing). A watch that is renewed is not checked again.
+- **New watches are limited per IP address**: 5 at once, then one more every 12 minutes (`NEW_WATCHES_PER_IP_PER_HOUR`, which is that burst and that refill: 9 fit in a first hour, 5 an hour after that), apart from the per-IP limit shared with `/api/register`. A valid FCM token is cheap to come by, so without this one address could take every place of a node. An IPv6 address is counted with its /64. A renewal does not count. A token FCM refuses does, and so does a check FCM did not answer (the `503` below): the allowance is what bounds how often an address makes the server ask FCM. A `503` because FCM is disabled costs nothing.
+- **The platform is not verified.** FCM accepts any token of the project in that check, so an iOS or web token sent as `android` is stored and takes a place, although the `dispute_new` notification is only defined for Android.
+
+| Status | Body `message` | When |
+|--------|----------------|------|
+| 400 | `Invalid mostro_pubkey format (expected 64 hex characters)` | |
+| 400 | `Token cannot be empty` / `Token exceeds maximum length` | Over 4096 bytes |
+| 400 | `Invalid platform (expected 'android')` | |
+| 400 | `Invalid token` | A URL, or a token FCM does not know for this server's Firebase project |
+| 403 | `Mostro instance not trusted` | |
+| 429 | `rate limited`, with `Retry-After` | A per-IP limit (requests, or new watches), or the node's watcher list (`MAX_WATCHERS_PER_NODE`) or the store (`MAX_WATCHERS`) is full. A device already on the list is still renewed. For a full list `Retry-After` is `3600`: how often to ask again, not when a place will be free |
+| 500 | `internal error` | With persistence enabled, the watch could not be written to disk. Nothing is stored |
+| 503 | `Token could not be checked` | FCM is disabled, unreachable, did not answer within 8 seconds, or answered something else. Nothing is stored; try again later, not at once |
+
+Error bodies are `{"success":false,"message":"…"}`.
+
+## POST /api/disputes/unwatch
+
+Removes a watch.
+
+```json
+{ "mostro_pubkey": "<64-char hex>", "token": "<FCM token>" }
+```
+
+`200 OK` with `{"success":true}` whether or not the watch existed. `400` for a malformed pubkey or token, as above. With persistence enabled the row is deleted from disk first; if that fails nothing is changed and the answer is `500` with `{"success":false,"message":"internal error"}`.
+
 ## POST /api/notify
 
 Sender-triggered silent push to the device registered for `trade_pubkey`. Used by the mobile client when peer-to-peer chat events are sent without a Mostro-daemon hop, so the recipient app needs an external wake-up signal.
@@ -234,12 +283,14 @@ curl -i -X POST http://localhost:8080/api/notify \
 
 | Status | Used by                                                                       |
 |--------|-------------------------------------------------------------------------------|
-| 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister` |
+| 200    | `/api/health`, `/api/info`, `/api/status`, `/api/register`, `/api/unregister`, `/api/disputes/watch`, `/api/disputes/unwatch` |
 | 202    | `/api/notify` on parse-valid input                                            |
-| 204    | CORS preflight (`OPTIONS`) from an allowed origin on `/api/register`, `/api/unregister`, `/api/notify` |
-| 400    | Malformed body, body over the size limit, invalid `trade_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint |
-| 429    | `/api/register`, `/api/unregister`, `/api/notify` rate limits; `/api/register` when the token store is full |
-| 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted; `/api/unregister` when the persisted row cannot be deleted |
+| 204    | CORS preflight (`OPTIONS`) from an allowed origin on `/api/register`, `/api/unregister`, `/api/notify`, `/api/disputes/watch`, `/api/disputes/unwatch` |
+| 400    | Malformed body, body over the size limit, invalid `trade_pubkey` or `mostro_pubkey`, invalid `platform`, empty or oversized `token`, rejected push endpoint, a token FCM does not know (`/api/disputes/watch`) |
+| 403    | `/api/register` with the whitelist on, and `/api/disputes/watch` always: node not on the trusted list |
+| 429    | `/api/register`, `/api/unregister`, `/api/notify`, `/api/disputes/*` rate limits; `/api/register` when the token store is full; `/api/disputes/watch` when a watcher list is full |
+| 500    | Rate-limited endpoints fail closed when the per-IP key cannot be extracted; `/api/unregister` and `/api/disputes/unwatch` when the persisted row cannot be deleted; `/api/disputes/watch` when it cannot be written |
+| 503    | `/api/disputes/watch` when the token could not be checked with FCM |
 
 ### Push endpoint validation
 
@@ -348,6 +399,7 @@ on unauthenticated endpoints is a free memory-amplification primitive.
 | `/api/register`   | 8 KiB    | Sized to fit a 4096-byte `token` plus the other fields        |
 | `/api/unregister` | 1 KiB    | Body carries a single 64-char hex pubkey                      |
 | `/api/notify`     | 1 KiB    | Body carries a single 64-char hex pubkey                      |
+| `/api/disputes/watch`, `/api/disputes/unwatch` | 8 KiB | As `/api/register`: a pubkey and a `token` of up to 4096 bytes |
 
 The `token` field of a registration is bounded separately at **4096 bytes**. The
 body cap stops an enormous request; the field cap stops a merely large one from
@@ -387,10 +439,18 @@ failure keeps its previous behaviour.
 
 ## Rate limiting
 
-`/api/register` and `/api/unregister` share a per-IP limit to protect the
-token store from registration churn (`MAX_TOKENS` bounds its total size):
+`/api/register`, `/api/unregister`, `/api/disputes/watch` and
+`/api/disputes/unwatch` share a per-IP limit to protect the stores from
+registration churn (`MAX_TOKENS`, `MAX_WATCHERS_PER_NODE` and `MAX_WATCHERS`
+bound their size). It also bounds how often one address can make the server
+ask FCM about a token:
 
 - Per-IP: `120/min`, burst `100`
+
+`/api/disputes/watch` has a second per-IP limit, on **new** watches only:
+a burst of `5`, refilled at `5/hour` (`NEW_WATCHES_PER_IP_PER_HOUR` sets both), keyed by the address for IPv4 and by
+its /64 for IPv6. Renewing a watch and `/api/disputes/unwatch` do not count
+against it.
 
 `/api/notify` has separate per-IP and per-`trade_pubkey` limits; both must allow the request to pass. Defaults:
 

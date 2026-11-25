@@ -109,7 +109,10 @@ no CORS headers and are answered exactly as before.
 | `TOKEN_TTL_HOURS`         | `48`    | Tokens older than this are evicted by the cleanup task                       |
 | `CLEANUP_INTERVAL_HOURS`  | `1`     | How often the cleanup task runs                                              |
 | `MAX_TOKENS`              | `50000` | Registrations accepted for new `trade_pubkey`s. When full, `/api/register` answers `429`; refreshing an existing registration always succeeds. Must be `> 0` |
-| `TOKEN_STORE_PATH`        | unset   | SQLite file persisting registrations across restarts (`/app/data/tokens.db` on Fly). Unset keeps them in memory only |
+| `MAX_WATCHERS_PER_NODE`   | `1000`  | Devices that may watch one node's disputes; it bounds the pushes one dispute sends. Far above the solvers a node has, so that the list is not easy to fill. When full, `/api/disputes/watch` answers `429` to a new device; a device already on the list is always renewed. Must be `> 0` |
+| `MAX_WATCHERS`            | `10000` | Devices watching, across every node. Same `429`. Must be `> 0`. A value below `MAX_WATCHERS_PER_NODE` is accepted with a warning: one node can then take every place |
+| `NEW_WATCHES_PER_IP_PER_HOUR` | `5` | New dispute watches accepted from one IP address (one /64 for IPv6): that many at once, refilled at that many per hour, so nearly twice as many fit in a first hour. Renewals do not count. Raise it if solvers share an address (an office, a VPN exit); the lower it is, the more addresses it takes to fill a node's list. Must be `> 0` |
+| `TOKEN_STORE_PATH`        | unset   | SQLite file persisting registrations and dispute watches across restarts (`/app/data/tokens.db` on Fly). Unset keeps them in memory only |
 | `TOKEN_STORE_KEY`         | unset   | 32-byte hex key sealing the persisted device tokens (`openssl rand -hex 32`). Required with `TOKEN_STORE_PATH`; the server refuses to start without a valid one. Never logged |
 
 ## HTTP rate limiters
@@ -174,6 +177,9 @@ FIREBASE_SERVICE_ACCOUNT_PATH=/app/secrets/firebase-service-account.json
 TOKEN_TTL_HOURS=48
 CLEANUP_INTERVAL_HOURS=1
 MAX_TOKENS=50000
+MAX_WATCHERS_PER_NODE=1000
+MAX_WATCHERS=10000
+NEW_WATCHES_PER_IP_PER_HOUR=5
 TOKEN_STORE_PATH=/app/data/tokens.db
 # TOKEN_STORE_KEY comes from a secret, never from a committed file
 
