@@ -554,18 +554,38 @@ impl PushService for FcmPush {
             .await
             .map_err(|e| unavailable(e.to_string()))?;
 
+        // One dispute goes to every device watching its node, up to a
+        // thousand: a line per device would bury the log. The listener
+        // writes one line per dispute, with the counts and the first failure.
+        let per_device = if kind == PushKind::DisputeNew {
+            log::Level::Debug
+        } else {
+            log::Level::Info
+        };
         let status = response.status();
         if status.is_success() {
-            info!("{} notification sent to {} device", label, platform);
+            log::log!(
+                per_device,
+                "{} notification sent to {} device",
+                label,
+                platform
+            );
             Ok(())
         } else {
             // A body that cannot be read leaves the HTTP status to sort
             // the error by, and to name it in the log.
             let error_text = response.text().await.unwrap_or_default();
-            error!(
-                "{} error for {} device: {} {}",
-                label, platform, status, error_text
-            );
+            if kind == PushKind::DisputeNew {
+                debug!(
+                    "{} error for {} device: {} {}",
+                    label, platform, status, error_text
+                );
+            } else {
+                error!(
+                    "{} error for {} device: {} {}",
+                    label, platform, status, error_text
+                );
+            }
             Err(PushError::new(
                 classify_fcm_error(status.as_u16(), &error_text),
                 format!("{} send failed: {} {}", label, status, error_text),

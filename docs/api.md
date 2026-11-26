@@ -227,7 +227,7 @@ The listener subscribes to `kind 38386` events with `s` = `initiated` authored b
 What a client can rely on, and what it cannot:
 
 - **It is a hint, not a list.** The push says a dispute was opened and nothing else; the client reads the node's disputes from the relays.
-- **A dispute may not ring.** It does not when the server was down or disconnected for more than 10 minutes around it, when the event did not reach the relays the server listens on, when the node spent its allowance, when more than ten disputes were being sent at once, or when FCM did not take the push: nothing is retried.
+- **A dispute may not ring.** It does not when the server was down or disconnected for more than 10 minutes around it, when the event did not reach the relays the server listens on, when the node spent its allowance, when ten other disputes were being sent and none ended within two minutes, or when FCM did not take the push: nothing is retried. The server reads each event once per connection to a relay, so a dispute it dropped comes again only after a reconnect: count on it not ringing.
 - **A dispute may ring twice.** What was seen is kept in memory only, so a dispute opened in the 10 minutes before a restart rings again after it.
 - **On a node with many watchers, some may not ring.** The pushes of one dispute go out 25 at a time and stop after 60 seconds; with hundreds of watchers and a slow FCM, the last ones are not sent.
 - **A dead token stops watching.** When FCM answers that it no longer knows a token (`UNREGISTERED`), its watch is removed. No other failure removes one. A client that gets a new FCM token watches again with it.

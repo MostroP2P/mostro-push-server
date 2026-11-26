@@ -34,7 +34,8 @@ are constants in `src/nostr/listener.rs`:
 | `DISPUTE_FRESHNESS` | 10 min | How far from now the event's `created_at` may be; also how far back the subscription asks on every reconnect |
 | `DISPUTE_MEMORY` | 30 min | How long a dispute that was seen is remembered, so it rings once |
 | `DISPUTE_PUSHES_PER_NODE_PER_MIN` | 5 | Dispute pushes per node: that many at once, one more every 12 seconds |
-| `MAX_IN_FLIGHT_FANOUTS` | 10 | Disputes being sent to their watchers at once: twice a node's burst, so disputes that arrive together are not dropped |
+| `MAX_IN_FLIGHT_FANOUTS` | 10 | Disputes being sent to their watchers at once; with the next constant, at most 250 requests open to FCM for disputes |
+| `FANOUT_MAX_WAIT` | 2 min | How long a dispute that finds those ten taken waits for its turn before it is given up |
 | `FANOUT_CONCURRENCY` | 25 | Pushes of one dispute in flight |
 | `FANOUT_DEADLINE` | 60 s | What the pushes of one dispute may take, all together |
 
