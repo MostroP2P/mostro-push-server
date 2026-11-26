@@ -138,8 +138,6 @@ impl WatcherStore {
     /// A watch past its lifetime is left out even while the cleanup has not
     /// removed it yet: the device stopped asking, so it is not rung. Memory
     /// only, and the lock is released before anything is sent.
-    // The listener calls it once it subscribes to dispute events.
-    #[allow(dead_code)]
     pub async fn watchers_of(&self, mostro_pubkey: &str) -> Vec<Watcher> {
         let cutoff = (Utc::now() - ttl()).timestamp();
         self.nodes
