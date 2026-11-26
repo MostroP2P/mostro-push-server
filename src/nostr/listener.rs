@@ -30,8 +30,9 @@ const MAX_IN_FLIGHT_DISPATCHES: usize = 50;
 const PUSHES_PER_TRADE_PER_MIN: u32 = 10;
 
 /// How far from now, either way, the `created_at` of a dispute event may be.
-/// Older, it is a replay: the subscription asks for the last ten minutes on
-/// every reconnect, and a relay may send more than it was asked for. The
+/// Older, it is a replay: the subscription asks for the last ten minutes
+/// every time the listener starts, and a relay may send more than it was
+/// asked for. The
 /// event's own `created_at` is read, not its `published_at` tag: it is when
 /// the node signed this `initiated` revision, and what a relay's `since`
 /// compares.
@@ -72,7 +73,7 @@ const FANOUT_CONCURRENCY: usize = 25;
 /// How long a dispute waits for a fan-out permit before it is given up. A
 /// dispute that finds every permit taken is not dropped: its task waits, so
 /// several nodes opening disputes together, or a relay sending the recent
-/// ones after a reconnect, lose none. The wait is bounded so that the tasks
+/// ones when the listener starts, lose none. The wait is bounded so that the tasks
 /// waiting are, and so that a dispute does not ring long after it opened.
 const FANOUT_MAX_WAIT: Duration = Duration::from_secs(120);
 
@@ -267,8 +268,10 @@ fn dispute_subscription_filter(
 /// allowance dropped is not, and one given up waiting for a fan-out permit
 /// is forgotten: remembered, the disputes a misbehaving node floods with
 /// would fill a memory every node shares, and a dispute nobody was told
-/// about could not ring if it came again (after a reconnect: an event is
-/// handed over once per connection).
+/// about could not ring if it came again. That is seldom: nostr-sdk hands
+/// an event over once per client, so not when a relay reconnects, only when
+/// the listener starts over with a new client (the subscription failed on
+/// every relay) or the node signs the dispute again as `initiated`.
 #[derive(Default)]
 struct SeenDisputes {
     seen: HashMap<(PublicKey, String), Instant>,
@@ -466,6 +469,15 @@ impl EventHandler {
             // removals, which are writes to disk, one per dead token.
             drop(permit);
             remove_dead_watches(&watcher_store, &node, dead, &mut outcome).await;
+            // Nobody was told, so it is not kept as told: it may ring if it
+            // comes again. A push the deadline cut may still have arrived,
+            // and that device would then be told twice.
+            if outcome.devices > 0 && outcome.delivered == 0 {
+                seen_disputes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .forget(event.pubkey, &dispute_id);
+            }
             info!(
                 "Dispute push for event {} node={}: {} devices, {} delivered, {} failed, {} removed, {} unfinished",
                 event.id,
@@ -521,8 +533,8 @@ impl EventHandler {
             );
             return None;
         }
-        // Asked before the allowance, so the events a relay sends again after
-        // a reconnect do not spend what a new dispute needs.
+        // Asked before the allowance, so the events a relay sends again when
+        // the listener starts over do not spend what a new dispute needs.
         if self
             .seen_disputes()
             .rang(event.pubkey, dispute_id, Instant::now())
@@ -571,7 +583,8 @@ struct FanoutOutcome {
     /// the token; no backend sends it to the device's platform; or the token
     /// is dead and its watch could not be removed.
     failed: usize,
-    /// Watches removed because the backend no longer knows their token.
+    /// Devices whose token the backend no longer knows, and whose watch is
+    /// gone: removed here, or by the device itself meanwhile.
     removed: usize,
     /// Unsent, or sent and still unanswered when the deadline passed (such a
     /// push may yet arrive); or every device, when the dispute got no permit.
@@ -670,9 +683,9 @@ async fn remove_dead_watches(
 ) {
     for device_token in dead {
         match watcher_store.unwatch(node, &device_token).await {
-            Ok(true) => outcome.removed += 1,
-            // It stopped watching by itself meanwhile.
-            Ok(false) => {}
+            // `false` when it stopped watching by itself meanwhile: the
+            // watch is gone either way, and every device is counted once.
+            Ok(_) => outcome.removed += 1,
             Err(e) => {
                 warn!("Could not remove the watch of a dead token: {}", e);
                 outcome.failed += 1;
@@ -1102,7 +1115,7 @@ mod tests {
         let event = new_dispute(&f.node, DISPUTE_ID);
 
         assert!(f.handler.admit_dispute(&event).await.is_some());
-        // The same event from another relay, or after a reconnect.
+        // The same event again, as when the listener starts over.
         assert_eq!(f.handler.admit_dispute(&event).await, None);
         // Another event of the same dispute, a minute later.
         let again = dispute_event(
@@ -1220,7 +1233,8 @@ mod tests {
     }
 
     /// A replay must find the dispute spent before it reaches the allowance:
-    /// after a reconnect a relay sends the recent ones again, all at once.
+    /// when the listener starts over a relay sends the recent ones again,
+    /// all at once.
     #[tokio::test]
     async fn a_dispute_that_already_rang_does_not_spend_the_allowance() {
         let f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
@@ -1588,6 +1602,71 @@ mod tests {
         }
     }
 
+    /// With the backend down nobody is told, so the dispute is not kept as
+    /// told: if it comes again, it rings.
+    #[tokio::test]
+    async fn a_dispute_no_device_received_is_forgotten() {
+        let f = dispute_fixture(ScriptedBackend::refusing(&[
+            (WATCHER_1, PushErrorKind::Unavailable),
+            (WATCHER_2, PushErrorKind::Unavailable),
+        ]));
+        f.watch(WATCHER_1).await;
+        f.watch(WATCHER_2).await;
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(outcome.delivered, 0);
+        assert!(!f
+            .handler
+            .seen_disputes()
+            .rang(f.node.public_key(), DISPUTE_ID, Instant::now()));
+        // It is admitted again, where a dispute that rang is not.
+        assert_eq!(f.ring(DISPUTE_ID).await.devices, 2);
+    }
+
+    /// One device told is enough to keep it as told.
+    #[tokio::test]
+    async fn a_dispute_one_device_received_stays_remembered() {
+        let f = dispute_fixture(ScriptedBackend::refusing(&[(
+            WATCHER_1,
+            PushErrorKind::Unavailable,
+        )]));
+        f.watch(WATCHER_1).await;
+        f.watch(WATCHER_2).await;
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!((outcome.delivered, outcome.failed), (1, 1));
+        assert!(f
+            .handler
+            .seen_disputes()
+            .rang(f.node.public_key(), DISPUTE_ID, Instant::now()));
+    }
+
+    /// The counts of a fan-out add up to its devices: a dead token whose
+    /// device stopped watching during the sends is counted with the removed.
+    #[tokio::test]
+    async fn a_dead_token_that_already_stopped_watching_counts_as_removed() {
+        let f = dispute_fixture(ScriptedBackend::default());
+        f.watch(WATCHER_1).await;
+        let node = f.node.public_key().to_hex();
+        let mut outcome = FanoutOutcome {
+            devices: 2,
+            ..FanoutOutcome::default()
+        };
+
+        remove_dead_watches(
+            &f.watchers,
+            &node,
+            vec![WATCHER_1.to_string(), "already-gone".to_string()],
+            &mut outcome,
+        )
+        .await;
+
+        assert_eq!(outcome.removed, 2);
+        assert!(!f.is_watching(WATCHER_1).await);
+    }
+
     #[tokio::test]
     async fn pushes_not_sent_by_the_deadline_are_left_unsent() {
         let mut f = dispute_fixture(ScriptedBackend {
@@ -1660,7 +1739,7 @@ mod tests {
     }
 
     /// Disputes that arrive together (several nodes at once, a relay sending
-    /// the recent ones after a reconnect) must all ring, however few permits
+    /// the recent ones when the listener starts) must all ring, however few permits
     /// there are.
     #[tokio::test]
     async fn a_dispute_that_finds_no_permit_waits_for_one() {
