@@ -40,10 +40,11 @@ The server observes the NIP-44 direct messages (`kind 14`, Mostro protocol v2) t
                                                        └──────────────────┘
 ```
 
-Two ingress paths feed the same dispatcher:
+Three ingress paths feed the same dispatcher:
 
 1. **Listener path** — the Nostr listener subscribes to `kind 14` (protocol v2 NIP-44 direct) authored by the trusted Mostro nodes in `config/trusted_mostro_pubkeys.json`, and dispatches when a `p` tag matches a registered `trade_pubkey`, at most 10 times per minute per `trade_pubkey`.
 2. **Sender-triggered path** — `POST /api/notify` lets a sender ask the server to wake the recipient when an event was sent peer-to-peer without going through the Mostro daemon (P2P and dispute chat).
+3. **Dispute path** — the listener also subscribes to the disputes those nodes open (`kind 38386` with `s` = `initiated`) and sends a visible push to every device that watches the node (`POST /api/disputes/watch`), once per dispute and at most 5 times per minute per node. The push names no dispute, node or party.
 
 ## Privacy properties
 
@@ -52,7 +53,7 @@ Two ingress paths feed the same dispatcher:
 - `/api/notify` always returns `202` on parse-valid input. Registered and unregistered pubkeys are indistinguishable in status, body, and headers; rate-limit responses are byte-identical between the per-IP and per-pubkey paths. The endpoint cannot be used as an enumeration oracle.
 - Inbound `X-Request-Id` on `/api/notify` is stripped; the server generates its own UUIDv4 per request.
 - All `trade_pubkey`s in logs go through a salted truncated BLAKE3 keyed hash (`log_pubkey`), with a per-process random salt that is never persisted.
-- The Nostr listener only accepts kind-14 events signed by a trusted Mostro node (signatures are verified), so nobody else can trigger a push by tagging a registered `trade_pubkey`. Chat envelopes are addressed to a conversation key, not a `trade_pubkey`, and go through `/api/notify`.
+- The Nostr listener only accepts kind-14 events signed by a trusted Mostro node (signatures are verified), so nobody else can trigger a push by tagging a registered `trade_pubkey`. Chat envelopes are addressed to a conversation key, not a `trade_pubkey`, and go through `/api/notify`. A dispute push needs the same: a kind-38386 event signed by a trusted node.
 
 What the server *does* see: a mapping of `trade_pubkey -> device_token` for live registrations, and timing of the trade updates Mostro nodes publish. It does not see message content, sender identity, or peer relationships.
 

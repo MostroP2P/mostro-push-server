@@ -12,7 +12,7 @@ cp .env.example .env
 
 | Variable        | Description                                                                                  |
 |-----------------|----------------------------------------------------------------------------------------------|
-| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kind 14 from the trusted Mostro nodes. |
+| `NOSTR_RELAYS`  | Comma-separated list of Nostr relay URLs. Used by `NostrListener` to subscribe to kind 14, and to new disputes (kind 38386), from the trusted Mostro nodes. |
 
 `NOSTR_RELAYS` is the only variable without a default; the server fails to boot if it is unset.
 
@@ -25,6 +25,19 @@ empty. Each registered `trade_pubkey` may trigger at most 10 pushes per
 minute; the limiter map is swept with `NOTIFY_RATE_LIMIT_CLEANUP_INTERVAL_SECS`
 and `NOTIFY_PUBKEY_LIMITER_SOFT_CAP`, like the `/api/notify` limiters.
 
+It also rings the devices watching a node when that node opens a dispute
+(`kind 38386`, `s` = `initiated`). None of this is configurable; the values
+are constants in `src/nostr/listener.rs`:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `DISPUTE_FRESHNESS` | 10 min | How far from now the event's `created_at` may be; also how far back the subscription asks on every reconnect |
+| `DISPUTE_MEMORY` | 30 min | How long a dispute that was seen is remembered, so it rings once |
+| `DISPUTE_PUSHES_PER_NODE_PER_MIN` | 5 | Dispute pushes per node: that many at once, one more every 12 seconds |
+| `MAX_IN_FLIGHT_FANOUTS` | 4 | Disputes being sent to their watchers at once |
+| `FANOUT_CONCURRENCY` | 25 | Pushes of one dispute in flight |
+| `FANOUT_DEADLINE` | 60 s | What the pushes of one dispute may take, all together |
+
 ## Trusted Mostro nodes
 
 The trusted Mostro node pubkeys are compiled into the binary from
@@ -34,6 +47,8 @@ other nodes the team trusts.
 
 - **Nostr listener (always on):** only these nodes' kind-14 events trigger a
   push. Users of a node missing from the list get no trade-update pushes.
+  The same goes for disputes: only these nodes' kind-38386 events ring the
+  devices watching them.
 - **`/api/register` (behind a flag):** activation is gated by a runtime flag,
   so the JSON can ship populated while the register filter stays inert.
 

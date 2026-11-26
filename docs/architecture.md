@@ -16,7 +16,7 @@ src/
 │   ├── rate_limit.rs       # Per-IP and per-pubkey limiter middleware (governor)
 │   └── test_support.rs     # In-process test fixtures (StubPushService, app factory)
 ├── nostr/
-│   └── listener.rs         # Kind-14 subscription from trusted Mostro nodes, per-trade push limit
+│   └── listener.rs         # Kind-14 and new-dispute (kind 38386) subscriptions from trusted Mostro nodes
 ├── push/
 │   ├── mod.rs              # PushService trait + Arc<T> blanket impls
 │   ├── dispatcher.rs       # PushDispatcher (lock-free Arc<[Arc<dyn PushService>]>)
@@ -44,6 +44,13 @@ Five always-on endpoints (`/api/health`, `/api/info`, `/api/status`, `/api/regis
 
 Connects to all configured relays, subscribes to `kind 14` (Mostro protocol v2 NIP-44 direct) events authored by the trusted Mostro nodes (`config/trusted_mostro_pubkeys.json`), and reconnects automatically on close (5 s) or error (10 s). It refuses to start with an empty trusted list. For each event it checks the author again (a relay may ignore the filter; nostr-sdk has already verified the signature), extracts the `p` tag and looks up the corresponding token in the store. A registered `trade_pubkey` may trigger at most 10 pushes per minute (`PUSHES_PER_TRADE_PER_MIN`, a keyed `governor` limiter swept by the same cleanup task as the `/api/notify` limiters); nodes are not limited as such, every trade has its own budget. On hit it calls `PushDispatcher::dispatch` in a spawned task, so a slow push backend never stalls events arriving from other relays. The listener caps in-flight dispatches at 50 with its own `Semaphore`, separate from the `/api/notify` one; when all permits are taken it drops the push with a `warn!` rather than waiting, because a blocked loop would let nostr-sdk's bounded notification channel overflow and silently discard events from every relay. Relays on which the subscription fails are logged at `warn!`; if it fails on every relay, the listener reconnects, because nostr-sdk never resends a subscription that failed.
 
+A second subscription, on the same connection and for the same authors, asks for `kind 38386` with `s` = `initiated`: the disputes those nodes open. Its `since` reaches 10 minutes back (kind 14's reaches one), so a dispute opened during a restart or a reconnect is not missed. A dispute event names no recipient; it goes to every device watching its node:
+
+- **Admission** (`EventHandler::admit_dispute`): the author again, the `s` tag again (a relay may ignore the filter), a `d` tag of at most 64 bytes, a `created_at` within 10 minutes of now either way (`DISPUTE_FRESHNESS`; the event's own date, not its `published_at` tag, since it is when the node signed this revision and what a relay's `since` compares), a (node, dispute id) not seen in the last 30 minutes (`DISPUTE_MEMORY`, in memory, 10 000 entries at most), and the node's allowance of 5 dispute pushes per minute. The memory lasts more than twice the freshness window, so no event is still fresh when its dispute is forgotten. A dispute is remembered before the limit is checked: one that was dropped must not ring later on a replay.
+- **Fan-out** (`ring_watchers`): `WatcherStore::watchers_of` copies the node's live watches out of memory, and one spawned task sends `PushKind::DisputeNew` to each, 25 at a time (`FANOUT_CONCURRENCY`), within 60 seconds in all (`FANOUT_DEADLINE`). The task holds one of 4 permits (`MAX_IN_FLIGHT_FANOUTS`) of a pool separate from the trade pushes': a busy minute of trades must not drop a dispute, which is every solver of a node rather than one trader. With every permit taken the dispute is dropped with a `warn!`, never waited for. Nothing is retried.
+- **Dead tokens:** a watch whose token the backend reports as `Unregistered` is removed, after the sends and outside their deadline, since a removal writes to disk. `SenderMismatch`, `InvalidArgument` and every other failure remove nothing: a wrong credential or a payload built wrong would read the same for every device, and removing on it would silently empty a node's list.
+- **Logs:** the hashed node, the event id, and how many devices were watching, delivered, failed, removed and left unfinished. No token.
+
 The listener uses `Client::new()` with no signer: it only subscribes and never publishes, so it holds no keys and nothing it sends identifies a user.
 
 ### Token store (`tokio::sync::RwLock<HashMap>`)
@@ -67,7 +74,7 @@ Maps a node's pubkey to the devices watching its disputes: `mostro_pubkey -> dev
 - **Admission:** `/api/disputes/watch` stores a new token only after FCM knew it (`TokenChecker`, `messages:send` with `validate_only`). Without that anyone could fill a node's list with invented tokens. A valid token is cheap to come by, though, so new watches are also limited per IP address, or per /64 for IPv6 (`NEW_WATCHES_PER_IP_PER_HOUR`, 5), and the check is given up on after 8 seconds; the two together raise the cost of filling a list, they do not make it impossible (see the limits in #53). FCM names `message.token` when the token is the malformed part; an `INVALID_ARGUMENT` that does not is a fault of the message this server built, and is answered `503`, not `400`.
 - **Persistence:** the `watchers` table of the same SQLite file (schema version 2), under the same `write_order` discipline. A watch is written to disk before memory, and one the disk refuses is answered `500`, not kept: it lasts 30 days, so a watch that a restart silently drops would leave a solver without notifications. A row keeps the node's pubkey in the clear (it is public) and the token sealed as in `tokens`, with the node's pubkey as associated data. Of when the device watched it keeps only the day: a device renewing several nodes at once would otherwise write rows that share a second, and so group themselves. The table is `WITHOUT ROWID` for the same reason: a rowid numbers rows in the order they were written. Its primary key is a BLAKE3 hash of (node, token) keyed from `TOKEN_STORE_KEY`, so the rows of one device on two nodes share nothing. A changed key wipes both tables in one transaction.
 
-Nothing reads the store to send a push yet: the listener's dispute subscription is a later change.
+The listener reads it with `watchers_of(node)` when that node opens a dispute, and removes a watch whose token FCM no longer knows. A watch past its lifetime is not rung even before the cleanup removes it.
 
 ### Push dispatcher
 
@@ -123,6 +130,37 @@ FcmPush.send  OR  UnifiedPushService.send
     │
     ▼
 device wake-up
+```
+
+### Dispute path (`kind 38386` from a trusted Mostro node)
+
+```
+Trusted Mostro node
+    │
+    │  publish kind 38386 (d = dispute id, s = initiated)
+    ▼
+Nostr relay
+    │
+    │  delivered to subscription (kind 38386, #s = initiated, authors = trusted nodes)
+    ▼
+NostrListener.connect_and_listen
+    │
+    │  check author, s and d; created_at within 10 min
+    │  first time for (node, dispute id) in 30 min
+    │  per-node limit (5/min; drop if exceeded)
+    │  WatcherStore.watchers_of(node)
+    │  try fan-out permit (4; drop if full), tokio::spawn
+    ▼
+ring_watchers: 25 at a time, 60 s in all
+    │
+    ▼
+PushDispatcher.dispatch(DisputeNew, token)   × every watcher
+    │
+    ▼
+FcmPush.send ── Unregistered ──▶ WatcherStore.unwatch(node, token)
+    │
+    ▼
+visible notification on each device
 ```
 
 ### Sender-triggered path (`POST /api/notify`)
@@ -188,7 +226,7 @@ The 50-permit semaphore is intentionally distinct from the `fly.toml` `hard_limi
 
 These are non-negotiable; reintroducing any of them is treated as a regression.
 
-1. The Nostr listener MUST only push for `kind 14` events authored by a trusted Mostro node: filtered with `.authors(...)` in the subscription and checked again per event. Otherwise anyone could trigger a visible push by tagging a registered (public) `trade_pubkey`. Chat envelopes are addressed to a conversation key and go through `/api/notify`.
+1. The Nostr listener MUST only push for `kind 14` events authored by a trusted Mostro node: filtered with `.authors(...)` in the subscription and checked again per event. Otherwise anyone could trigger a visible push by tagging a registered (public) `trade_pubkey`. Chat envelopes are addressed to a conversation key and go through `/api/notify`. The one other subscription is `kind 38386` with `s` = `initiated`, under the same author rule; its push goes to the devices watching the node and names no dispute, node or party.
 2. `/api/notify` always returns `202` on parse-valid input. It MUST NOT distinguish registered vs unregistered pubkeys in status code, body, headers, or timing.
 3. `/api/notify` MUST NOT accept a `sender_pubkey`, signature, `Authorization` header, or `Idempotency-Key`. Anything that would let the operator correlate sender and recipient is out of scope.
 4. Per-IP and per-pubkey 429 bodies MUST be byte-identical so a client cannot distinguish which limiter it tripped.

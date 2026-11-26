@@ -180,7 +180,7 @@ With persistence enabled, the row is deleted from disk before memory. If that de
 
 ## POST /api/disputes/watch
 
-A device asks to be told when a Mostro node opens a dispute. The watch names a node, never a solver: no key of the caller is sent. The push itself is sent by the Nostr listener and carries no dispute, node or party.
+A device asks to be told when a Mostro node opens a dispute. The watch names a node, never a solver: no key of the caller is sent. The push itself is sent by the Nostr listener and carries no dispute, node or party; see [When a dispute rings](#when-a-dispute-rings).
 
 Request:
 
@@ -214,6 +214,23 @@ Watching again renews the watch, which lasts 30 days since the day it was last a
 | 503 | `Token could not be checked` | FCM is disabled, unreachable, did not answer within 8 seconds, or answered something else. Nothing is stored; try again later, not at once |
 
 Error bodies are `{"success":false,"message":"…"}`.
+
+### When a dispute rings
+
+The listener subscribes to `kind 38386` events with `s` = `initiated` authored by the trusted nodes. Every device watching the node gets one `dispute_new` push when all of this holds:
+
+- The event is signed by a node on the trusted list and has a `d` tag (the dispute id) of at most 64 bytes.
+- Its `created_at` is within 10 minutes of the server's clock, either way. An older one is a relay sending the event again.
+- That dispute of that node was not seen in the last 30 minutes.
+- The node has not spent its allowance: 5 dispute pushes at once, refilled at one every 12 seconds.
+
+What a client can rely on, and what it cannot:
+
+- **It is a hint, not a list.** The push says a dispute was opened and nothing else; the client reads the node's disputes from the relays.
+- **A dispute may not ring.** It does not when the server was down or disconnected for more than 10 minutes around it, when the event did not reach the relays the server listens on, when the node spent its allowance, when more than four disputes were being sent at once, or when FCM did not take the push: nothing is retried.
+- **A dispute may ring twice.** What was seen is kept in memory only, so a dispute opened in the 10 minutes before a restart rings again after it.
+- **On a node with many watchers, some may not ring.** The pushes of one dispute go out 25 at a time and stop after 60 seconds; with hundreds of watchers and a slow FCM, the last ones are not sent.
+- **A dead token stops watching.** When FCM answers that it no longer knows a token (`UNREGISTERED`), its watch is removed. No other failure removes one. A client that gets a new FCM token watches again with it.
 
 ## POST /api/disputes/unwatch
 
