@@ -7,11 +7,12 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
 use crate::api::rate_limit::{start_keyed_limiter_cleanup_task, PerPubkeyLimiter};
 use crate::config::Config;
-use crate::push::{DispatchError, DispatchOutcome, PushDispatcher, PushKind};
+use crate::push::{DispatchError, DispatchOutcome, PushDispatcher, PushErrorKind, PushKind};
 use crate::store::watchers::{Watcher, WatcherStore};
 use crate::store::{RegisteredToken, TokenStore};
 use crate::utils::log_pubkey::log_pubkey;
@@ -52,6 +53,22 @@ const MAX_DISPUTE_ID_BYTES: usize = 64;
 /// would tell a solver nothing new; the limit stops a node that misbehaves
 /// from ringing its solvers without end.
 const DISPUTE_PUSHES_PER_NODE_PER_MIN: u32 = 5;
+
+/// Disputes being sent to their watchers at once. A pool of its own: taken
+/// from the trade pushes' permits, a busy minute of trades would drop a
+/// dispute, which is every solver of a node left unaware rather than one
+/// trader.
+const MAX_IN_FLIGHT_FANOUTS: usize = 4;
+
+/// Pushes one dispute keeps in flight. With [`MAX_IN_FLIGHT_FANOUTS`], at
+/// most a hundred requests to the push backend are open for disputes.
+const FANOUT_CONCURRENCY: usize = 25;
+
+/// How long the pushes of one dispute may take, all together. A node may
+/// have a thousand watchers; with the backend not answering, each push
+/// waits for its own timeout, and the fan-out would hold its permit for
+/// minutes. What was not sent by then is not sent.
+const FANOUT_DEADLINE: Duration = Duration::from_secs(60);
 
 pub struct NostrListener {
     config: Config,
@@ -275,6 +292,8 @@ struct EventHandler {
     /// bounded by the trusted list and needs no sweep.
     per_node_dispute_limiter: PerPubkeyLimiter,
     seen_disputes: Mutex<SeenDisputes>,
+    fanout_permits: Arc<Semaphore>,
+    fanout_deadline: Duration,
 }
 
 impl EventHandler {
@@ -300,6 +319,8 @@ impl EventHandler {
                 NonZeroU32::new(DISPUTE_PUSHES_PER_NODE_PER_MIN).expect("non-zero constant"),
             )),
             seen_disputes: Mutex::new(SeenDisputes::default()),
+            fanout_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_FANOUTS)),
+            fanout_deadline: FANOUT_DEADLINE,
         }
     }
 
@@ -366,16 +387,42 @@ impl EventHandler {
 }
 
 impl EventHandler {
-    async fn handle_dispute(&self, event: Event) {
-        let Some(watchers) = self.admit_dispute(&event).await else {
-            return;
+    /// Rings the devices watching the node for a dispute it just opened.
+    /// Returns the task doing it, which nothing but a test waits for.
+    async fn handle_dispute(&self, event: Event) -> Option<JoinHandle<FanoutOutcome>> {
+        let watchers = self.admit_dispute(&event).await?;
+        let node = event.pubkey.to_hex();
+        let log_node = log_pubkey(&self.log_salt, &node);
+
+        // In its own task and never awaited, as a trade push: the pushes of
+        // one dispute may take a minute. With every permit taken the dispute
+        // is dropped, and stays remembered, so a replay does not ring late.
+        let Ok(permit) = self.fanout_permits.clone().try_acquire_owned() else {
+            warn!(
+                "Dispute fan-out pool saturated, dropping event {} node={}",
+                event.id, log_node
+            );
+            return None;
         };
-        info!(
-            "New dispute in event {} node={}: {} devices to ring",
-            event.id,
-            log_pubkey(&self.log_salt, &event.pubkey.to_hex()),
-            watchers.len()
-        );
+        let dispatcher = self.dispatcher.clone();
+        let watcher_store = self.watcher_store.clone();
+        let deadline = self.fanout_deadline;
+        Some(tokio::spawn(async move {
+            let outcome =
+                ring_watchers(&dispatcher, &watcher_store, &node, watchers, deadline).await;
+            info!(
+                "Dispute push for event {} node={}: {} devices, {} delivered, {} failed, {} removed, {} unfinished",
+                event.id,
+                log_node,
+                outcome.devices,
+                outcome.delivered,
+                outcome.failed,
+                outcome.removed,
+                outcome.unfinished
+            );
+            drop(permit);
+            outcome
+        }))
     }
 
     /// The devices to ring for a dispute event, or `None` when it must not
@@ -440,6 +487,127 @@ impl EventHandler {
         }
         Some(watchers)
     }
+}
+
+/// What became of the pushes of one dispute.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FanoutOutcome {
+    /// The devices watching the node when the dispute arrived.
+    devices: usize,
+    delivered: usize,
+    /// The backend did not take the push, for a reason that does not condemn
+    /// the token; or the token is dead and its watch could not be removed.
+    failed: usize,
+    /// Watches removed because the backend no longer knows their token.
+    removed: usize,
+    /// Unsent, or sent and still unanswered when the deadline passed (such a
+    /// push may yet arrive); or every device, when no backend sends it.
+    unfinished: usize,
+}
+
+enum Ring {
+    Delivered,
+    /// The backend no longer knows the token.
+    Dead,
+    Failed,
+    NoBackend,
+}
+
+/// Sends the dispute push to `watchers`, a few at a time and within
+/// `deadline`, then removes the watches whose token the backend reported as
+/// unregistered.
+async fn ring_watchers(
+    dispatcher: &PushDispatcher,
+    watcher_store: &WatcherStore,
+    node: &str,
+    watchers: Vec<Watcher>,
+    deadline: Duration,
+) -> FanoutOutcome {
+    let devices = watchers.len();
+    let mut delivered = 0;
+    let mut failed = 0;
+    let mut dead: Vec<String> = Vec::new();
+    let mut no_backend = false;
+
+    let sends = async {
+        let mut results = futures::stream::iter(watchers)
+            .map(|watcher| ring(dispatcher, watcher))
+            .buffer_unordered(FANOUT_CONCURRENCY);
+        while let Some((device_token, result)) = results.next().await {
+            match result {
+                Ring::Delivered => delivered += 1,
+                Ring::Dead => dead.push(device_token),
+                Ring::Failed => failed += 1,
+                // It is the same for every device: stop asking.
+                Ring::NoBackend => {
+                    no_backend = true;
+                    break;
+                }
+            }
+        }
+    };
+    let timed_out = tokio::time::timeout(deadline, sends).await.is_err();
+    let unfinished = devices - delivered - failed - dead.len();
+    if no_backend {
+        error!("Dispute push dropped: no backend sends it to these devices");
+    } else if timed_out {
+        warn!(
+            "Dispute push stopped after {}s with {} devices unsent or unanswered",
+            deadline.as_secs(),
+            unfinished
+        );
+    }
+
+    // After the sends and outside their deadline: a removal is a write to
+    // disk, and must not be cut halfway.
+    let mut removed = 0;
+    for device_token in dead {
+        match watcher_store.unwatch(node, &device_token).await {
+            Ok(_) => removed += 1,
+            Err(e) => {
+                warn!("Could not remove the watch of a dead token: {}", e);
+                failed += 1;
+            }
+        }
+    }
+
+    FanoutOutcome {
+        devices,
+        delivered,
+        failed,
+        removed,
+        unfinished,
+    }
+}
+
+/// Sends the dispute push to one device, and gives its token back with what
+/// happened.
+async fn ring(dispatcher: &PushDispatcher, watcher: Watcher) -> (String, Ring) {
+    let token = RegisteredToken {
+        device_token: watcher.device_token,
+        platform: watcher.platform,
+        registered_at: watcher.watched_at,
+    };
+    let result = match dispatcher.dispatch(PushKind::DisputeNew, &token).await {
+        Ok(DispatchOutcome::Delivered { backend: _ }) => Ring::Delivered,
+        Err(DispatchError::NoBackendForPlatform) => Ring::NoBackend,
+        Err(DispatchError::AllBackendsFailed { errors }) => {
+            // Only "unregistered" says the token is gone for good. A token of
+            // another sender, or a request the backend calls malformed, may
+            // be this server's doing (a wrong credential, a payload it built
+            // wrong) and would then read the same for every device: removing
+            // on those would silently empty a node's list.
+            if errors.iter().any(|e| e.kind == PushErrorKind::Unregistered) {
+                Ring::Dead
+            } else {
+                for err in errors {
+                    debug!("Dispute push failed: {}", err);
+                }
+                Ring::Failed
+            }
+        }
+    };
+    (token.device_token, result)
 }
 
 /// Whether a dispute event was signed within [`DISPUTE_FRESHNESS`] of `now`.
@@ -992,6 +1160,405 @@ mod tests {
             Some(&["initiated".to_string()].into_iter().collect())
         );
         assert_eq!(filter.generic_tags.len(), 1);
+    }
+
+    /// Push backend that answers each device as it was told to, and keeps
+    /// what it was asked to send.
+    #[derive(Default)]
+    struct ScriptedBackend {
+        refuses: HashMap<String, PushErrorKind>,
+        /// Devices whose push never gets an answer.
+        hangs: HashSet<String>,
+        /// How long every other push takes.
+        takes: Duration,
+        no_dispute_pushes: bool,
+        sent: Mutex<Vec<(PushKind, String)>>,
+        in_flight: std::sync::atomic::AtomicUsize,
+        most_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedBackend {
+        fn refusing(refusals: &[(&str, PushErrorKind)]) -> Self {
+            Self {
+                refuses: refusals
+                    .iter()
+                    .map(|(token, kind)| (token.to_string(), *kind))
+                    .collect(),
+                ..Self::default()
+            }
+        }
+
+        fn hanging(devices: &[&str]) -> Self {
+            Self {
+                hangs: devices.iter().map(|d| d.to_string()).collect(),
+                ..Self::default()
+            }
+        }
+
+        fn sent(&self) -> Vec<(PushKind, String)> {
+            let mut sent = self.sent.lock().unwrap().clone();
+            sent.sort_by(|a, b| a.1.cmp(&b.1));
+            sent
+        }
+    }
+
+    #[async_trait]
+    impl PushService for ScriptedBackend {
+        async fn send(
+            &self,
+            kind: PushKind,
+            device_token: &str,
+            _platform: &Platform,
+        ) -> Result<(), PushError> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_in_flight.fetch_max(now, Ordering::SeqCst);
+            if self.hangs.contains(device_token) {
+                std::future::pending::<()>().await;
+            }
+            sleep(self.takes).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+            if let Some(kind) = self.refuses.get(device_token) {
+                return Err(PushError::new(*kind, "refused by the test backend"));
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((kind, device_token.to_string()));
+            Ok(())
+        }
+
+        fn supports(&self, kind: PushKind, _platform: &Platform) -> bool {
+            !(self.no_dispute_pushes && kind == PushKind::DisputeNew)
+        }
+    }
+
+    struct DisputeFixture {
+        handler: EventHandler,
+        backend: Arc<ScriptedBackend>,
+        watchers: Arc<WatcherStore>,
+        tokens: Arc<TokenStore>,
+        node: Keys,
+    }
+
+    fn dispute_fixture(backend: ScriptedBackend) -> DisputeFixture {
+        let salt = Arc::new([7u8; 32]);
+        let backend = Arc::new(backend);
+        let service: Arc<dyn PushService> = backend.clone();
+        let dispatcher = Arc::new(PushDispatcher::new(vec![(service, "scripted")]));
+        let tokens = Arc::new(TokenStore::new(24, salt.clone()));
+        let watchers = Arc::new(WatcherStore::new(salt.clone()));
+        let node = Keys::generate();
+        let handler = EventHandler::new(
+            dispatcher,
+            tokens.clone(),
+            watchers.clone(),
+            salt,
+            HashSet::from([node.public_key()]),
+            MAX_IN_FLIGHT_DISPATCHES,
+        );
+        DisputeFixture {
+            handler,
+            backend,
+            watchers,
+            tokens,
+            node,
+        }
+    }
+
+    impl DisputeFixture {
+        async fn watch(&self, device_token: &str) {
+            self.watchers
+                .watch(
+                    self.node.public_key().to_hex(),
+                    device_token.to_string(),
+                    Platform::Android,
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn is_watching(&self, device_token: &str) -> bool {
+            self.watchers
+                .is_watching(&self.node.public_key().to_hex(), device_token)
+                .await
+        }
+
+        /// Handles a new dispute of the node and waits for its pushes.
+        async fn ring(&self, dispute_id: &str) -> FanoutOutcome {
+            let fanout = self
+                .handler
+                .handle_dispute(new_dispute(&self.node, dispute_id))
+                .await
+                .expect("the dispute must be admitted");
+            tokio::time::timeout(DELIVERY_WAIT, fanout)
+                .await
+                .expect("the fan-out must end")
+                .unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_dispute_rings_every_device_watching_the_node() {
+        let f = dispute_fixture(ScriptedBackend::default());
+        f.watch(WATCHER_1).await;
+        f.watch(WATCHER_2).await;
+        // A device watching another node.
+        f.watchers
+            .watch(
+                Keys::generate().public_key().to_hex(),
+                "watcher-of-another-node".to_string(),
+                Platform::Android,
+            )
+            .await
+            .unwrap();
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(
+            outcome,
+            FanoutOutcome {
+                devices: 2,
+                delivered: 2,
+                ..FanoutOutcome::default()
+            }
+        );
+        assert_eq!(
+            f.backend.sent(),
+            [
+                (PushKind::DisputeNew, WATCHER_1.to_string()),
+                (PushKind::DisputeNew, WATCHER_2.to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispute_event_reaches_its_watchers_through_the_event_loop() {
+        let f = dispute_fixture(ScriptedBackend::default());
+        f.watch(WATCHER_1).await;
+
+        f.handler.handle(new_dispute(&f.node, DISPUTE_ID)).await;
+
+        tokio::time::timeout(DELIVERY_WAIT, async {
+            while f.backend.sent().is_empty() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the dispute push must be sent");
+        assert_eq!(
+            f.backend.sent(),
+            [(PushKind::DisputeNew, WATCHER_1.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_the_backend_no_longer_knows_stops_watching() {
+        let f = dispute_fixture(ScriptedBackend::refusing(&[(
+            WATCHER_1,
+            PushErrorKind::Unregistered,
+        )]));
+        f.watch(WATCHER_1).await;
+        f.watch(WATCHER_2).await;
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(
+            outcome,
+            FanoutOutcome {
+                devices: 2,
+                delivered: 1,
+                removed: 1,
+                ..FanoutOutcome::default()
+            }
+        );
+        assert!(!f.is_watching(WATCHER_1).await);
+        assert!(f.is_watching(WATCHER_2).await);
+
+        // The next dispute is for the one device left.
+        let outcome = f.ring(OTHER_DISPUTE_ID).await;
+        assert_eq!(outcome.devices, 1);
+    }
+
+    /// None of these says the token is gone: a wrong credential or a payload
+    /// this server built wrong reads the same for every device.
+    #[tokio::test]
+    async fn no_other_failure_removes_a_watch() {
+        let refusals = [
+            ("sender-mismatch", PushErrorKind::SenderMismatch),
+            ("invalid-argument", PushErrorKind::InvalidArgument),
+            ("unavailable", PushErrorKind::Unavailable),
+            ("other", PushErrorKind::Other),
+        ];
+        let f = dispute_fixture(ScriptedBackend::refusing(&refusals));
+        for (device_token, _) in refusals {
+            f.watch(device_token).await;
+        }
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(
+            outcome,
+            FanoutOutcome {
+                devices: 4,
+                failed: 4,
+                ..FanoutOutcome::default()
+            }
+        );
+        for (device_token, _) in refusals {
+            assert!(f.is_watching(device_token).await, "{device_token}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pushes_not_sent_by_the_deadline_are_left_unsent() {
+        let mut f = dispute_fixture(ScriptedBackend {
+            refuses: HashMap::from([("dead".to_string(), PushErrorKind::Unregistered)]),
+            hangs: HashSet::from(["hangs-1".to_string(), "hangs-2".to_string()]),
+            ..ScriptedBackend::default()
+        });
+        f.handler.fanout_deadline = BLOCKED_WAIT;
+        for device_token in ["hangs-1", "hangs-2", "dead", WATCHER_1] {
+            f.watch(device_token).await;
+        }
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        // What was answered before the deadline counts, a dead token's
+        // removal included.
+        assert_eq!(
+            outcome,
+            FanoutOutcome {
+                devices: 4,
+                delivered: 1,
+                removed: 1,
+                unfinished: 2,
+                ..FanoutOutcome::default()
+            }
+        );
+        assert!(!f.is_watching("dead").await);
+        assert!(f.is_watching("hangs-1").await);
+        // The fan-out ended, so its permit is back.
+        assert_eq!(
+            f.handler.fanout_permits.available_permits(),
+            MAX_IN_FLIGHT_FANOUTS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_dispute_push_delays_neither_the_loop_nor_a_trade_push() {
+        let f = dispute_fixture(ScriptedBackend::hanging(&[WATCHER_1]));
+        f.watch(WATCHER_1).await;
+        let trader = Keys::generate();
+        f.tokens
+            .register(
+                trader.public_key().to_hex(),
+                FAST_DEVICE.to_string(),
+                Platform::Android,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(DELIVERY_WAIT, async {
+            f.handler.handle(new_dispute(&f.node, DISPUTE_ID)).await;
+            f.handler
+                .handle(event(Kind::PrivateDirectMessage, &f.node, &trader))
+                .await;
+        })
+        .await
+        .expect("handle() must not wait for the pushes of a dispute");
+
+        tokio::time::timeout(DELIVERY_WAIT, async {
+            while f.backend.sent().is_empty() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the trade push must be sent while the dispute's hangs");
+        assert_eq!(
+            f.backend.sent(),
+            [(PushKind::TradeUpdate, FAST_DEVICE.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dispute_beyond_the_fanout_pool_is_dropped_for_good() {
+        let mut f = dispute_fixture(ScriptedBackend::hanging(&[WATCHER_1]));
+        f.handler.fanout_permits = Arc::new(Semaphore::new(1));
+        f.watch(WATCHER_1).await;
+        let first = f
+            .handler
+            .handle_dispute(new_dispute(&f.node, DISPUTE_ID))
+            .await;
+        assert!(first.is_some());
+
+        let second = tokio::time::timeout(
+            DELIVERY_WAIT,
+            f.handler
+                .handle_dispute(new_dispute(&f.node, OTHER_DISPUTE_ID)),
+        )
+        .await
+        .expect("a saturated pool must not block the notification loop");
+        assert!(second.is_none());
+
+        // Dropped, it must not ring late when a relay sends it again.
+        first.unwrap().abort();
+        tokio::time::timeout(DELIVERY_WAIT, async {
+            while f.handler.fanout_permits.available_permits() == 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the aborted fan-out must give its permit back");
+        let replay = f
+            .handler
+            .handle_dispute(new_dispute(&f.node, OTHER_DISPUTE_ID))
+            .await;
+        assert!(replay.is_none());
+    }
+
+    #[tokio::test]
+    async fn without_a_backend_for_disputes_nothing_is_sent_or_removed() {
+        let f = dispute_fixture(ScriptedBackend {
+            no_dispute_pushes: true,
+            ..ScriptedBackend::default()
+        });
+        f.watch(WATCHER_1).await;
+        f.watch(WATCHER_2).await;
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(
+            outcome,
+            FanoutOutcome {
+                devices: 2,
+                unfinished: 2,
+                ..FanoutOutcome::default()
+            }
+        );
+        assert!(f.backend.sent().is_empty());
+        assert!(f.is_watching(WATCHER_1).await);
+    }
+
+    #[tokio::test]
+    async fn the_pushes_of_a_dispute_are_sent_a_few_at_a_time() {
+        use std::sync::atomic::Ordering;
+        let f = dispute_fixture(ScriptedBackend {
+            takes: Duration::from_millis(20),
+            ..ScriptedBackend::default()
+        });
+        let devices = FANOUT_CONCURRENCY * 3;
+        for number in 0..devices {
+            f.watch(&format!("watcher-{number}")).await;
+        }
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(outcome.delivered, devices);
+        let most = f.backend.most_in_flight.load(Ordering::SeqCst);
+        assert!(most <= FANOUT_CONCURRENCY, "{most} pushes in flight");
+        assert!(most > 1, "the pushes must not be sent one by one");
     }
 
     #[tokio::test]

@@ -21,10 +21,8 @@ pub enum PushKind {
     /// `/api/notify`: a silent, data-only wake.
     ChatWake,
     /// A trusted Mostro node opened a dispute: a visible notification for
-    /// the devices watching that node. Android only, through FCM.
-    ///
-    /// Nothing dispatches it yet; its payload is what a token is checked
-    /// with before a dispute watch is stored.
+    /// the devices watching that node. Android only, through FCM. Its payload
+    /// is also what a token is checked with before a dispute watch is stored.
     DisputeNew,
 }
 
