@@ -2,6 +2,7 @@ use futures::StreamExt;
 use governor::{Quota, RateLimiter};
 use log::{debug, error, info, warn};
 use nostr_sdk::prelude::*;
+use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
@@ -254,24 +255,30 @@ fn dispute_subscription_filter(
         .since(since)
 }
 
-/// The disputes seen lately, by node and dispute id, so each rings once.
+/// The disputes that rang lately, by node and dispute id, so each rings once.
+///
+/// Only a dispute that is about to ring is remembered. One the node's
+/// allowance or a full fan-out pool dropped is not: remembered, the disputes
+/// a misbehaving node floods with would fill a memory every node shares, and
+/// a dispute nobody was told about could not ring when a relay sends it again.
 #[derive(Default)]
 struct SeenDisputes {
     seen: HashMap<(PublicKey, String), Instant>,
 }
 
 impl SeenDisputes {
-    /// Whether the dispute is new, remembering it from `now` if so. `false`
-    /// also when it cannot be remembered because the memory is full: a
+    /// Whether the dispute rang in the last [`DISPUTE_MEMORY`].
+    fn rang(&self, node: PublicKey, dispute_id: &str, now: Instant) -> bool {
+        self.seen
+            .get(&(node, dispute_id.to_string()))
+            .is_some_and(|seen_at| now.duration_since(*seen_at) < DISPUTE_MEMORY)
+    }
+
+    /// Remembers the dispute from `now`. `false` when the memory is full: a
     /// dispute that would ring again on every replay must not ring at all.
-    fn first_time(&mut self, node: PublicKey, dispute_id: &str, now: Instant) -> bool {
+    fn remember(&mut self, node: PublicKey, dispute_id: &str, now: Instant) -> bool {
         let key = (node, dispute_id.to_string());
-        if let Some(seen_at) = self.seen.get(&key) {
-            if now.duration_since(*seen_at) < DISPUTE_MEMORY {
-                return false;
-            }
-        }
-        if self.seen.len() >= MAX_REMEMBERED_DISPUTES {
+        if !self.seen.contains_key(&key) && self.seen.len() >= MAX_REMEMBERED_DISPUTES {
             self.seen
                 .retain(|_, seen_at| now.duration_since(*seen_at) < DISPUTE_MEMORY);
             if self.seen.len() >= MAX_REMEMBERED_DISPUTES {
@@ -280,6 +287,10 @@ impl SeenDisputes {
         }
         self.seen.insert(key, now);
         true
+    }
+
+    fn forget(&mut self, node: PublicKey, dispute_id: &str) {
+        self.seen.remove(&(node, dispute_id.to_string()));
     }
 }
 
@@ -401,20 +412,27 @@ impl EventHandler {
 
         // In its own task and never awaited, as a trade push: the pushes of
         // one dispute may take a minute. With every permit taken the dispute
-        // is dropped, and stays remembered, so a replay does not ring late.
+        // is dropped, and forgotten: nobody was told, so it may still ring if
+        // a relay sends it again while it is fresh.
         let Ok(permit) = self.fanout_permits.clone().try_acquire_owned() else {
             warn!(
                 "Dispute fan-out pool saturated, dropping event {} node={}",
                 event.id, log_node
             );
+            if let Some(dispute_id) = tag_value(&event, "d") {
+                self.seen_disputes().forget(event.pubkey, dispute_id);
+            }
             return None;
         };
         let dispatcher = self.dispatcher.clone();
         let watcher_store = self.watcher_store.clone();
         let deadline = self.fanout_deadline;
         Some(tokio::spawn(async move {
-            let outcome =
-                ring_watchers(&dispatcher, &watcher_store, &node, watchers, deadline).await;
+            let (mut outcome, dead) = ring_watchers(&dispatcher, watchers, deadline).await;
+            // The pushes are over: the next dispute need not wait for the
+            // removals, which are writes to disk, one per dead token.
+            drop(permit);
+            remove_dead_watches(&watcher_store, &node, dead, &mut outcome).await;
             info!(
                 "Dispute push for event {} node={}: {} devices, {} delivered, {} failed, {} removed, {} unfinished",
                 event.id,
@@ -425,14 +443,20 @@ impl EventHandler {
                 outcome.removed,
                 outcome.unfinished
             );
-            drop(permit);
             outcome
         }))
     }
 
+    fn seen_disputes(&self) -> std::sync::MutexGuard<'_, SeenDisputes> {
+        self.seen_disputes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The devices to ring for a dispute event, or `None` when it must not
-    /// ring: it is not a new dispute of a trusted node, it already rang, the
-    /// node spent its allowance, or nobody watches the node.
+    /// ring: it is not a new dispute of a trusted node, it already rang,
+    /// nobody watches the node, or the node spent its allowance. A dispute
+    /// that is returned is remembered as rung.
     async fn admit_dispute(&self, event: &Event) -> Option<Vec<Watcher>> {
         if !self.trusted_authors.contains(&event.pubkey) {
             debug!(
@@ -464,18 +488,21 @@ impl EventHandler {
             );
             return None;
         }
-        // Remembered before the limit below: a dispute that was dropped must
-        // not ring later, out of nowhere, when a relay sends it again.
-        let first_time = self
-            .seen_disputes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .first_time(event.pubkey, dispute_id, Instant::now());
-        if !first_time {
+        // Asked before the allowance, so the events a relay sends again after
+        // a reconnect do not spend what a new dispute needs.
+        if self
+            .seen_disputes()
+            .rang(event.pubkey, dispute_id, Instant::now())
+        {
             debug!(
-                "Dispute of event {} node={} already seen",
+                "Dispute of event {} node={} already rang",
                 event.id, log_node
             );
+            return None;
+        }
+        let watchers = self.watcher_store.watchers_of(&node).await;
+        if watchers.is_empty() {
+            debug!("Nobody watches node={} for disputes", log_node);
             return None;
         }
         if self.per_node_dispute_limiter.check_key(&node).is_err() {
@@ -485,9 +512,16 @@ impl EventHandler {
             );
             return None;
         }
-        let watchers = self.watcher_store.watchers_of(&node).await;
-        if watchers.is_empty() {
-            debug!("Nobody watches node={} for disputes", log_node);
+        // Only now: what the allowance dropped is not remembered, so one node
+        // adds at most what it may ring, and cannot fill the memory.
+        if !self
+            .seen_disputes()
+            .remember(event.pubkey, dispute_id, Instant::now())
+        {
+            warn!(
+                "Too many disputes remembered, dropping event {} node={}",
+                event.id, log_node
+            );
             return None;
         }
         Some(watchers)
@@ -519,15 +553,19 @@ enum Ring {
 }
 
 /// Sends the dispute push to `watchers`, a few at a time and within
-/// `deadline`, then removes the watches whose token the backend reported as
-/// unregistered.
+/// `deadline`. Returns what happened and the tokens the backend reported as
+/// unregistered, whose watches [`remove_dead_watches`] removes.
 async fn ring_watchers(
     dispatcher: &PushDispatcher,
-    watcher_store: &WatcherStore,
-    node: &str,
-    watchers: Vec<Watcher>,
+    mut watchers: Vec<Watcher>,
     deadline: Duration,
-) -> FanoutOutcome {
+) -> (FanoutOutcome, Vec<String>) {
+    // In another order every time. The store hands them out in the order of
+    // its map, which does not change while the map does not: with a slow
+    // backend and many watchers, the deadline would otherwise leave the same
+    // devices unsent at every dispute.
+    watchers.shuffle(&mut rand::thread_rng());
+
     let devices = watchers.len();
     let mut delivered = 0;
     let mut failed = 0;
@@ -563,25 +601,33 @@ async fn ring_watchers(
         );
     }
 
-    // After the sends and outside their deadline: a removal is a write to
-    // disk, and must not be cut halfway.
-    let mut removed = 0;
-    for device_token in dead {
-        match watcher_store.unwatch(node, &device_token).await {
-            Ok(_) => removed += 1,
-            Err(e) => {
-                warn!("Could not remove the watch of a dead token: {}", e);
-                failed += 1;
-            }
-        }
-    }
-
-    FanoutOutcome {
+    let outcome = FanoutOutcome {
         devices,
         delivered,
         failed,
-        removed,
+        removed: 0,
         unfinished,
+    };
+    (outcome, dead)
+}
+
+/// Removes the watches of the tokens a fan-out found dead. After the sends
+/// and outside their deadline: a removal is a write to disk, and must not be
+/// cut halfway.
+async fn remove_dead_watches(
+    watcher_store: &WatcherStore,
+    node: &str,
+    dead: Vec<String>,
+    outcome: &mut FanoutOutcome,
+) {
+    for device_token in dead {
+        match watcher_store.unwatch(node, &device_token).await {
+            Ok(_) => outcome.removed += 1,
+            Err(e) => {
+                warn!("Could not remove the watch of a dead token: {}", e);
+                outcome.failed += 1;
+            }
+        }
     }
 }
 
@@ -1081,8 +1127,10 @@ mod tests {
         assert!(admitted.is_some());
     }
 
+    /// Nobody was told about it, so it is not remembered as rung: when a
+    /// relay sends it again and the node has allowance, it rings.
     #[tokio::test]
-    async fn a_dispute_dropped_by_the_limit_does_not_ring_later() {
+    async fn a_dispute_dropped_by_the_limit_is_not_remembered() {
         let f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
         f.watch(&f.node, WATCHER_1).await;
         for number in 0..DISPUTE_PUSHES_PER_NODE_PER_MIN {
@@ -1093,40 +1141,108 @@ mod tests {
         let dropped = new_dispute(&f.node, DISPUTE_ID);
         assert_eq!(f.handler.admit_dispute(&dropped).await, None);
 
-        // It is remembered as seen, so a replay finds it spent.
-        let mut seen = f.handler.seen_disputes.lock().unwrap();
-        assert!(!seen.first_time(f.node.public_key(), DISPUTE_ID, Instant::now()));
+        let seen = f.handler.seen_disputes();
+        assert!(!seen.rang(f.node.public_key(), DISPUTE_ID, Instant::now()));
+    }
+
+    /// The memory is shared by every node. A node that floods must add to it
+    /// no more than it may ring, or it would silence the others.
+    #[tokio::test]
+    async fn a_flood_of_disputes_from_one_node_does_not_fill_the_memory() {
+        let mut f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+        let other_node = f.trust_another_node();
+        f.watch(&f.node, WATCHER_1).await;
+        f.watch(&other_node, WATCHER_2).await;
+
+        for number in 0..200 {
+            f.handler
+                .admit_dispute(&numbered_dispute(&f.node, number))
+                .await;
+        }
+
+        assert_eq!(
+            f.handler.seen_disputes().seen.len(),
+            DISPUTE_PUSHES_PER_NODE_PER_MIN as usize
+        );
+        let admitted = f
+            .handler
+            .admit_dispute(&new_dispute(&other_node, DISPUTE_ID))
+            .await;
+        assert!(admitted.is_some());
+    }
+
+    /// A replay must find the dispute spent before it reaches the allowance:
+    /// after a reconnect a relay sends the recent ones again, all at once.
+    #[tokio::test]
+    async fn a_dispute_that_already_rang_does_not_spend_the_allowance() {
+        let f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+        f.watch(&f.node, WATCHER_1).await;
+        let rung = new_dispute(&f.node, DISPUTE_ID);
+        assert!(f.handler.admit_dispute(&rung).await.is_some());
+
+        for _ in 0..DISPUTE_PUSHES_PER_NODE_PER_MIN * 2 {
+            assert_eq!(f.handler.admit_dispute(&rung).await, None);
+        }
+
+        // One push was spent, so the rest of the burst is still there.
+        for number in 1..DISPUTE_PUSHES_PER_NODE_PER_MIN {
+            let event = numbered_dispute(&f.node, number);
+            assert!(f.handler.admit_dispute(&event).await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dispute_nobody_watches_spends_and_remembers_nothing() {
+        let f = fixture(MAX_IN_FLIGHT_DISPATCHES).await;
+        for number in 0..DISPUTE_PUSHES_PER_NODE_PER_MIN * 2 {
+            let event = numbered_dispute(&f.node, number);
+            assert_eq!(f.handler.admit_dispute(&event).await, None);
+        }
+        assert!(f.handler.seen_disputes().seen.is_empty());
+
+        // A device starts watching: the node's allowance is whole.
+        f.watch(&f.node, WATCHER_1).await;
+        for number in 0..DISPUTE_PUSHES_PER_NODE_PER_MIN {
+            let event = numbered_dispute(&f.node, 100 + number);
+            assert!(f.handler.admit_dispute(&event).await.is_some());
+        }
     }
 
     #[test]
-    fn a_seen_dispute_is_forgotten_after_a_while() {
+    fn a_dispute_that_rang_is_forgotten_after_a_while() {
         let node = Keys::generate().public_key();
         let mut seen = SeenDisputes::default();
         let start = Instant::now();
+        assert!(!seen.rang(node, DISPUTE_ID, start));
 
-        assert!(seen.first_time(node, DISPUTE_ID, start));
+        assert!(seen.remember(node, DISPUTE_ID, start));
         let just_before = start + DISPUTE_MEMORY - Duration::from_secs(1);
-        assert!(!seen.first_time(node, DISPUTE_ID, just_before));
-        assert!(seen.first_time(node, DISPUTE_ID, start + DISPUTE_MEMORY));
+        assert!(seen.rang(node, DISPUTE_ID, just_before));
+        assert!(!seen.rang(node, DISPUTE_ID, start + DISPUTE_MEMORY));
+
+        seen.remember(node, DISPUTE_ID, start);
+        seen.forget(node, DISPUTE_ID);
+        assert!(!seen.rang(node, DISPUTE_ID, start));
     }
 
     #[test]
-    fn a_full_memory_of_disputes_admits_no_new_one_until_some_are_forgotten() {
+    fn a_full_memory_of_disputes_takes_no_new_one_until_some_are_forgotten() {
         let node = Keys::generate().public_key();
         let mut seen = SeenDisputes::default();
         let start = Instant::now();
         for number in 0..MAX_REMEMBERED_DISPUTES {
-            assert!(seen.first_time(node, &format!("dispute-{number}"), start));
+            assert!(seen.remember(node, &format!("dispute-{number}"), start));
         }
 
         let soon = start + Duration::from_secs(60);
-        assert!(!seen.first_time(node, DISPUTE_ID, soon));
-        // Refused, it was not remembered either.
+        assert!(!seen.remember(node, DISPUTE_ID, soon));
         assert_eq!(seen.seen.len(), MAX_REMEMBERED_DISPUTES);
+        // One it already holds is renewed, full or not.
+        assert!(seen.remember(node, "dispute-0", soon));
 
         let later = start + DISPUTE_MEMORY;
-        assert!(seen.first_time(node, DISPUTE_ID, later));
-        assert_eq!(seen.seen.len(), 1);
+        assert!(seen.remember(node, DISPUTE_ID, later));
+        assert_eq!(seen.seen.len(), 2);
     }
 
     #[test]
@@ -1178,6 +1294,8 @@ mod tests {
         takes: Duration,
         no_dispute_pushes: bool,
         sent: Mutex<Vec<(PushKind, String)>>,
+        /// Every device a push was asked for, in the order it was asked.
+        asked: Mutex<Vec<String>>,
         in_flight: std::sync::atomic::AtomicUsize,
         most_in_flight: std::sync::atomic::AtomicUsize,
     }
@@ -1216,6 +1334,7 @@ mod tests {
             _platform: &Platform,
         ) -> Result<(), PushError> {
             use std::sync::atomic::Ordering;
+            self.asked.lock().unwrap().push(device_token.to_string());
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.most_in_flight.fetch_max(now, Ordering::SeqCst);
             if self.hangs.contains(device_token) {
@@ -1488,7 +1607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dispute_beyond_the_fanout_pool_is_dropped_for_good() {
+    async fn a_dispute_beyond_the_fanout_pool_is_dropped_and_not_remembered() {
         let mut f = dispute_fixture(ScriptedBackend::hanging(&[WATCHER_1]));
         f.handler.fanout_permits = Arc::new(Semaphore::new(1));
         f.watch(WATCHER_1).await;
@@ -1507,7 +1626,8 @@ mod tests {
         .expect("a saturated pool must not block the notification loop");
         assert!(second.is_none());
 
-        // Dropped, it must not ring late when a relay sends it again.
+        // Nobody was told about it: sent again by a relay once a permit is
+        // free, it rings.
         first.unwrap().abort();
         tokio::time::timeout(DELIVERY_WAIT, async {
             while f.handler.fanout_permits.available_permits() == 0 {
@@ -1520,7 +1640,7 @@ mod tests {
             .handler
             .handle_dispute(new_dispute(&f.node, OTHER_DISPUTE_ID))
             .await;
-        assert!(replay.is_none());
+        assert!(replay.is_some());
     }
 
     /// The allowance of a node and the pool must agree: a dispute the first
@@ -1538,6 +1658,32 @@ mod tests {
                 .await;
             assert!(fanout.is_some(), "dispute {number} was dropped");
         }
+    }
+
+    /// With a slow backend the deadline leaves the last devices unsent. In
+    /// the order of the store's map, which does not change between disputes,
+    /// they would be the same devices every time.
+    #[tokio::test]
+    async fn the_watchers_of_a_node_are_rung_in_another_order_each_time() {
+        let f = dispute_fixture(ScriptedBackend::default());
+        let devices = 40;
+        for number in 0..devices {
+            f.watch(&format!("watcher-{number:02}")).await;
+        }
+
+        f.ring(DISPUTE_ID).await;
+        let first: Vec<String> = std::mem::take(&mut *f.backend.asked.lock().unwrap());
+        f.ring(OTHER_DISPUTE_ID).await;
+        let second: Vec<String> = f.backend.asked.lock().unwrap().clone();
+
+        assert_ne!(first, second, "the same order twice");
+        let sorted = |mut tokens: Vec<String>| {
+            tokens.sort();
+            tokens
+        };
+        let (first, second) = (sorted(first), sorted(second));
+        assert_eq!(first.len(), devices);
+        assert_eq!(first, second, "every device both times");
     }
 
     #[tokio::test]

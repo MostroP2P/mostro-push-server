@@ -221,7 +221,7 @@ The listener subscribes to `kind 38386` events with `s` = `initiated` authored b
 
 - The event is signed by a node on the trusted list and has a `d` tag (the dispute id) of at most 64 bytes.
 - Its `created_at` is within 10 minutes of the server's clock, either way. An older one is a relay sending the event again.
-- That dispute of that node was not seen in the last 30 minutes.
+- That dispute of that node did not ring in the last 30 minutes.
 - The node has not spent its allowance: 5 dispute pushes at once, refilled at one every 12 seconds.
 
 What a client can rely on, and what it cannot:
