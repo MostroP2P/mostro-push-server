@@ -527,9 +527,14 @@ impl EventHandler {
             return None;
         };
         if !is_fresh(event.created_at, Timestamp::now()) {
-            debug!(
-                "Ignoring dispute event {} node={}: not signed in the last minutes",
-                event.id, log_node
+            // Loud: with this server's clock or the node's off by more than
+            // the window, every dispute of the node is dropped here.
+            warn!(
+                "Ignoring dispute event {} node={}: signed at {}, more than {}s from this clock",
+                event.id,
+                log_node,
+                event.created_at.as_secs(),
+                DISPUTE_FRESHNESS.as_secs()
             );
             return None;
         }
@@ -581,7 +586,8 @@ struct FanoutOutcome {
     delivered: usize,
     /// The backend did not take the push, for a reason that does not condemn
     /// the token; no backend sends it to the device's platform; or the token
-    /// is dead and its watch could not be removed.
+    /// is dead and its watch could not be removed, or was kept because the
+    /// fan-out delivered nothing.
     failed: usize,
     /// Devices whose token the backend no longer knows, and whose watch is
     /// gone: removed here, or by the device itself meanwhile.
@@ -675,12 +681,30 @@ async fn ring_watchers(
 /// Removes the watches of the tokens a fan-out found dead. After the sends
 /// and outside their deadline: a removal is a write to disk, and must not be
 /// cut halfway.
+///
+/// Only when the same fan-out delivered a push: that is what shows the
+/// backend's "unregistered" is about the token and not about this server. If
+/// a wrong credential or project made the backend answer that for every
+/// token, the first dispute of each node would otherwise empty its list, on
+/// disk too. The price is a dead watch kept until it expires when no device
+/// of the node could be told.
 async fn remove_dead_watches(
     watcher_store: &WatcherStore,
     node: &str,
     dead: Vec<String>,
     outcome: &mut FanoutOutcome,
 ) {
+    if dead.is_empty() {
+        return;
+    }
+    if outcome.delivered == 0 {
+        warn!(
+            "The backend knows none of {} tokens and took no push: keeping their watches",
+            dead.len()
+        );
+        outcome.failed += dead.len();
+        return;
+    }
     for device_token in dead {
         match watcher_store.unwatch(node, &device_token).await {
             // `false` when it stopped watching by itself meanwhile: the
@@ -1572,6 +1596,32 @@ mod tests {
         assert_eq!(outcome.devices, 1);
     }
 
+    /// A wrong credential or project could make the backend call every token
+    /// unregistered. Without one push delivered nothing says it is the
+    /// tokens, so no watch is removed.
+    #[tokio::test]
+    async fn no_watch_is_removed_when_no_push_was_delivered() {
+        let f = dispute_fixture(ScriptedBackend::refusing(&[
+            (WATCHER_1, PushErrorKind::Unregistered),
+            (WATCHER_2, PushErrorKind::Unregistered),
+        ]));
+        f.watch(WATCHER_1).await;
+        f.watch(WATCHER_2).await;
+
+        let outcome = f.ring(DISPUTE_ID).await;
+
+        assert_eq!(
+            outcome,
+            FanoutOutcome {
+                devices: 2,
+                failed: 2,
+                ..FanoutOutcome::default()
+            }
+        );
+        assert!(f.is_watching(WATCHER_1).await);
+        assert!(f.is_watching(WATCHER_2).await);
+    }
+
     /// None of these says the token is gone: a wrong credential or a payload
     /// this server built wrong reads the same for every device.
     #[tokio::test]
@@ -1651,7 +1701,8 @@ mod tests {
         f.watch(WATCHER_1).await;
         let node = f.node.public_key().to_hex();
         let mut outcome = FanoutOutcome {
-            devices: 2,
+            devices: 3,
+            delivered: 1,
             ..FanoutOutcome::default()
         };
 
