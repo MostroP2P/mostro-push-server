@@ -133,6 +133,27 @@ impl WatcherStore {
             .is_some_and(|devices| devices.contains_key(device_token))
     }
 
+    /// The devices watching `mostro_pubkey`, to ring them for a new dispute.
+    ///
+    /// A watch past its lifetime is left out even while the cleanup has not
+    /// removed it yet: the device stopped asking, so it is not rung. Memory
+    /// only, and the lock is released before anything is sent.
+    pub async fn watchers_of(&self, mostro_pubkey: &str) -> Vec<Watcher> {
+        let cutoff = (Utc::now() - ttl()).timestamp();
+        self.nodes
+            .read()
+            .await
+            .get(mostro_pubkey)
+            .map(|devices| {
+                devices
+                    .values()
+                    .filter(|watcher| watcher.watched_at.timestamp() >= cutoff)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether a new device could watch `mostro_pubkey` right now. Asked
     /// before the token is checked with FCM, so a full list costs no request;
     /// [`watch`](Self::watch) decides again when it stores.
@@ -436,6 +457,46 @@ mod tests {
         assert_eq!(store.cleanup_expired().await, 1);
         assert!(!store.is_watching(NODE_A, TOKEN_1).await);
         assert!(store.is_watching(NODE_A, TOKEN_2).await);
+    }
+
+    fn tokens(mut watchers: Vec<Watcher>) -> Vec<String> {
+        watchers.sort_by(|a, b| a.device_token.cmp(&b.device_token));
+        watchers.into_iter().map(|w| w.device_token).collect()
+    }
+
+    #[tokio::test]
+    async fn the_watchers_of_a_node_are_its_own_devices() {
+        let store = WatcherStore::new(salt());
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        watch(&store, NODE_A, TOKEN_2).await.unwrap();
+        watch(&store, NODE_B, TOKEN_3).await.unwrap();
+
+        assert_eq!(tokens(store.watchers_of(NODE_A).await), [TOKEN_1, TOKEN_2]);
+        assert_eq!(tokens(store.watchers_of(NODE_B).await), [TOKEN_3]);
+
+        store.unwatch(NODE_A, TOKEN_1).await.unwrap();
+        assert_eq!(tokens(store.watchers_of(NODE_A).await), [TOKEN_2]);
+    }
+
+    #[tokio::test]
+    async fn a_node_nobody_watches_has_no_watchers() {
+        let store = WatcherStore::new(salt());
+        assert!(store.watchers_of(NODE_A).await.is_empty());
+    }
+
+    /// The cleanup runs every few hours; an expired watch must not ring in
+    /// between.
+    #[tokio::test]
+    async fn an_expired_watch_is_not_among_the_watchers() {
+        let store = WatcherStore::new(salt());
+        watch(&store, NODE_A, TOKEN_1).await.unwrap();
+        watch(&store, NODE_A, TOKEN_2).await.unwrap();
+        age(&store, NODE_A, TOKEN_1, WATCH_TTL_DAYS + 1).await;
+        age(&store, NODE_A, TOKEN_2, WATCH_TTL_DAYS - 1).await;
+
+        assert_eq!(tokens(store.watchers_of(NODE_A).await), [TOKEN_2]);
+        // It was only left out: removing it is the cleanup's work.
+        assert!(store.is_watching(NODE_A, TOKEN_1).await);
     }
 
     #[tokio::test]

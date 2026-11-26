@@ -249,6 +249,7 @@ async fn main() -> std::io::Result<()> {
         config.clone(),
         dispatcher.clone(),
         token_store.clone(),
+        watcher_store.clone(),
         notify_log_salt.clone(),
         &trusted_mostro_pubkeys,
     )

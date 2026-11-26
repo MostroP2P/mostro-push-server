@@ -19,11 +19,13 @@ For deeper context (data flow, components, ops): [docs/architecture.md](docs/arc
 
 These are the privacy and compatibility invariants of the project. Reintroducing any of them is a regression.
 
-1. **The Nostr listener only pushes for kind-14 events authored by a trusted Mostro node.** `subscription_filter` in `src/nostr/listener.rs` asks relays for `kind 14` with `.authors(...)` set to `config/trusted_mostro_pubkeys.json`, and `EventHandler::handle` checks the author again (a relay may ignore the filter). nostr-sdk verifies every event's id and signature before delivering it, so the author cannot be forged. Do NOT drop the author filter nor re-add `kind 1059`:
+1. **The Nostr listener only pushes for kind-14 events, and for new disputes (kind 38386), authored by a trusted Mostro node.** `subscription_filter` in `src/nostr/listener.rs` asks relays for `kind 14` with `.authors(...)` set to `config/trusted_mostro_pubkeys.json`, and `EventHandler::handle` checks the author again (a relay may ignore the filter). nostr-sdk verifies every event's id and signature before delivering it, so the author cannot be forged. Do NOT drop the author filter nor re-add `kind 1059`:
    - Without it anyone could trigger a visible push by tagging a registered (public) `trade_pubkey`, and relays stream every kind-14 DM on the network.
    - Gift Wrap (NIP-59, `kind 1059`, protocol v1) is no longer used by any Mostro node nor the mobile app; every community node advertises `protocol_version = 2`.
    - P2P and dispute chat envelopes are addressed to a conversation key, never a `trade_pubkey`, so the listener never matched them; they reach devices through `/api/notify`.
    - The listener refuses to start with an empty trusted list, and allows each `trade_pubkey` at most `PUSHES_PER_TRADE_PER_MIN` (10) pushes per minute; nodes themselves are not limited.
+   - **Disputes are the only other subscription:** `dispute_subscription_filter` asks for `kind 38386` with `s` = `initiated` and the same `.authors(...)`, and `EventHandler::admit_dispute` checks the author and the status again. A dispute rings the devices watching its node (`WatcherStore`) once: its event must be signed within `DISPUTE_FRESHNESS` (10 min) of now, and its (node, dispute id) not rung in `DISPUTE_MEMORY` (30 min). Keep the memory above twice the freshness window, or a replay rings twice. Remember a dispute only when it is about to ring, after the allowance: the memory is shared by every node, and remembering what the allowance dropped lets one flooding node fill it and silence the others. Each node has `DISPUTE_PUSHES_PER_NODE_PER_MIN` (5). The push carries no dispute, node or party.
+   - **Only `Unregistered` removes a watch** after a failed dispute push. And only when the same fan-out delivered at least one push (`remove_dead_watches`): with none delivered the answer may be this server's doing too, and removing would empty every node's list on disk. `SenderMismatch` and `InvalidArgument` may be this server's doing (a wrong credential, a payload built wrong) and would then empty every node's list.
 
 2. **`/api/notify` is the *only* unauthenticated entry point with a strict privacy contract**:
    - Always `202 { "accepted": true }` on parse-valid input. Registered vs unregistered pubkeys MUST be indistinguishable (status, body, headers, timing).
@@ -64,6 +66,7 @@ These are the privacy and compatibility invariants of the project. Reintroducing
 - **Dispatch path is lock-free.** `PushDispatcher` (`src/push/dispatcher.rs`) owns an immutable `Arc<[Arc<dyn PushService>]>`. Do NOT add a `Mutex` around the dispatcher or its services slice.
 - **`/api/notify` spawn pile is capped at 50 permits.** This is intentionally distinct from `fly.toml`'s `hard_limit = 25` (inbound TCP connections vs in-flight outbound dispatch tasks).
 - **Listener dispatch is spawned, not awaited inline.** `EventHandler::handle` in `src/nostr/listener.rs` takes a permit from its own `Semaphore(50)` with `try_acquire_owned` (drops the push with a `warn!` when saturated; never `acquire().await`) and runs the push in a `tokio::spawn` task. Awaiting `dispatch` or a permit inside the notification loop would let one slow FCM/UnifiedPush call (UnifiedPush endpoints are registrant-chosen) stall events from every relay and overflow nostr-sdk's 4096-slot notification channel, which drops events without logging them.
+- **A dispute's pushes run in one spawned task, from a pool of their own.** `EventHandler::handle_dispute` always spawns, and the task takes one of `MAX_IN_FLIGHT_FANOUTS` (10) permits, waiting for it up to `FANOUT_MAX_WAIT` (2 min) when all are taken; `ring_watchers` then sends 25 at a time within `FANOUT_DEADLINE` (60 s). Never wait for the permit in `handle_dispute` itself, which runs in the notification loop, and do not go back to dropping a dispute that finds no permit: several nodes opening disputes together, or a relay sending the recent ones when the listener starts, would lose some. Do NOT take the permit from the trade pushes' `Semaphore(50)`: a busy minute of trades would then drop a dispute, which is every solver of a node. Dead watches are removed after the sends, outside the deadline and with the permit already given back, because a removal writes to disk and must not be cut halfway. `ring_watchers` shuffles the watchers, so the deadline does not leave the same devices unsent at every dispute.
 - **A dispute watch is stored, removed and checked in spawned tasks.** `watch_disputes` and `unwatch_disputes` in `src/api/disputes.rs` run the disk-then-memory change, and the FCM token check, in `tokio::spawn` and await the handle. Actix drops a handler when its caller hangs up; awaited inline, a write already on its way to SQLite would finish without the change to memory, and a token exchange with Google would be abandoned halfway.
 - **Token store** uses `tokio::sync::RwLock<HashMap>`. `TokenStore::get` clones the value out and drops the read guard before returning, so callers do not hold a guard across `await`. Mutations take the separate `write_order` mutex across the in-memory change and its SQLite write, so the database sees changes in memory order while readers never wait on the disk.
 - **Per-IP key fail-closed.** If `extract_client_ip` fails, the middleware returns `500`. Never share a global bucket — that defeats per-IP rate limiting.
@@ -92,7 +95,7 @@ src/
 │   ├── disputes.rs      # /api/disputes/watch and /unwatch handlers
 │   ├── rate_limit.rs    # per-IP / per-pubkey limiter middleware (governor)
 │   └── test_support.rs  # In-process test fixtures
-├── nostr/listener.rs    # Kind-14 subscription from trusted Mostro nodes, per-trade push limit
+├── nostr/listener.rs    # Kind-14 and new-dispute (kind 38386) subscriptions from trusted Mostro nodes, push limits, dispute fan-out
 ├── push/
 │   ├── mod.rs           # PushService trait
 │   ├── dispatcher.rs    # PushDispatcher (lock-free)
@@ -121,8 +124,8 @@ mobile app (`lib/core/config/communities.dart`) and may list other nodes the
 team trusts; adding a node means editing the file and deploying. It has two
 consumers:
 
-- **The Nostr listener (always):** only kind-14 events authored by these nodes
-  trigger a push (hard constraint 1). The server refuses to start with an
+- **The Nostr listener (always):** only kind-14 events, and new disputes
+  (kind 38386), authored by these nodes trigger a push (hard constraint 1). The server refuses to start with an
   empty list. Users of a node missing from the list get no trade-update
   pushes; `/api/notify` (chat) still works for them.
 - **`/api/register` (only with `TRUSTED_WHITELIST_ENABLED=true`):** the mobile
