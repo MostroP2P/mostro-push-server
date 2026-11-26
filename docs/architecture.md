@@ -47,7 +47,7 @@ Connects to all configured relays, subscribes to `kind 14` (Mostro protocol v2 N
 A second subscription, on the same connection and for the same authors, asks for `kind 38386` with `s` = `initiated`: the disputes those nodes open. Its `since` reaches 10 minutes back (kind 14's reaches one), so a dispute opened during a restart or a reconnect is not missed. A dispute event names no recipient; it goes to every device watching its node:
 
 - **Admission** (`EventHandler::admit_dispute`): the author again, the `s` tag again (a relay may ignore the filter), a `d` tag of at most 64 bytes, a `created_at` within 10 minutes of now either way (`DISPUTE_FRESHNESS`; the event's own date, not its `published_at` tag, since it is when the node signed this revision and what a relay's `since` compares), a (node, dispute id) not seen in the last 30 minutes (`DISPUTE_MEMORY`, in memory, 10 000 entries at most), and the node's allowance of 5 dispute pushes per minute. The memory lasts more than twice the freshness window, so no event is still fresh when its dispute is forgotten. A dispute is remembered before the limit is checked: one that was dropped must not ring later on a replay.
-- **Fan-out** (`ring_watchers`): `WatcherStore::watchers_of` copies the node's live watches out of memory, and one spawned task sends `PushKind::DisputeNew` to each, 25 at a time (`FANOUT_CONCURRENCY`), within 60 seconds in all (`FANOUT_DEADLINE`). The task holds one of 4 permits (`MAX_IN_FLIGHT_FANOUTS`) of a pool separate from the trade pushes': a busy minute of trades must not drop a dispute, which is every solver of a node rather than one trader. With every permit taken the dispute is dropped with a `warn!`, never waited for. Nothing is retried.
+- **Fan-out** (`ring_watchers`): `WatcherStore::watchers_of` copies the node's live watches out of memory, and one spawned task sends `PushKind::DisputeNew` to each, 25 at a time (`FANOUT_CONCURRENCY`), within 60 seconds in all (`FANOUT_DEADLINE`). The task holds one of 10 permits (`MAX_IN_FLIGHT_FANOUTS`) of a pool separate from the trade pushes': a busy minute of trades must not drop a dispute, which is every solver of a node rather than one trader. Ten is twice a node's burst, so disputes that arrive together each find a permit. With every permit taken the dispute is dropped with a `warn!`, never waited for. Nothing is retried.
 - **Dead tokens:** a watch whose token the backend reports as `Unregistered` is removed, after the sends and outside their deadline, since a removal writes to disk. `SenderMismatch`, `InvalidArgument` and every other failure remove nothing: a wrong credential or a payload built wrong would read the same for every device, and removing on it would silently empty a node's list.
 - **Logs:** the hashed node, the event id, and how many devices were watching, delivered, failed, removed and left unfinished. No token.
 
@@ -149,7 +149,7 @@ NostrListener.connect_and_listen
     │  first time for (node, dispute id) in 30 min
     │  per-node limit (5/min; drop if exceeded)
     │  WatcherStore.watchers_of(node)
-    │  try fan-out permit (4; drop if full), tokio::spawn
+    │  try fan-out permit (10; drop if full), tokio::spawn
     ▼
 ring_watchers: 25 at a time, 60 s in all
     │

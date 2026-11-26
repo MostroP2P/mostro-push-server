@@ -58,10 +58,15 @@ const DISPUTE_PUSHES_PER_NODE_PER_MIN: u32 = 5;
 /// from the trade pushes' permits, a busy minute of trades would drop a
 /// dispute, which is every solver of a node left unaware rather than one
 /// trader.
-const MAX_IN_FLIGHT_FANOUTS: usize = 4;
+///
+/// Twice [`DISPUTE_PUSHES_PER_NODE_PER_MIN`]: disputes that arrive together
+/// (a node opening several in one pass, a relay sending the recent ones
+/// after a reconnect) each hold a permit at the same moment, and a smaller
+/// pool would drop some that the node's allowance admits.
+const MAX_IN_FLIGHT_FANOUTS: usize = 10;
 
 /// Pushes one dispute keeps in flight. With [`MAX_IN_FLIGHT_FANOUTS`], at
-/// most a hundred requests to the push backend are open for disputes.
+/// most 250 requests to the push backend are open for disputes.
 const FANOUT_CONCURRENCY: usize = 25;
 
 /// How long the pushes of one dispute may take, all together. A node may
@@ -1516,6 +1521,23 @@ mod tests {
             .handle_dispute(new_dispute(&f.node, OTHER_DISPUTE_ID))
             .await;
         assert!(replay.is_none());
+    }
+
+    /// The allowance of a node and the pool must agree: a dispute the first
+    /// admits must not be dropped by the second.
+    #[tokio::test]
+    async fn every_dispute_of_a_node_s_burst_gets_a_fanout_permit() {
+        let f = dispute_fixture(ScriptedBackend::hanging(&[WATCHER_1]));
+        f.watch(WATCHER_1).await;
+
+        // All at once: none ends before the last one arrives.
+        for number in 0..DISPUTE_PUSHES_PER_NODE_PER_MIN {
+            let fanout = f
+                .handler
+                .handle_dispute(numbered_dispute(&f.node, number))
+                .await;
+            assert!(fanout.is_some(), "dispute {number} was dropped");
+        }
     }
 
     #[tokio::test]
